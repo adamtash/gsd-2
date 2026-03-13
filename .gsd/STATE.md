@@ -1,7 +1,7 @@
 # GSD State
 
 **Active Milestone:** M002 — Browser Tools Performance & Intelligence
-**Active Slice:** S03 — Screenshot pipeline
+**Active Slice:** S04 — Form intelligence
 **Phase:** planning
 **Requirements Status:** 7 active · 15 validated · 3 deferred · 3 out of scope
 
@@ -16,4 +16,4 @@
 - None
 
 ## Next Action
-Plan slice S03 (Screenshot pipeline).
+Plan slice S04 (Form intelligence).

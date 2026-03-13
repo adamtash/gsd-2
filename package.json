@@ -58,7 +58,8 @@
     "@gsd/pi-coding-agent": "*",
     "@gsd/pi-tui": "*",
     "picocolors": "^1.1.1",
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "sharp": "^0.34.5"
   },
   "bundleDependencies": [
     "@gsd/pi-agent-core",

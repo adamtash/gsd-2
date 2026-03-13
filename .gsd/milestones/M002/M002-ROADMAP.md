@@ -64,7 +64,7 @@ This milestone is complete only when all are true:
 - [x] **S02: Action pipeline performance** `risk:medium` `depends:[S01]`
   > After this: captureCompactPageState and postActionSummary are consolidated into fewer evaluate calls per action; settleAfterActionAdaptive short-circuits on zero-mutation actions; low-signal actions (scroll, hover, Tab) skip body text capture — verified by build success and behavioral spot-check.
 
-- [ ] **S03: Screenshot pipeline** `risk:low` `depends:[S01]`
+- [x] **S03: Screenshot pipeline** `risk:low` `depends:[S01]`
   > After this: constrainScreenshot uses sharp instead of canvas; browser_navigate returns no screenshot by default with an explicit parameter to opt in — verified by build success and running browser_navigate to confirm no screenshot in response.
 
 - [ ] **S04: Form intelligence** `risk:medium` `depends:[S01]`

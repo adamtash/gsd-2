@@ -6,6 +6,7 @@
  */
 
 import type { Frame, Page } from "playwright";
+import sharp from "sharp";
 import type { CompactPageState, CompactSelectorState } from "./state.js";
 import { formatCompactStateSummary } from "./utils.js";
 
@@ -120,61 +121,35 @@ export async function postActionSummary(p: Page, target?: Page | Frame): Promise
 
 /**
  * If either dimension of the image buffer exceeds MAX_SCREENSHOT_DIM,
- * downscale proportionally using the browser's canvas (zero dependencies).
- * Returns the original buffer unchanged if already within limits.
+ * downscale proportionally using sharp. Returns the original buffer
+ * unchanged if already within limits.
+ *
+ * `page` parameter is retained for ToolDeps signature stability (D008)
+ * but is no longer used — all processing is server-side via sharp.
  */
 export async function constrainScreenshot(
-	page: Page,
+	_page: Page,
 	buffer: Buffer,
 	mimeType: string,
 	quality: number,
 ): Promise<Buffer> {
-	let width: number;
-	let height: number;
+	const { width, height } = await sharp(buffer).metadata();
 
-	if (mimeType === "image/png") {
-		width = buffer.readUInt32BE(16);
-		height = buffer.readUInt32BE(20);
-	} else {
-		width = 0;
-		height = 0;
-		for (let i = 0; i < buffer.length - 8; i++) {
-			if (buffer[i] === 0xff && (buffer[i + 1] === 0xc0 || buffer[i + 1] === 0xc2)) {
-				height = buffer.readUInt16BE(i + 5);
-				width = buffer.readUInt16BE(i + 7);
-				break;
-			}
-		}
-	}
-
-	if (width <= MAX_SCREENSHOT_DIM && height <= MAX_SCREENSHOT_DIM) {
+	if (
+		width !== undefined &&
+		height !== undefined &&
+		width <= MAX_SCREENSHOT_DIM &&
+		height <= MAX_SCREENSHOT_DIM
+	) {
 		return buffer;
 	}
 
-	const b64 = buffer.toString("base64");
-	const result = await page.evaluate(
-		async ({ b64, mime, maxDim, q }) => {
-			const img = new Image();
-			await new Promise<void>((resolve, reject) => {
-				img.onload = () => resolve();
-				img.onerror = reject;
-				img.src = `data:${mime};base64,${b64}`;
-			});
-			const scale = Math.min(maxDim / img.width, maxDim / img.height);
-			const w = Math.round(img.width * scale);
-			const h = Math.round(img.height * scale);
-			const canvas = document.createElement("canvas");
-			canvas.width = w;
-			canvas.height = h;
-			const ctx = canvas.getContext("2d")!;
-			ctx.drawImage(img, 0, 0, w, h);
-			return canvas.toDataURL(mime, q / 100);
-		},
-		{ b64, mime: mimeType, maxDim: MAX_SCREENSHOT_DIM, q: quality },
-	);
+	const resizer = sharp(buffer).resize(MAX_SCREENSHOT_DIM, MAX_SCREENSHOT_DIM, { fit: "inside" });
 
-	const resizedB64 = result.split(",")[1];
-	return Buffer.from(resizedB64, "base64");
+	if (mimeType === "image/png") {
+		return Buffer.from(await resizer.png().toBuffer());
+	}
+	return Buffer.from(await resizer.jpeg({ quality }).toBuffer());
 }
 
 /** Capture a JPEG screenshot for error debugging. Returns base64 or null. */

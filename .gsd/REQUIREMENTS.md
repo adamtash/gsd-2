@@ -6,24 +6,24 @@ This file is the explicit capability and coverage contract for the project.
 
 ### R020 — Sharp-based screenshot resizing
 - Class: core-capability
-- Status: active
+- Status: validated
 - Description: constrainScreenshot uses the sharp Node library for image resizing instead of bouncing buffers through page canvas context. Faster, no page dependency.
 - Why it matters: The current approach sends full screenshot buffer to the page as base64, creates an Image, draws to canvas, exports, then sends back. This is slow and fragile (depends on working canvas context).
 - Source: user
 - Primary owning slice: M002/S03
 - Supporting slices: M002/S01
-- Validation: unmapped
+- Validation: constrainScreenshot uses sharp(buffer).metadata() and sharp(buffer).resize(). Zero page.evaluate calls in capture.ts. sharp added to root dependencies and extension peerDependencies. Build passes.
 - Notes: sharp added as a dependency. API: sharp(buffer).resize(w, h, { fit: 'inside' }).jpeg({ quality }).toBuffer()
 
 ### R021 — Opt-in screenshots on navigate
 - Class: core-capability
-- Status: active
+- Status: validated
 - Description: browser_navigate does not capture or return a screenshot by default. An explicit parameter (e.g. screenshot: true) opts in to screenshot capture.
 - Why it matters: The current always-inline screenshot is a large base64 payload in every navigation response. For many verifications the compact page summary + diff is sufficient. Significant token savings.
 - Source: user
 - Primary owning slice: M002/S03
 - Supporting slices: none
-- Validation: unmapped
+- Validation: browser_navigate has screenshot: Type.Optional(Type.Boolean({ default: false })) parameter. Screenshot capture gated with if (params.screenshot). browser_reload unchanged. Build passes.
 - Notes: Default is off. The agent can still use browser_screenshot explicitly when visual verification is needed.
 
 ### R022 — Form analysis tool (browser_analyze_form)
@@ -341,8 +341,8 @@ This file is the explicit capability and coverage contract for the project.
 | R017 | core-capability | validated | M002/S02 | M002/S01 | postActionSummary eliminated, countOpenDialogs removed from ToolDeps, consolidated capture pattern |
 | R018 | core-capability | validated | M002/S02 | none | explicit includeBodyText true/false per tool signal level, classification in D017 |
 | R019 | core-capability | validated | M002/S02 | none | zero_mutation_shortcut settle reason, combined readSettleState poll, 60ms/30ms thresholds in D019 |
-| R020 | core-capability | active | M002/S03 | M002/S01 | unmapped |
-| R021 | core-capability | active | M002/S03 | none | unmapped |
+| R020 | core-capability | validated | M002/S03 | M002/S01 | sharp-based constrainScreenshot, zero page.evaluate in capture.ts, build passes |
+| R021 | core-capability | validated | M002/S03 | none | screenshot param default false, capture gated, browser_reload unchanged, build passes |
 | R022 | core-capability | active | M002/S04 | M002/S01 | unmapped |
 | R023 | core-capability | active | M002/S04 | M002/S01 | unmapped |
 | R024 | core-capability | active | M002/S05 | M002/S01 | unmapped |
@@ -353,8 +353,8 @@ This file is the explicit capability and coverage contract for the project.
 
 ## Coverage Summary
 
-- Active requirements: 7
-- Validated requirements: 15
+- Active requirements: 5
+- Validated requirements: 17
 - Deferred requirements: 3
 - Out of scope: 3
-- Unmapped active requirements: 7
+- Unmapped active requirements: 5
