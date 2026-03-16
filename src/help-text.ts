@@ -24,7 +24,7 @@ export function printHelp(version: string): void {
   process.stdout.write(`GSD v${version} — Get Shit Done\n\n`)
   process.stdout.write('Usage: gsd [options] [message...]\n\n')
   process.stdout.write('Options:\n')
-  process.stdout.write('  --mode <text|json|rpc>   Output mode (default: interactive)\n')
+  process.stdout.write('  --mode <text|json|rpc|mcp> Output mode (default: interactive)\n')
   process.stdout.write('  --print, -p              Single-shot print mode\n')
   process.stdout.write('  --continue, -c           Resume the most recent session\n')
   process.stdout.write('  --model <id>             Override model (e.g. claude-opus-4-6)\n')

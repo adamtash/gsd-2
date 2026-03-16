@@ -29,7 +29,7 @@ export interface RecentFilesOptions {
 const EXEC_OPTS = {
   encoding: "utf-8" as const,
   timeout: 5000,
-  stdio: ["pipe", "pipe", "pipe"] as const,
+  stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
 };
 
 function git(cmd: string, cwd: string): string {

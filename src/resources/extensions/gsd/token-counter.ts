@@ -1,14 +1,17 @@
-import type { Tiktoken } from "tiktoken";
+interface TokenEncoder {
+	encode(text: string): Uint32Array | number[];
+}
 
-let encoder: Tiktoken | null = null;
+let encoder: TokenEncoder | null = null;
 let encoderFailed = false;
 
-async function getEncoder(): Promise<Tiktoken | null> {
+async function getEncoder(): Promise<TokenEncoder | null> {
 	if (encoder) return encoder;
 	if (encoderFailed) return null;
 	try {
-		const { encoding_for_model } = await import("tiktoken");
-		encoder = encoding_for_model("gpt-4o");
+		// @ts-ignore — tiktoken may not have type declarations in extensions tsconfig
+		const tiktoken = await import("tiktoken");
+		encoder = tiktoken.encoding_for_model("gpt-4o") as TokenEncoder;
 		return encoder;
 	} catch {
 		encoderFailed = true;
