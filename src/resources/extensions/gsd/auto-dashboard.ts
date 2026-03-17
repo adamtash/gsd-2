@@ -270,12 +270,56 @@ export function updateProgressWidget(
     let pulseBright = true;
     let cachedLines: string[] | undefined;
     let cachedWidth: number | undefined;
+    let disposed = false;
+    let activeAccountLine: string | undefined;
+    let activeAccountLimitLine: string | undefined;
+
+    const refreshActiveAccountSummary = async (): Promise<void> => {
+      const cmdCtx = accessors.getCmdCtx();
+      const provider = cmdCtx?.model?.provider;
+      if (!cmdCtx || !provider) {
+        if (activeAccountLine || activeAccountLimitLine) {
+          activeAccountLine = undefined;
+          activeAccountLimitLine = undefined;
+          cachedLines = undefined;
+          if (!disposed) tui.requestRender();
+        }
+        return;
+      }
+
+      const authStorage = cmdCtx.modelRegistry.authStorage;
+      try {
+        if (provider === "anthropic" || provider === "openai-codex") {
+          await authStorage.refreshProviderRateLimitInfo(provider);
+        }
+      } catch {
+        // Non-fatal: still show the active account label if live usage lookup fails.
+      }
+
+      const selected = authStorage.getSelectedCredential(provider);
+      const nextAccountLine = selected?.label ? `account: ${selected.label}` : undefined;
+      const summary = authStorage.formatActiveCredentialRateLimitSummary(provider);
+      const nextLimitLine = summary ? `limits: ${summary}` : undefined;
+
+      if (nextAccountLine !== activeAccountLine || nextLimitLine !== activeAccountLimitLine) {
+        activeAccountLine = nextAccountLine;
+        activeAccountLimitLine = nextLimitLine;
+        cachedLines = undefined;
+        if (!disposed) tui.requestRender();
+      }
+    };
+
+    void refreshActiveAccountSummary();
 
     const pulseTimer = setInterval(() => {
       pulseBright = !pulseBright;
       cachedLines = undefined;
       tui.requestRender();
     }, 800);
+
+    const activeAccountRefreshTimer = setInterval(() => {
+      void refreshActiveAccountSummary();
+    }, 5 * 60_000);
 
     // Refresh progress cache from disk every 5s so the widget reflects
     // task/slice completion mid-unit. Without this, the progress bar only
@@ -357,6 +401,14 @@ export function updateProgressWidget(
             `${pad}${theme.fg("dim", "→")} ${theme.fg("dim", `then ${next}`)}`,
             width,
           ));
+        }
+
+        if (activeAccountLine) {
+          lines.push("");
+          lines.push(truncateToWidth(theme.fg("dim", `${pad}${activeAccountLine}`), width));
+          if (activeAccountLimitLine) {
+            lines.push(truncateToWidth(theme.fg("dim", `${pad}${activeAccountLimitLine}`), width));
+          }
         }
 
         // ── Footer info (pwd, tokens, cost, context, model) ──────────────
@@ -447,7 +499,9 @@ export function updateProgressWidget(
         cachedWidth = undefined;
       },
       dispose() {
+        disposed = true;
         clearInterval(pulseTimer);
+        clearInterval(activeAccountRefreshTimer);
         if (progressRefreshTimer) clearInterval(progressRefreshTimer);
       },
     };

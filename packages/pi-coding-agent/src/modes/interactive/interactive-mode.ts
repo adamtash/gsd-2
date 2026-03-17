@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@gsd/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId } from "@gsd/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId, TextContent } from "@gsd/pi-ai";
 import type {
 	AutocompleteItem,
 	EditorAction,
@@ -71,6 +71,7 @@ import { BashExecutionComponent } from "./components/bash-execution.js";
 import { BorderedLoader } from "./components/bordered-loader.js";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.js";
+import { CredentialSelectorComponent } from "./components/credential-selector.js";
 import { CustomEditor } from "./components/custom-editor.js";
 import { CustomMessageComponent } from "./components/custom-message.js";
 import { DaxnutsComponent } from "./components/daxnuts.js";
@@ -203,6 +204,7 @@ export class InteractiveMode {
 	// Auto-retry state
 	private retryLoader: Loader | undefined = undefined;
 	private retryEscapeHandler?: () => void;
+	private rateLimitRefreshTimer: ReturnType<typeof setInterval> | undefined = undefined;
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -502,6 +504,8 @@ export class InteractiveMode {
 	 */
 	async run(): Promise<void> {
 		await this.init();
+		this.startRateLimitRefreshTimer();
+		void this.refreshActiveRateLimitInfo();
 
 		// Start version check asynchronously
 		this.checkForNewVersion().then((newVersion) => {
@@ -558,6 +562,9 @@ export class InteractiveMode {
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
+				if (/^\/gsd\s+auto(?:\s|$)/.test(userInput.trim())) {
+					void this.refreshActiveRateLimitInfo({ announce: true, reason: "Auto mode" });
+				}
 				await this.session.prompt(userInput);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -1253,6 +1260,38 @@ export class InteractiveMode {
 	private setExtensionStatus(key: string, text: string | undefined): void {
 		this.footerDataProvider.setExtensionStatus(key, text);
 		this.ui.requestRender();
+	}
+
+	private async refreshActiveRateLimitInfo(options?: { announce?: boolean; reason?: string }): Promise<void> {
+		const provider = this.session.state.model?.provider;
+		if (!provider || (provider !== "anthropic" && provider !== "openai-codex")) {
+			this.setExtensionStatus("rate-limits", undefined);
+			return;
+		}
+
+		try {
+			await this.session.modelRegistry.authStorage.refreshProviderRateLimitInfo(provider, this.session.sessionId);
+			const summary = this.session.modelRegistry.authStorage.formatActiveCredentialRateLimitSummary(
+				provider,
+				this.session.sessionId,
+			);
+			this.setExtensionStatus("rate-limits", summary);
+			if (options?.announce && summary && !this.session.isStreaming && !this.session.isCompacting) {
+				const prefix = options.reason ? `${options.reason}: ` : "";
+				this.showStatus(`${prefix}${summary}`);
+			}
+		} catch {
+			this.setExtensionStatus("rate-limits", undefined);
+		}
+	}
+
+	private startRateLimitRefreshTimer(): void {
+		if (this.rateLimitRefreshTimer) {
+			clearInterval(this.rateLimitRefreshTimer);
+		}
+		this.rateLimitRefreshTimer = setInterval(() => {
+			void this.refreshActiveRateLimitInfo({ announce: true, reason: "Active account" });
+		}, 5 * 60_000);
 	}
 
 	/**
@@ -2463,8 +2502,30 @@ export class InteractiveMode {
 				break;
 			}
 
+			case "account_switch": {
+				this.showStatus(`Switched ${event.provider} account ${event.from} → ${event.to}`);
+				void this.refreshActiveRateLimitInfo({ announce: true, reason: "Active account" });
+				this.ui.requestRender();
+				break;
+			}
+
+			case "account_pool_exhausted": {
+				this.showStatus(event.reason);
+				this.setExtensionStatus("rate-limits", event.reason);
+				this.ui.requestRender();
+				break;
+			}
+
+			case "account_pool_wait": {
+				this.showStatus(event.reason);
+				this.setExtensionStatus("rate-limits", event.reason);
+				this.ui.requestRender();
+				break;
+			}
+
 			case "fallback_provider_switch": {
 				this.showStatus(`Switched from ${event.from} → ${event.to} (${event.reason})`);
+				void this.refreshActiveRateLimitInfo({ announce: true, reason: "Active account" });
 				this.ui.requestRender();
 				break;
 			}
@@ -2486,11 +2547,12 @@ export class InteractiveMode {
 	/** Extract text content from a user message */
 	private getUserMessageText(message: Message): string {
 		if (message.role !== "user") return "";
-		const textBlocks =
-			typeof message.content === "string"
-				? [{ type: "text", text: message.content }]
-				: message.content.filter((c: { type: string }) => c.type === "text");
-		return textBlocks.map((c) => (c as { text: string }).text).join("");
+		if (typeof message.content === "string") {
+			return message.content;
+		}
+		return message.content.reduce((text: string, content: TextContent | ImageContent) => {
+			return content.type === "text" ? text + content.text : text;
+		}, "");
 	}
 
 	/**
@@ -3889,17 +3951,64 @@ export class InteractiveMode {
 					done();
 					this.ui.requestRender();
 				},
+				async (provider: string) => {
+					done();
+					await this.showSetActiveCredentialSelector(provider);
+					this.ui.requestRender();
+				},
+				async (provider: string) => {
+					done();
+					await this.showLogoutCredentialSelector(provider);
+					this.ui.requestRender();
+				},
 			);
 			return { component, focus: component };
+		});
+	}
+
+	private async showSetActiveCredentialSelector(providerId: string): Promise<void> {
+		const credentials = this.session.modelRegistry.authStorage.getCredentialPool(providerId, this.session.sessionId);
+
+		if (credentials.length === 0) {
+			this.showStatus(`No accounts configured for ${providerId}.`);
+			return;
+		}
+
+		if (credentials.length === 1) {
+			this.session.modelRegistry.authStorage.setPreferredCredential(providerId, credentials[0].id);
+			this.showStatus(`Set ${credentials[0].label} as the default ${providerId} account`);
+			void this.refreshActiveRateLimitInfo({ announce: true, reason: "Active account" });
+			this.ui.requestRender();
+			return;
+		}
+
+		this.showSelector((done) => {
+			const selector = new CredentialSelectorComponent(
+				providerId,
+				credentials,
+				async (credentialId: string) => {
+					done();
+					const preferred = this.session.modelRegistry.authStorage.setPreferredCredential(providerId, credentialId);
+					if (preferred) {
+						this.showStatus(`Set ${preferred.label ?? providerId} as the default ${providerId} account`);
+						void this.refreshActiveRateLimitInfo({ announce: true, reason: "Active account" });
+						this.ui.requestRender();
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				`Select ${providerId} account to make active:`,
+			);
+			return { component: selector, focus: selector };
 		});
 	}
 
 	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
 		if (mode === "logout") {
 			const providers = this.session.modelRegistry.authStorage.list();
-			const loggedInProviders = providers.filter(
-				(p) => this.session.modelRegistry.authStorage.get(p)?.type === "oauth",
-			);
+			const loggedInProviders = providers.filter((p) => this.session.modelRegistry.authStorage.hasOAuth(p));
 			if (loggedInProviders.length === 0) {
 				this.showStatus("No OAuth providers logged in. Use /login first.");
 				return;
@@ -3913,7 +4022,7 @@ export class InteractiveMode {
 				(providerId: string) => {
 					done();
 
-					// OAuthSelectorComponent calls this synchronously (no await),
+				// OAuthSelectorComponent calls this synchronously (no await),
 					// so we must catch async errors here to prevent unhandled rejections
 					// when the user cancels the login dialog (#821).
 					const handleAsync = async () => {
@@ -3965,8 +4074,76 @@ export class InteractiveMode {
 		});
 	}
 
+	private async showLogoutCredentialSelector(providerId: string): Promise<void> {
+		const providerInfo = this.session.modelRegistry.authStorage
+			.getOAuthProviders()
+			.find((p: { id: string; name?: string }) => p.id === providerId);
+		const providerName = providerInfo?.name || providerId;
+		const oauthCredentials = this.session.modelRegistry.authStorage
+			.getCredentialPool(providerId, this.session.sessionId)
+			.filter((credential) => credential.type === "oauth");
+
+		if (oauthCredentials.length === 0) {
+			this.showStatus("No OAuth accounts available to remove.");
+			return;
+		}
+
+		const removeCredential = async (credentialId: string): Promise<void> => {
+			try {
+				this.session.modelRegistry.authStorage.removeCredential(providerId, credentialId);
+				this.session.modelRegistry.refresh();
+				await this.updateAvailableProviderCount();
+
+				const remainingOAuth = this.session.modelRegistry.authStorage.hasOAuth(providerId);
+				const currentModel = this.session.model;
+				if (currentModel?.provider === providerId && !remainingOAuth) {
+					try {
+						const available = this.session.modelRegistry.getAvailable();
+						const fallbackProvider = available.find((m) => m.provider !== providerId)?.provider;
+						const fallback = fallbackProvider
+							? this.session.modelRegistry.getPreferredModelForProvider(fallbackProvider)
+							: undefined;
+						if (fallback) {
+							await this.session.setModel(fallback);
+						}
+					} catch {
+						// Model switch failed — user can manually switch via /model
+					}
+				}
+
+				this.showStatus(`Removed ${providerName} account`);
+			} catch (error: unknown) {
+				this.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		};
+
+		if (oauthCredentials.length === 1) {
+			await removeCredential(oauthCredentials[0].id);
+			return;
+		}
+
+		this.showSelector((done) => {
+			const selector = new CredentialSelectorComponent(
+				providerId,
+				oauthCredentials,
+				async (credentialId: string) => {
+					done();
+					await removeCredential(credentialId);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				`Select ${providerId} account to remove:`,
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
 	private async showLoginDialog(providerId: string): Promise<void> {
-		const providerInfo = this.session.modelRegistry.authStorage.getOAuthProviders().find((p) => p.id === providerId);
+		const providerInfo = this.session.modelRegistry.authStorage
+			.getOAuthProviders()
+			.find((p: { id: string; name?: string; usesCallbackServer?: boolean }) => p.id === providerId);
 		const providerName = providerInfo?.name || providerId;
 
 		// Providers that use callback servers (can paste redirect URL)
@@ -4054,7 +4231,7 @@ export class InteractiveMode {
 					const currentKey = await this.session.modelRegistry.getApiKey(currentModel);
 					if (!currentKey) {
 						const available = this.session.modelRegistry.getAvailable();
-						const newProviderModel = available.find((m) => m.provider === providerId);
+						const newProviderModel = this.session.modelRegistry.getPreferredModelForProvider(providerId);
 						if (newProviderModel) {
 							await this.session.setModel(newProviderModel);
 						} else if (available.length > 0) {
@@ -4066,7 +4243,11 @@ export class InteractiveMode {
 				// Model switch failed — user can manually switch via /model
 			}
 
-			this.showStatus(`Logged in to ${providerName}. Credentials saved to ${getAuthPath()}`);
+			const oauthCount = this.session.modelRegistry.authStorage
+				.getCredentialPool(providerId, this.session.sessionId)
+				.filter((credential) => credential.type === "oauth").length;
+			const accountSuffix = oauthCount > 1 ? ` (${oauthCount} accounts)` : "";
+			this.showStatus(`Logged in to ${providerName}${accountSuffix}. Credentials saved to ${getAuthPath()}`);
 		} catch (error: unknown) {
 			restoreEditor();
 			// Also reject the manual code promise if it's still pending
@@ -4735,6 +4916,11 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		if (this.rateLimitRefreshTimer) {
+			clearInterval(this.rateLimitRefreshTimer);
+			this.rateLimitRefreshTimer = undefined;
+		}
+		this.footerDataProvider.setExtensionStatus("rate-limits", undefined);
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();

@@ -109,6 +109,7 @@
     "@types/picomatch": "^4.0.2",
     "c8": "^11.0.0",
     "jiti": "^2.6.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.4.0"
   },
   "optionalDependencies": {

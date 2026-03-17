@@ -1,7 +1,61 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { pauseAutoForProviderError } from "../provider-error-pause.ts";
+import { isRetryableProviderErrorDetail, maybePauseAutoForProviderError, pauseAutoForProviderError } from "../provider-error-pause.ts";
+
+test("isRetryableProviderErrorDetail detects rate-limit/provider retry errors", () => {
+  assert.equal(
+    isRetryableProviderErrorDetail(': 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit."}}'),
+    true,
+  );
+  assert.equal(isRetryableProviderErrorDetail(": terminated"), true);
+  assert.equal(isRetryableProviderErrorDetail(": invalid_api_key"), false);
+
+  // Server errors
+  assert.equal(isRetryableProviderErrorDetail(": 500 Internal Server Error"), true);
+  assert.equal(isRetryableProviderErrorDetail(": 502 Bad Gateway"), true);
+  assert.equal(isRetryableProviderErrorDetail(": 503 Service Unavailable"), true);
+  assert.equal(isRetryableProviderErrorDetail(": 504 Gateway Timeout"), true);
+
+  // Connection errors
+  assert.equal(isRetryableProviderErrorDetail(": connection refused"), true);
+  assert.equal(isRetryableProviderErrorDetail(": fetch failed"), true);
+  assert.equal(isRetryableProviderErrorDetail(": network unavailable"), true);
+  assert.equal(isRetryableProviderErrorDetail(": network is unavailable"), true);
+
+  // Overload
+  assert.equal(isRetryableProviderErrorDetail(": overloaded"), true);
+  assert.equal(isRetryableProviderErrorDetail(": too many requests"), true);
+
+  // Backoff
+  assert.equal(isRetryableProviderErrorDetail(": credentials temporarily backed off"), true);
+
+  // Non-retryable
+  assert.equal(isRetryableProviderErrorDetail(": invalid_api_key"), false);
+  assert.equal(isRetryableProviderErrorDetail(": permission denied"), false);
+  assert.equal(isRetryableProviderErrorDetail(""), false);
+});
+
+test("maybePauseAutoForProviderError does not pause on retryable 429 errors", async () => {
+  const notifications: Array<{ message: string; level: string }> = [];
+  let pauseCalls = 0;
+
+  const paused = await maybePauseAutoForProviderError(
+    {
+      notify(message, level?) {
+        notifications.push({ message, level: level ?? "info" });
+      },
+    },
+    ': 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
+    async () => {
+      pauseCalls += 1;
+    },
+  );
+
+  assert.equal(paused, false);
+  assert.equal(pauseCalls, 0);
+  assert.deepEqual(notifications, []);
+});
 
 test("pauseAutoForProviderError warns and pauses without requiring ctx.log", async () => {
   const notifications: Array<{ message: string; level: string }> = [];

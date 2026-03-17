@@ -60,6 +60,10 @@ export class FooterComponent implements Component {
 
 	render(width: number): string[] {
 		const state = this.session.state;
+		const activeCredentialPool = state.model
+			? this.session.modelRegistry.authStorage.getCredentialPool(state.model.provider, this.session.sessionId)
+			: [];
+		const backedOffCredentialCount = activeCredentialPool.filter((credential) => credential.isBackedOff).length;
 
 		const usageTotals = this.session.sessionManager.getUsageTotals();
 		const totalInput = usageTotals.input;
@@ -102,10 +106,15 @@ export class FooterComponent implements Component {
 		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
 
 		// Show cost with "(sub)" indicator if using OAuth subscription
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model
+			? this.session.modelRegistry.isUsingOAuth(state.model, this.session.sessionId)
+			: false;
 		if (totalCost || usingSubscription) {
 			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
 			statsParts.push(costStr);
+		}
+		if (backedOffCredentialCount > 0) {
+			statsParts.push(theme.fg("warning", `${backedOffCredentialCount} cooling`));
 		}
 
 		// Colorize context percentage based on usage
@@ -190,15 +199,22 @@ export class FooterComponent implements Component {
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 		const lines = [pwdLine, dimStatsLeft + dimRemainder];
 
-		// Add extension statuses on a single line, sorted by key alphabetically
 		const extensionStatuses = this.footerData.getExtensionStatuses();
+		const rateLimitStatus = extensionStatuses.get("rate-limits");
+		if (rateLimitStatus) {
+			const rateLimitLine = `${theme.fg("warning", "rate")} ${sanitizeStatusText(rateLimitStatus)}`;
+			lines.push(truncateToWidth(rateLimitLine, width, theme.fg("dim", "...")));
+		}
+
 		if (extensionStatuses.size > 0) {
 			const sortedStatuses = Array.from(extensionStatuses.entries())
+				.filter(([key]) => key !== "rate-limits")
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
-			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			if (sortedStatuses.length > 0) {
+				const statusLine = theme.fg("dim", sortedStatuses.join("  "));
+				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			}
 		}
 
 		return lines;

@@ -121,6 +121,9 @@ export type AgentSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| { type: "account_switch"; provider: string; from: string; to: string; reason: string }
+	| { type: "account_pool_exhausted"; provider: string; reason: string }
+	| { type: "account_pool_wait"; provider: string; waitMs: number; reason: string }
 	| { type: "fallback_provider_switch"; from: string; to: string; reason: string }
 	| { type: "fallback_provider_restored"; provider: string; reason: string }
 	| { type: "fallback_chain_exhausted"; reason: string };
@@ -553,8 +556,8 @@ export class AgentSession {
 		if (message.role !== "user") return "";
 		const content = message.content;
 		if (typeof content === "string") return content;
-		const textBlocks = content.filter((c) => c.type === "text");
-		return textBlocks.map((c) => (c as TextContent).text).join("");
+		const textBlocks = content.filter((c: TextContent | ImageContent): c is TextContent => c.type === "text");
+		return textBlocks.map((c: TextContent) => c.text).join("");
 	}
 
 	/** Find the last assistant message in agent state (including aborted ones) */
@@ -1008,7 +1011,7 @@ export class AgentSession {
 		// Validate API key
 		const apiKey = await this._modelRegistry.getApiKey(this.model, this.sessionId);
 		if (!apiKey) {
-			const isOAuth = this._modelRegistry.isUsingOAuth(this.model);
+			const isOAuth = this._modelRegistry.isUsingOAuth(this.model, this.sessionId);
 			if (isOAuth) {
 				throw new Error(
 					`Authentication failed for "${this.model.provider}". ` +
@@ -2443,6 +2446,21 @@ export class AgentSession {
 		return "unknown";
 	}
 
+	private _sanitizeLastAssistantForRetry(): void {
+		const messages = this.agent.state.messages;
+		if (messages.length === 0) return;
+		const last = messages[messages.length - 1];
+		if (last.role !== "assistant") return;
+
+		const sanitized: AssistantMessage = {
+			...last,
+			stopReason: "stop",
+			errorMessage: undefined,
+			retryAfterMs: undefined,
+		};
+		this.agent.replaceMessages([...messages.slice(0, -1), sanitized]);
+	}
+
 	/**
 	 * Handle retryable errors with exponential backoff.
 	 * When multiple credentials are available, marks the failing credential
@@ -2473,25 +2491,33 @@ export class AgentSession {
 		if (this.model && message.errorMessage) {
 			const errorType = this._classifyErrorType(message.errorMessage);
 			const isCredentialError = errorType !== "unknown";
-			const hasAlternate = isCredentialError && this._modelRegistry.authStorage.markUsageLimitReached(
+			const rotation = isCredentialError
+				? this._modelRegistry.authStorage.markUsageLimitReachedWithFallback(
 				this.model.provider,
 				this.sessionId,
 				{ errorType },
-			);
+				)
+				: { hasAlternate: false };
 
-			if (hasAlternate) {
-				// Remove error message from agent state
-				const messages = this.agent.state.messages;
-				if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-					this.agent.replaceMessages(messages.slice(0, -1));
-				}
+			if (rotation.hasAlternate) {
+				this._sanitizeLastAssistantForRetry();
+				const fromLabel = rotation.usedCredential?.label ?? "current account";
+				const toLabel = rotation.nextCredential?.label ?? "next account";
+
+				this._emit({
+					type: "account_switch",
+					provider: this.model.provider,
+					from: fromLabel,
+					to: toLabel,
+					reason: message.errorMessage,
+				});
 
 				this._emit({
 					type: "auto_retry_start",
 					attempt: this._retryAttempt + 1,
 					maxAttempts: settings.maxRetries,
 					delayMs: 0,
-					errorMessage: `${message.errorMessage} (switching credential)`,
+					errorMessage: `${message.errorMessage} (continuing on ${toLabel})`,
 				});
 
 				// Retry immediately with the next credential - don't increment _retryAttempt
@@ -2506,6 +2532,74 @@ export class AgentSession {
 
 			// All credentials are backed off. Try cross-provider fallback before giving up.
 			if (isCredentialError) {
+				let recoveryReason = `All configured accounts for ${this.model.provider} are temporarily backed off`;
+				try {
+					await this._modelRegistry.authStorage.refreshProviderRateLimitInfo(this.model.provider, this.sessionId);
+					const detailedRecovery = this._modelRegistry.authStorage.formatProviderRecoverySummary(
+						this.model.provider,
+						this.sessionId,
+					);
+					if (detailedRecovery) {
+						recoveryReason = detailedRecovery;
+					}
+				} catch {
+					// Fall back to generic backoff messaging if provider inspection fails.
+				}
+
+				this._emit({
+					type: "account_pool_exhausted",
+					provider: this.model.provider,
+					reason: recoveryReason,
+				});
+
+				const recoveryWindow = this._modelRegistry.authStorage.getEarliestCredentialRecovery(
+					this.model.provider,
+					this.sessionId,
+				);
+				if (recoveryWindow) {
+					this._emit({
+						type: "account_pool_wait",
+						provider: this.model.provider,
+						waitMs: recoveryWindow.waitMs,
+						reason: recoveryReason,
+					});
+
+					this._emit({
+						type: "auto_retry_start",
+						attempt: this._retryAttempt + 1,
+						maxAttempts: settings.maxRetries,
+						delayMs: recoveryWindow.waitMs,
+						errorMessage: `${message.errorMessage} (${recoveryReason})`,
+					});
+
+					this._retryAbortController = new AbortController();
+					try {
+						await sleep(recoveryWindow.waitMs, this._retryAbortController.signal);
+					} catch {
+						const attempt = this._retryAttempt;
+						this._retryAttempt = 0;
+						this._retryAbortController = undefined;
+						this._emit({
+							type: "auto_retry_end",
+							success: false,
+							attempt,
+							finalError: "Retry cancelled",
+						});
+						this._resolveRetry();
+						return false;
+					}
+					this._retryAbortController = undefined;
+
+					this._sanitizeLastAssistantForRetry();
+					setTimeout(() => {
+						this.agent.continue().catch(() => {
+							// Retry failed - will be caught by next agent_end
+						});
+					}, 0);
+
+					return true;
+				}
+
 				const fallbackResult = await this._fallbackResolver.findFallback(
 					this.model,
 					errorType,
@@ -2514,18 +2608,15 @@ export class AgentSession {
 				if (fallbackResult) {
 					// Swap to fallback model — don't persist to settings
 					const previousProvider = this.model.provider;
+					const previousModelId = this.model.id;
 					this.agent.setModel(fallbackResult.model);
 					this.sessionManager.appendModelChange(fallbackResult.model.provider, fallbackResult.model.id);
 
-					// Remove error message from agent state
-					const msgs = this.agent.state.messages;
-					if (msgs.length > 0 && msgs[msgs.length - 1].role === "assistant") {
-						this.agent.replaceMessages(msgs.slice(0, -1));
-					}
+					this._sanitizeLastAssistantForRetry();
 
 					this._emit({
 						type: "fallback_provider_switch",
-						from: `${previousProvider}/${this.model?.id}`,
+						from: `${previousProvider}/${previousModelId}`,
 						to: `${fallbackResult.model.provider}/${fallbackResult.model.id}`,
 						reason: fallbackResult.reason,
 					});
@@ -3193,7 +3284,7 @@ export class AgentSession {
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
 				const assistantMsg = message as AssistantMessage;
-				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
+				toolCalls += assistantMsg.content.filter((c: { type: string }) => c.type === "toolCall").length;
 				totalInput += assistantMsg.usage.input;
 				totalOutput += assistantMsg.usage.output;
 				totalCacheRead += assistantMsg.usage.cacheRead;

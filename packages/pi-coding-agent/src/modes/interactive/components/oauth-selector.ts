@@ -69,9 +69,11 @@ export class OAuthSelectorComponent extends Container {
 			const isSelected = i === this.selectedIndex;
 
 			// Check if user is logged in for this provider
-			const credentials = this.authStorage.get(provider.id);
-			const isLoggedIn = credentials?.type === "oauth";
-			const statusIndicator = isLoggedIn ? theme.fg("success", " ✓ logged in") : "";
+			const oauthCount = this.authStorage
+				.getCredentialPool(provider.id)
+				.filter((credential) => credential.type === "oauth").length;
+			const statusIndicator =
+				oauthCount > 0 ? theme.fg("success", ` ✓ ${oauthCount} account${oauthCount === 1 ? "" : "s"}`) : "";
 
 			let line = "";
 			if (isSelected) {

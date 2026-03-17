@@ -15,23 +15,54 @@ import {
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
 } from "@gsd/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@gsd/pi-ai/oauth";
+import { getOAuthProvider, getOAuthProviders } from "@gsd/pi-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
+import {
+	formatActiveRateLimitSummary,
+	formatProviderRecoverySummary,
+	inspectAnthropicRateLimit,
+	inspectOpenAICodexRateLimit,
+	type CredentialRateLimitInfo,
+} from "./rate-limit-inspector.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
+
+type AuthCredentialMetadata = {
+	id?: string;
+	label?: string;
+	addedAt?: number;
+	preferred?: boolean;
+};
 
 export type ApiKeyCredential = {
 	type: "api_key";
 	key: string;
-};
+} & AuthCredentialMetadata;
 
 export type OAuthCredential = {
 	type: "oauth";
-} & OAuthCredentials;
+} & OAuthCredentials & AuthCredentialMetadata;
 
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
+
+export interface AuthCredentialStatus {
+	id: string;
+	label: string;
+	type: AuthCredential["type"];
+	isActive: boolean;
+	isPreferred: boolean;
+	isBackedOff: boolean;
+	backoffRemainingMs: number;
+}
+
+export interface CredentialRecoveryWindow {
+	credentialId: string;
+	label: string;
+	availableAt: number;
+	waitMs: number;
+}
 
 /**
  * On-disk format: each provider maps to a single credential or an array of credentials.
@@ -137,7 +168,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 					randomize: true,
 				},
 				stale: 30000,
-				onCompromised: (err) => {
+				onCompromised: (err: Error) => {
 					lockCompromised = true;
 					lockCompromisedError = err;
 				},
@@ -193,6 +224,7 @@ const BACKOFF_RATE_LIMIT_MS = 30_000; // 30s for rate limit / 429
 const BACKOFF_QUOTA_EXHAUSTED_MS = 30 * 60_000; // 30min for quota exhausted
 const BACKOFF_SERVER_ERROR_MS = 20_000; // 20s for 5xx server errors
 const BACKOFF_DEFAULT_MS = 60_000; // 60s fallback
+const OAUTH_REFRESH_EARLY_MS = 60_000; // refresh shortly before expiry to avoid edge-of-expiry failures
 
 export type UsageLimitErrorType = "rate_limit" | "quota_exhausted" | "server_error" | "unknown";
 
@@ -225,6 +257,32 @@ function hashString(str: string): number {
 	return Math.abs(hash);
 }
 
+function createCredentialId(): string {
+	return `cred_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** Convert an array of credentials to the on-disk format (single value or array). */
+function toStorageEntry(credentials: AuthCredential[]): AuthCredential | AuthCredential[] | undefined {
+	if (credentials.length === 0) return undefined;
+	return credentials.length === 1 ? credentials[0] : credentials;
+}
+
+function getStringField(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
+	const parts = token.split(".");
+	if (parts.length !== 3) return undefined;
+	try {
+		const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+		const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+		return JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as Record<string, unknown>;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Credential storage backed by a JSON file.
  * Supports multiple credentials per provider with round-robin rotation and rate-limit fallback.
@@ -235,6 +293,8 @@ export class AuthStorage {
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
+	private activeCredentialIndex = new Map<string, number>();
+	private activeCredentialIndexBySession = new Map<string, Map<string, number>>();
 
 	/**
 	 * Round-robin index per provider. Incremented on each call to getApiKey
@@ -254,6 +314,11 @@ export class AuthStorage {
 	 * Map<provider, backoffExpiresAt>
 	 */
 	private providerBackoff: Map<string, number> = new Map();
+
+	/**
+	 * Cached provider-specific rate-limit snapshots keyed by provider and credential id.
+	 */
+	private credentialRateLimitInfo = new Map<string, Map<string, CredentialRateLimitInfo>>();
 
 	private constructor(private storage: AuthStorageBackend) {
 		this.reload();
@@ -308,15 +373,445 @@ export class AuthStorage {
 		return JSON.parse(content) as AuthStorageData;
 	}
 
+	private normalizeCredential(
+		provider: string,
+		credential: AuthCredential,
+		index: number,
+	): { credential: AuthCredential; changed: boolean } {
+		let changed = false;
+		const normalized = { ...credential } as AuthCredential;
+		if (normalized.type === "oauth") {
+			const enriched = this.enrichOAuthCredentialFromToken(normalized);
+			if (enriched !== normalized) {
+				Object.assign(normalized, enriched);
+				changed = true;
+			}
+		}
+		if (!normalized.id) {
+			normalized.id = createCredentialId();
+			changed = true;
+		}
+		if (!normalized.addedAt) {
+			normalized.addedAt = Date.now() + index;
+			changed = true;
+		}
+		const desiredLabel = this.getDesiredCredentialLabel(normalized, index);
+		if (!normalized.label || this.isGenericCredentialLabel(normalized)) {
+			if (normalized.label !== desiredLabel) {
+				normalized.label = desiredLabel;
+				changed = true;
+			}
+		} else if (normalized.label !== normalized.label.trim()) {
+			normalized.label = normalized.label.trim();
+			changed = true;
+		}
+		return { credential: normalized, changed };
+	}
+
+	private enrichOAuthCredentialFromToken(credential: OAuthCredential): OAuthCredential {
+		const accessPayload = decodeJwtPayload(credential.access);
+		const idToken = getStringField((credential as OAuthCredential & { idToken?: unknown }).idToken);
+		const idPayload = idToken ? decodeJwtPayload(idToken) : undefined;
+		const payloads = [accessPayload, idPayload].filter((payload): payload is Record<string, unknown> => Boolean(payload));
+
+		let accountId = getStringField((credential as OAuthCredential & { accountId?: unknown }).accountId);
+		let email = getStringField((credential as OAuthCredential & { email?: unknown }).email);
+		let displayName = getStringField((credential as OAuthCredential & { displayName?: unknown }).displayName);
+
+		for (const payload of payloads) {
+			accountId ||= getStringField(payload.accountId) || getStringField(payload.sub);
+			email ||= getStringField(payload.email) || getStringField(payload.preferred_username) || getStringField(payload.upn);
+			displayName ||= getStringField(payload.name);
+		}
+
+		if (!accountId && !email && !displayName) {
+			return credential;
+		}
+
+		return {
+			...credential,
+			...(accountId ? { accountId } : {}),
+			...(email ? { email } : {}),
+			...(displayName ? { displayName } : {}),
+		};
+	}
+
+	private isGenericCredentialLabel(credential: AuthCredential): boolean {
+		const label = credential.label?.trim();
+		if (!label) return true;
+		if (credential.type === "oauth") {
+			return /^subscription\s+\d+$/i.test(label);
+		}
+		return /^api key\s+\d+$/i.test(label);
+	}
+
+	private getDesiredCredentialLabel(credential: AuthCredential, index: number): string {
+		if (credential.type === "oauth") {
+			const email = getStringField((credential as OAuthCredential & { email?: unknown }).email);
+			if (email) return email;
+			const displayName = getStringField((credential as OAuthCredential & { displayName?: unknown }).displayName);
+			if (displayName) return displayName;
+			const accountId = getStringField((credential as OAuthCredential & { accountId?: unknown }).accountId);
+			if (accountId) return `Account ${accountId.slice(0, 8)}`;
+			return `Subscription ${index + 1}`;
+		}
+		return `API key ${index + 1}`;
+	}
+
+	private getOAuthCredentialIdentityKey(credential: OAuthCredential): string | undefined {
+		const accountId = getStringField((credential as OAuthCredential & { accountId?: unknown }).accountId);
+		if (accountId) {
+			return `account:${accountId.toLowerCase()}`;
+		}
+		const email = getStringField((credential as OAuthCredential & { email?: unknown }).email);
+		if (email) {
+			return `email:${email.toLowerCase()}`;
+		}
+		return undefined;
+	}
+
+	private findMatchingOAuthCredentialIndex(credentials: AuthCredential[], credential: OAuthCredential): number {
+		const identityKey = this.getOAuthCredentialIdentityKey(credential);
+		if (identityKey) {
+			const byIdentity = credentials.findIndex(
+				(existing) => existing.type === "oauth" && this.getOAuthCredentialIdentityKey(existing) === identityKey,
+			);
+			if (byIdentity >= 0) return byIdentity;
+		}
+		return credentials.findIndex(
+			(existing) => existing.type === "oauth" && existing.access === credential.access && existing.refresh === credential.refresh,
+		);
+	}
+
+	private mergeOAuthCredential(existing: OAuthCredential, incoming: OAuthCredential, index: number): OAuthCredential {
+		const merged = {
+			...existing,
+			...incoming,
+			id: existing.id,
+			addedAt: existing.addedAt,
+			preferred: incoming.preferred ?? existing.preferred,
+		} satisfies OAuthCredential;
+		return this.normalizeCredential("", merged, index).credential as OAuthCredential;
+	}
+
+	private normalizeProviderEntry(
+		provider: string,
+		entry: AuthCredential | AuthCredential[] | undefined,
+	): {
+		credentials: AuthCredential[];
+		entry: AuthCredential | AuthCredential[] | undefined;
+		changed: boolean;
+	} {
+		if (!entry) {
+			return { credentials: [], entry: undefined, changed: false };
+		}
+
+		const rawCredentials = Array.isArray(entry) ? entry : [entry];
+		let changed = false;
+		const credentials = rawCredentials.map((credential, index) => {
+			const normalized = this.normalizeCredential(provider, credential, index);
+			changed = changed || normalized.changed;
+			return normalized.credential;
+		});
+
+		return {
+			credentials,
+			entry: toStorageEntry(credentials),
+			changed,
+		};
+	}
+
+	private clearSelectionState(provider: string): void {
+		this.activeCredentialIndex.delete(provider);
+		this.activeCredentialIndexBySession.delete(provider);
+	}
+
+	private getStoredPreferredCredentialIndex(provider: string): number | undefined {
+		const credentials = this.getCredentialsForProvider(provider);
+		const index = credentials.findIndex((credential) => credential.preferred === true);
+		return index >= 0 ? index : undefined;
+	}
+
+	private setActiveCredentialIndex(provider: string, index: number, sessionId?: string): void {
+		if (sessionId) {
+			let bySession = this.activeCredentialIndexBySession.get(provider);
+			if (!bySession) {
+				bySession = new Map();
+				this.activeCredentialIndexBySession.set(provider, bySession);
+			}
+			bySession.set(sessionId, index);
+			return;
+		}
+		this.activeCredentialIndex.set(provider, index);
+	}
+
+	private getActiveCredentialIndex(provider: string, sessionId?: string): number | undefined {
+		if (sessionId) {
+			return this.activeCredentialIndexBySession.get(provider)?.get(sessionId);
+		}
+		return this.activeCredentialIndex.get(provider);
+	}
+
+	private getCredentialBackoffRemaining(provider: string, index: number): number {
+		const providerBackoff = this.credentialBackoff.get(provider);
+		if (!providerBackoff) return 0;
+		const expiresAt = providerBackoff.get(index);
+		if (expiresAt === undefined) return 0;
+		const remaining = expiresAt - Date.now();
+		if (remaining <= 0) {
+			providerBackoff.delete(index);
+			return 0;
+		}
+		return remaining;
+	}
+
+	private getPreferredCredentialIndex(provider: string, sessionId?: string): number {
+		const credentials = this.getCredentialsForProvider(provider);
+		if (credentials.length === 0) return -1;
+		const activeIndex = this.getActiveCredentialIndex(provider, sessionId);
+		if (activeIndex !== undefined && activeIndex < credentials.length) {
+			return activeIndex;
+		}
+		const storedPreferredIndex = this.getStoredPreferredCredentialIndex(provider);
+		if (storedPreferredIndex !== undefined && !this.isCredentialBackedOff(provider, storedPreferredIndex)) {
+			return storedPreferredIndex;
+		}
+		return this.selectCredentialIndex(provider, credentials, sessionId, { incrementRoundRobin: false });
+	}
+
+	private getCredentialIndexForRequest(
+		provider: string,
+		credentials: AuthCredential[],
+		sessionId?: string,
+	): number {
+		const activeIndex = this.getActiveCredentialIndex(provider, sessionId);
+		if (activeIndex !== undefined && activeIndex < credentials.length && !this.isCredentialBackedOff(provider, activeIndex)) {
+			return activeIndex;
+		}
+
+		const storedPreferredIndex = this.getStoredPreferredCredentialIndex(provider);
+		if (
+			storedPreferredIndex !== undefined &&
+			storedPreferredIndex < credentials.length &&
+			!this.isCredentialBackedOff(provider, storedPreferredIndex)
+		) {
+			return storedPreferredIndex;
+		}
+
+		return this.selectCredentialIndex(provider, credentials, sessionId);
+	}
+
 	/**
 	 * Normalize a storage entry to an array of credentials.
 	 * Handles both single credential (backward compat) and array formats.
 	 */
 	getCredentialsForProvider(provider: string): AuthCredential[] {
-		const entry = this.data[provider];
-		if (!entry) return [];
-		if (Array.isArray(entry)) return entry;
-		return [entry];
+		const normalized = this.normalizeProviderEntry(provider, this.data[provider]);
+		if (normalized.changed) {
+			this.data[provider] = normalized.entry!;
+		}
+		return normalized.credentials;
+	}
+
+	hasOAuth(provider: string): boolean {
+		return this.getCredentialsForProvider(provider).some((credential) => credential.type === "oauth");
+	}
+
+	getPrimaryOAuthCredential(provider: string): OAuthCredential | undefined {
+		const preferred = this.getSelectedCredential(provider);
+		if (preferred?.type === "oauth") {
+			return preferred;
+		}
+		const credential = this.getCredentialsForProvider(provider).find((entry) => entry.type === "oauth");
+		return credential?.type === "oauth" ? credential : undefined;
+	}
+
+	getSelectedCredential(provider: string, sessionId?: string): AuthCredential | undefined {
+		const credentials = this.getCredentialsForProvider(provider);
+		const index = this.getPreferredCredentialIndex(provider, sessionId);
+		if (index < 0 || index >= credentials.length) return undefined;
+		return credentials[index];
+	}
+
+	getCredentialPool(provider: string, sessionId?: string): AuthCredentialStatus[] {
+		const credentials = this.getCredentialsForProvider(provider);
+		const activeIndex = this.getPreferredCredentialIndex(provider, sessionId);
+		return credentials.map((credential, index) => {
+			const backoffRemainingMs = this.getCredentialBackoffRemaining(provider, index);
+			return {
+				id: credential.id!,
+				label: credential.label || `${credential.type === "oauth" ? "Subscription" : "API key"} ${index + 1}`,
+				type: credential.type,
+				isActive: index === activeIndex,
+				isPreferred: credential.preferred === true,
+				isBackedOff: backoffRemainingMs > 0,
+				backoffRemainingMs,
+			};
+		});
+	}
+
+	getProviderRateLimitInfo(provider: string, sessionId?: string): CredentialRateLimitInfo[] {
+		const cached = this.credentialRateLimitInfo.get(provider);
+		if (!cached) return [];
+		const pool = this.getCredentialPool(provider, sessionId);
+		const result: CredentialRateLimitInfo[] = [];
+		for (const credential of pool) {
+			const info = cached.get(credential.id);
+			if (!info) continue;
+			result.push({
+				...info,
+				isActive: credential.isActive,
+				isPreferred: credential.isPreferred,
+				isBackedOff: credential.isBackedOff,
+				backoffRemainingMs: credential.backoffRemainingMs,
+			});
+		}
+		return result;
+	}
+
+	formatActiveCredentialRateLimitSummary(provider: string, sessionId?: string): string | undefined {
+		const activeInfo = this.getProviderRateLimitInfo(provider, sessionId).find((info) => info.isActive);
+		return formatActiveRateLimitSummary(activeInfo);
+	}
+
+	formatProviderRecoverySummary(provider: string, sessionId?: string): string | undefined {
+		return formatProviderRecoverySummary(provider, this.getProviderRateLimitInfo(provider, sessionId));
+	}
+
+	getEarliestCredentialRecovery(provider: string, sessionId?: string): CredentialRecoveryWindow | undefined {
+		const now = Date.now();
+		const candidates = this.getProviderRateLimitInfo(provider, sessionId)
+			.map((info) => {
+				if (typeof info.availableAt === "number" && info.availableAt > now) {
+					return {
+						credentialId: info.credentialId,
+						label: info.label,
+						availableAt: info.availableAt,
+						waitMs: Math.max(1000, info.availableAt - now),
+					};
+				}
+				if ((info.backoffRemainingMs ?? 0) > 0) {
+					return {
+						credentialId: info.credentialId,
+						label: info.label,
+						availableAt: now + (info.backoffRemainingMs ?? 0),
+						waitMs: info.backoffRemainingMs ?? 0,
+					};
+				}
+				return undefined;
+			})
+			.filter((candidate): candidate is CredentialRecoveryWindow => Boolean(candidate))
+			.sort((left, right) => left.availableAt - right.availableAt);
+		return candidates[0];
+	}
+
+	async refreshProviderRateLimitInfo(provider: string, sessionId?: string): Promise<CredentialRateLimitInfo[]> {
+		if (provider !== "anthropic" && provider !== "openai-codex") {
+			this.credentialRateLimitInfo.delete(provider);
+			return [];
+		}
+
+		const credentials = this.getCredentialsForProvider(provider);
+		const snapshots = await Promise.all(
+			credentials.map(async (credential, index) => {
+				const label = credential.label || `${credential.type === "oauth" ? "Subscription" : "API key"} ${index + 1}`;
+				if (credential.type !== "oauth" || !credential.id) {
+					return {
+						credentialId: credential.id || `unknown-${index}`,
+						provider,
+						label,
+						fetchedAt: Date.now(),
+						fiveHour: null,
+						weekly: null,
+						isRateLimited: false,
+						availableAt: null,
+						error: "Rate limit inspection is only available for OAuth credentials",
+					} satisfies CredentialRateLimitInfo;
+				}
+
+				try {
+					const resolvedAccess = await this.resolveCredentialApiKey(provider, credential);
+					const latestCredential = this
+						.getCredentialsForProvider(provider)
+						.find((entry) => entry.id === credential.id && entry.type === "oauth");
+					const oauthCredential = latestCredential?.type === "oauth" ? latestCredential : credential;
+					const access = resolvedAccess ?? oauthCredential.access;
+					if (!access) {
+						throw new Error("OAuth access token unavailable for rate limit inspection");
+					}
+
+					if (provider === "anthropic") {
+						return await inspectAnthropicRateLimit(provider, credential.id, label, access);
+					}
+
+					return await inspectOpenAICodexRateLimit(provider, credential.id, label, {
+						access,
+						refresh: oauthCredential.refresh,
+						accountId: typeof (oauthCredential as AuthCredential & { accountId?: string }).accountId === "string"
+							? (oauthCredential as AuthCredential & { accountId?: string }).accountId
+							: undefined,
+						idToken: typeof (oauthCredential as AuthCredential & { idToken?: string }).idToken === "string"
+							? (oauthCredential as AuthCredential & { idToken?: string }).idToken
+							: undefined,
+					});
+				} catch (error) {
+					return {
+						credentialId: credential.id,
+						provider,
+						label,
+						fetchedAt: Date.now(),
+						fiveHour: null,
+						weekly: null,
+						isRateLimited: false,
+						availableAt: null,
+						error: error instanceof Error ? error.message : String(error),
+					} satisfies CredentialRateLimitInfo;
+				}
+			}),
+		);
+
+		const snapshotMap = new Map<string, CredentialRateLimitInfo>();
+		for (const snapshot of snapshots) {
+			snapshotMap.set(snapshot.credentialId, snapshot);
+		}
+		this.credentialRateLimitInfo.set(provider, snapshotMap);
+
+		let providerBackoff = this.credentialBackoff.get(provider);
+		if (!providerBackoff) {
+			providerBackoff = new Map();
+			this.credentialBackoff.set(provider, providerBackoff);
+		}
+		const now = Date.now();
+		credentials.forEach((credential, index) => {
+			const snapshot = credential.id ? snapshotMap.get(credential.id) : undefined;
+			if (!snapshot) return;
+			if (snapshot.isRateLimited && snapshot.availableAt && snapshot.availableAt > now) {
+				providerBackoff.set(index, snapshot.availableAt);
+				return;
+			}
+			if (!snapshot.isRateLimited) {
+				providerBackoff.delete(index);
+			}
+		});
+
+		return this.getProviderRateLimitInfo(provider, sessionId);
+	}
+
+	setPreferredCredential(provider: string, credentialId: string): AuthCredential | undefined {
+		const credentials = this.getCredentialsForProvider(provider);
+		const preferredIndex = credentials.findIndex((credential) => credential.id === credentialId);
+		if (preferredIndex === -1) return undefined;
+
+		const updated = credentials.map((credential, index) => ({
+			...credential,
+			preferred: index === preferredIndex,
+		}));
+
+		this.data[provider] = toStorageEntry(updated)!;
+		this.activeCredentialIndexBySession.delete(provider);
+		this.setActiveCredentialIndex(provider, preferredIndex);
+		this.persistProviderChange(provider, this.data[provider]);
+		return updated[preferredIndex];
 	}
 
 	/**
@@ -329,7 +824,13 @@ export class AuthStorage {
 				content = current;
 				return { result: undefined };
 			});
-			this.data = this.parseStorageData(content);
+			const parsed = this.parseStorageData(content);
+			const normalized: AuthStorageData = {};
+			for (const [provider, entry] of Object.entries(parsed)) {
+				normalized[provider] = this.normalizeProviderEntry(provider, entry).entry!;
+			}
+			this.data = normalized;
+			this.credentialRateLimitInfo.clear();
 			this.loadError = null;
 		} catch (error) {
 			this.loadError = error as Error;
@@ -343,11 +844,12 @@ export class AuthStorage {
 		}
 
 		try {
+			const normalizedCredential = this.normalizeProviderEntry(provider, credential).entry;
 			this.storage.withLock((current) => {
 				const currentData = this.parseStorageData(current);
 				const merged: AuthStorageData = { ...currentData };
-				if (credential) {
-					merged[provider] = credential;
+				if (normalizedCredential) {
+					merged[provider] = normalizedCredential;
 				} else {
 					delete merged[provider];
 				}
@@ -372,30 +874,70 @@ export class AuthStorage {
 	 * replaces (only one OAuth token per provider makes sense).
 	 */
 	set(provider: string, credential: AuthCredential): void {
+		const existing = this.getCredentialsForProvider(provider);
 		if (credential.type === "api_key") {
-			const existing = this.getCredentialsForProvider(provider);
+			const normalizedCredential = this.normalizeCredential(
+				provider,
+				credential,
+				existing.length,
+			).credential;
 			// Deduplicate: don't add if same key already exists
 			const isDuplicate = existing.some(
 				(c) => c.type === "api_key" && c.key === credential.key,
 			);
 			if (isDuplicate) return;
 
-			const updated = [...existing, credential];
-			this.data[provider] = updated.length === 1 ? updated[0] : updated;
-			this.persistProviderChange(provider, updated.length === 1 ? updated[0] : updated);
+			const updated = [...existing, normalizedCredential];
+			this.data[provider] = toStorageEntry(updated)!;
+			this.credentialRateLimitInfo.delete(provider);
+			this.persistProviderChange(provider, this.data[provider]);
 		} else {
-			// OAuth: replace any existing OAuth credential, keep API keys
-			const existing = this.getCredentialsForProvider(provider);
-			const apiKeys = existing.filter((c) => c.type === "api_key");
-			if (apiKeys.length === 0) {
-				this.data[provider] = credential;
-				this.persistProviderChange(provider, credential);
-			} else {
-				const updated = [...apiKeys, credential];
-				this.data[provider] = updated;
-				this.persistProviderChange(provider, updated);
+			const normalizedCredential = this.normalizeCredential(
+				provider,
+				credential,
+				existing.length,
+			).credential;
+			const oauthCredential = normalizedCredential.type === "oauth" ? normalizedCredential : undefined;
+			if (!oauthCredential) return;
+
+			const matchingIndex = this.findMatchingOAuthCredentialIndex(existing, oauthCredential);
+			if (matchingIndex >= 0) {
+				const current = existing[matchingIndex];
+				if (current?.type !== "oauth") return;
+				const merged = this.mergeOAuthCredential(current, oauthCredential, matchingIndex);
+				const updated = existing.map((entry, index) => (index === matchingIndex ? merged : entry));
+				this.data[provider] = toStorageEntry(updated)!;
+				this.credentialRateLimitInfo.delete(provider);
+				this.persistProviderChange(provider, this.data[provider]);
+				return;
 			}
+
+			const updated = [...existing, oauthCredential];
+			this.data[provider] = toStorageEntry(updated)!;
+			this.credentialRateLimitInfo.delete(provider);
+			this.persistProviderChange(provider, this.data[provider]);
 		}
+	}
+
+	removeCredential(provider: string, credentialId: string): AuthCredential | undefined {
+		const credentials = this.getCredentialsForProvider(provider);
+		const removed = credentials.find((credential) => credential.id === credentialId);
+		if (!removed) return undefined;
+
+		const remaining = credentials.filter((credential) => credential.id !== credentialId);
+		this.clearSelectionState(provider);
+		this.credentialBackoff.delete(provider);
+		this.providerBackoff.delete(provider);
+		this.credentialRateLimitInfo.delete(provider);
+
+		if (remaining.length === 0) {
+			this.remove(provider);
+			return removed;
+		}
+
+		this.data[provider] = toStorageEntry(remaining)!;
+		this.persistProviderChange(provider, this.data[provider]);
+		return removed;
 	}
 
 	/**
@@ -406,6 +948,8 @@ export class AuthStorage {
 		this.providerRoundRobinIndex.delete(provider);
 		this.credentialBackoff.delete(provider);
 		this.providerBackoff.delete(provider);
+		this.credentialRateLimitInfo.delete(provider);
+		this.clearSelectionState(provider);
 		this.persistProviderChange(provider, undefined);
 	}
 
@@ -551,7 +1095,12 @@ export class AuthStorage {
 	 * - Skips credentials that are currently backed off.
 	 * - Returns -1 if all credentials are backed off.
 	 */
-	private selectCredentialIndex(provider: string, credentials: AuthCredential[], sessionId?: string): number {
+	private selectCredentialIndex(
+		provider: string,
+		credentials: AuthCredential[],
+		sessionId?: string,
+		options?: { incrementRoundRobin?: boolean },
+	): number {
 		if (credentials.length === 0) return -1;
 		if (credentials.length === 1) {
 			return this.isCredentialBackedOff(provider, 0) ? -1 : 0;
@@ -563,7 +1112,9 @@ export class AuthStorage {
 		} else {
 			const current = this.providerRoundRobinIndex.get(provider) ?? 0;
 			startIndex = current % credentials.length;
-			this.providerRoundRobinIndex.set(provider, current + 1);
+			if (options?.incrementRoundRobin !== false) {
+				this.providerRoundRobinIndex.set(provider, current + 1);
+			}
 		}
 
 		// Try starting from the preferred index, wrapping around
@@ -590,8 +1141,20 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: { errorType?: UsageLimitErrorType },
 	): boolean {
+		return this.markUsageLimitReachedWithFallback(provider, sessionId, options).hasAlternate;
+	}
+
+	markUsageLimitReachedWithFallback(
+		provider: string,
+		sessionId?: string,
+		options?: { errorType?: UsageLimitErrorType },
+	): {
+		usedCredential?: AuthCredential;
+		nextCredential?: AuthCredential;
+		hasAlternate: boolean;
+	} {
 		const credentials = this.getCredentialsForProvider(provider);
-		if (credentials.length === 0) return false;
+		if (credentials.length === 0) return { hasAlternate: false };
 
 		const errorType = options?.errorType ?? "rate_limit";
 
@@ -599,7 +1162,7 @@ export class AuthStorage {
 		// don't back off the only credential — it would make getApiKey() return
 		// undefined and surface a misleading "Authentication failed" message.
 		if (errorType === "unknown" && credentials.length === 1) {
-			return false;
+			return { hasAlternate: false, usedCredential: credentials[0] };
 		}
 
 		const backoffMs = getBackoffDuration(errorType);
@@ -610,16 +1173,21 @@ export class AuthStorage {
 		if (credentials.length === 1) {
 			usedIndex = 0;
 		} else if (sessionId) {
-			usedIndex = hashString(sessionId) % credentials.length;
+			usedIndex = this.getActiveCredentialIndex(provider, sessionId) ?? (hashString(sessionId) % credentials.length);
 		} else {
-			// Round-robin was already incremented in getApiKey, so the last-used
-			// index is (current - 1). Note: in a concurrent scenario where another
-			// getApiKey call fires between the original request and this backoff call,
-			// we may back off the wrong credential index. This is acceptable because:
-			// (a) pi runs single-threaded event loop, (b) backing off the wrong key
-			// is safe — it self-heals when the backoff expires.
-			const current = this.providerRoundRobinIndex.get(provider) ?? 0;
-			usedIndex = ((current - 1) % credentials.length + credentials.length) % credentials.length;
+			const activeIndex = this.getActiveCredentialIndex(provider);
+			if (activeIndex !== undefined && activeIndex < credentials.length) {
+				usedIndex = activeIndex;
+			} else {
+				// Round-robin was already incremented in getApiKey, so the last-used
+				// index is (current - 1). Note: in a concurrent scenario where another
+				// getApiKey call fires between the original request and this backoff call,
+				// we may back off the wrong credential index. This is acceptable because:
+				// (a) pi runs single-threaded event loop, (b) backing off the wrong key
+				// is safe — it self-heals when the backoff expires.
+				const current = this.providerRoundRobinIndex.get(provider) ?? 0;
+				usedIndex = ((current - 1) % credentials.length + credentials.length) % credentials.length;
+			}
 		}
 
 		// Set backoff for this credential
@@ -629,14 +1197,20 @@ export class AuthStorage {
 			this.credentialBackoff.set(provider, providerBackoff);
 		}
 		providerBackoff.set(usedIndex, Date.now() + backoffMs);
+		const usedCredential = credentials[usedIndex];
 
 		// Check if any credential is still available
 		for (let i = 0; i < credentials.length; i++) {
 			if (!this.isCredentialBackedOff(provider, i)) {
-				return true;
+				this.setActiveCredentialIndex(provider, i, sessionId);
+				return {
+					hasAlternate: true,
+					usedCredential,
+					nextCredential: credentials[i],
+				};
 			}
 		}
-		return false;
+		return { hasAlternate: false, usedCredential };
 	}
 
 	/**
@@ -645,6 +1219,7 @@ export class AuthStorage {
 	 */
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
+		credentialId?: string,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
@@ -653,40 +1228,44 @@ export class AuthStorage {
 
 		const result = await this.storage.withLockAsync(async (current) => {
 			const currentData = this.parseStorageData(current);
-			this.data = currentData;
+			const normalized = this.normalizeProviderEntry(providerId, currentData[providerId]);
+			if (normalized.entry) {
+				currentData[providerId] = normalized.entry;
+			}
+			this.data = { ...this.data, ...currentData };
 			this.loadError = null;
 
 			// Find the OAuth credential for this provider
 			const creds = this.getCredentialsForProvider(providerId);
-			const cred = creds.find((c) => c.type === "oauth");
+			const cred = creds.find((c) => c.type === "oauth" && (!credentialId || c.id === credentialId));
 			if (!cred || cred.type !== "oauth") {
 				return { result: null };
 			}
 
-			if (Date.now() < cred.expires) {
+			if (Date.now() < cred.expires - OAUTH_REFRESH_EARLY_MS) {
 				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
 			}
 
-			const oauthCreds: Record<string, OAuthCredentials> = {};
-			for (const [key, value] of Object.entries(currentData)) {
-				const first = Array.isArray(value) ? value.find((c) => c.type === "oauth") : value;
-				if (first?.type === "oauth") {
-					oauthCreds[key] = first;
-				}
-			}
-
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-			if (!refreshed) {
-				return { result: null };
+			let refreshed: OAuthCredentials;
+			try {
+				refreshed = await provider.refreshToken(cred);
+			} catch {
+				throw new Error(`Failed to refresh OAuth token for ${providerId}`);
 			}
 
 			// Update the OAuth credential in-place within the array
 			const existingEntry = currentData[providerId];
-			const newOAuthCred: OAuthCredential = { type: "oauth", ...refreshed.newCredentials };
+			const newOAuthCred: OAuthCredential = {
+				...cred,
+				type: "oauth",
+				...refreshed,
+			};
 			let updatedEntry: AuthCredential | AuthCredential[];
 
 			if (Array.isArray(existingEntry)) {
-				updatedEntry = existingEntry.map((c) => (c.type === "oauth" ? newOAuthCred : c));
+				updatedEntry = existingEntry.map((c) =>
+					c.type === "oauth" && (!credentialId || c.id === credentialId) ? newOAuthCred : c,
+				);
 			} else {
 				updatedEntry = newOAuthCred;
 			}
@@ -697,7 +1276,13 @@ export class AuthStorage {
 			};
 			this.data = merged;
 			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
+			return {
+				result: {
+					newCredentials: refreshed,
+					apiKey: provider.getApiKey(refreshed),
+				},
+				next: JSON.stringify(merged, null, 2),
+			};
 		});
 
 		return result;
@@ -718,16 +1303,16 @@ export class AuthStorage {
 			const provider = getOAuthProvider(providerId);
 			if (!provider) return undefined;
 
-			const needsRefresh = Date.now() >= cred.expires;
+			const needsRefresh = Date.now() >= cred.expires - OAUTH_REFRESH_EARLY_MS;
 			if (needsRefresh) {
 				try {
-					const result = await this.refreshOAuthTokenWithLock(providerId);
+					const result = await this.refreshOAuthTokenWithLock(providerId, cred.id);
 					if (result) return result.apiKey;
 				} catch (error) {
 					this.recordError(error);
 					this.reload();
 					const updatedCreds = this.getCredentialsForProvider(providerId);
-					const updatedOAuth = updatedCreds.find((c) => c.type === "oauth");
+					const updatedOAuth = updatedCreds.find((c) => c.type === "oauth" && c.id === cred.id);
 					if (updatedOAuth?.type === "oauth" && Date.now() < updatedOAuth.expires) {
 						return provider.getApiKey(updatedOAuth);
 					}
@@ -762,8 +1347,11 @@ export class AuthStorage {
 		const credentials = this.getCredentialsForProvider(providerId);
 
 		if (credentials.length > 0) {
-			const index = this.selectCredentialIndex(providerId, credentials, sessionId);
+			const index = this.getCredentialIndexForRequest(providerId, credentials, sessionId);
 			if (index >= 0) {
+				if (sessionId || this.getStoredPreferredCredentialIndex(providerId) !== undefined) {
+					this.setActiveCredentialIndex(providerId, index, sessionId);
+				}
 				return this.resolveCredentialApiKey(providerId, credentials[index]);
 			}
 			// All credentials backed off - fall through to env/fallback

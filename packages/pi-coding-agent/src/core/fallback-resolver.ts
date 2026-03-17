@@ -46,9 +46,7 @@ export class FallbackResolver {
 
 		// Search all chains for one containing the current model
 		for (const [chainName, entries] of Object.entries(chains)) {
-			const currentIndex = entries.findIndex(
-				(e) => e.provider === currentModel.provider && e.model === currentModel.id,
-			);
+			const currentIndex = this._findChainIndex(entries, currentModel);
 
 			if (currentIndex === -1) continue;
 
@@ -75,9 +73,7 @@ export class FallbackResolver {
 		if (!enabled) return null;
 
 		for (const [chainName, entries] of Object.entries(chains)) {
-			const currentIndex = entries.findIndex(
-				(e) => e.provider === currentModel.provider && e.model === currentModel.id,
-			);
+			const currentIndex = this._findChainIndex(entries, currentModel);
 
 			if (currentIndex === -1) continue;
 
@@ -118,12 +114,21 @@ export class FallbackResolver {
 		const result: string[] = [];
 
 		for (const [chainName, entries] of Object.entries(chains)) {
-			if (entries.some((e) => e.provider === provider && e.model === modelId)) {
+			if (entries.some((e) => e.provider === provider)) {
 				result.push(chainName);
 			}
 		}
 
 		return result;
+	}
+
+	private _findChainIndex(entries: FallbackChainEntry[], currentModel: Model<Api>): number {
+		const exactIndex = entries.findIndex(
+			(entry) => entry.provider === currentModel.provider && entry.model === currentModel.id,
+		);
+		if (exactIndex !== -1) return exactIndex;
+
+		return entries.findIndex((entry) => entry.provider === currentModel.provider);
 	}
 
 	/**
@@ -145,8 +150,9 @@ export class FallbackResolver {
 				continue;
 			}
 
-			// Check if model exists in registry
-			const model = this.modelRegistry.find(entry.provider, entry.model);
+			// Resolve an appropriate model for the target provider.
+			// Prefer the chain's explicit model, then fall back to the provider default.
+			const model = this.modelRegistry.getPreferredModelForProvider(entry.provider, entry.model);
 			if (!model) continue;
 
 			// Check if API key is available
@@ -156,7 +162,7 @@ export class FallbackResolver {
 			return {
 				model,
 				chainName,
-				reason: `falling back to ${entry.provider}/${entry.model}`,
+				reason: `falling back to ${entry.provider}/${model.id}`,
 			};
 		}
 

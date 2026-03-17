@@ -63,7 +63,9 @@ See [Parallel Orchestration](./parallel-orchestration.md) for full documentation
 | `/exit` | Graceful shutdown — saves session state before exiting |
 | `/kill` | Kill GSD process immediately |
 | `/model` | Switch the active model |
-| `/login` | Log in to an LLM provider |
+| `/provider` | Open the provider manager to review providers, set defaults, discover models, and remove accounts |
+| `/login` | Log in to an LLM provider; repeated logins add another subscription account |
+| `/logout` | Remove a specific logged-in subscription account |
 | `/thinking` | Toggle thinking level during sessions |
 | `/voice` | Toggle real-time speech-to-text (macOS, Linux) |
 

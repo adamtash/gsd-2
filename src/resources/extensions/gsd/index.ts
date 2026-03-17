@@ -58,7 +58,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { shortcutDesc } from "../shared/terminal.js";
 import { Text } from "@gsd/pi-tui";
-import { pauseAutoForProviderError } from "./provider-error-pause.js";
+import { maybePauseAutoForProviderError, pauseAutoForProviderError } from "./provider-error-pause.js";
 import { toPosixPath } from "../shared/path-display.js";
 
 // ── Agent Instructions ────────────────────────────────────────────────────
@@ -726,6 +726,13 @@ export default function (pi: ExtensionAPI) {
         "errorMessage" in lastMsg && lastMsg.errorMessage
           ? `: ${lastMsg.errorMessage}`
           : "";
+
+      // Retryable provider errors are already handled by AgentSession's
+      // credential rotation / timed wait logic. Pausing auto-mode here races
+      // against that flow and leaves auto stuck at "Retrying in 0s...".
+      if (await maybePauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi))) {
+        return;
+      }
 
       const dash = getAutoDashboardData();
       if (dash.currentUnit) {

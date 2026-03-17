@@ -6,7 +6,7 @@
  * Toggled with Ctrl+Alt+G (⌃⌥G on macOS) or opened from /gsd status.
  */
 
-import type { Theme } from "@gsd/pi-coding-agent";
+import { AuthStorage, type Theme } from "@gsd/pi-coding-agent";
 import { truncateToWidth, visibleWidth, matchesKey, Key } from "@gsd/pi-tui";
 import { deriveState } from "./state.js";
 import { loadFile, parseRoadmap, parsePlan } from "./files.js";
@@ -81,6 +81,39 @@ function fitColumns(parts: string[], width: number, separator = "  "): string {
   return truncateToWidth(result, width);
 }
 
+function formatResetTime(resetAt: number | null | undefined): string {
+  if (!resetAt) return "unknown";
+  return new Date(resetAt).toLocaleString("en-US", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatLimitWindow(label: string, window: { utilization: number | null; resetsAt: number | null } | null): string {
+  if (!window) return `${label} n/a`;
+  const utilization = window.utilization == null ? "n/a" : `${Math.round(window.utilization)}%`;
+  return `${label} ${utilization} reset ${formatResetTime(window.resetsAt)}`;
+}
+
+type DashboardAccountRow = {
+  provider: string;
+  label: string;
+  email?: string;
+  displayName?: string;
+  accountId?: string;
+  organizationName?: string;
+  subscriptionType?: string;
+  rateLimitTier?: string;
+  isActive: boolean;
+  isPreferred: boolean;
+  isBackedOff: boolean;
+  hasRateLimits: boolean;
+  rateLimitSummary?: string;
+  status: string;
+};
+
 export class GSDDashboardOverlay {
   private tui: { requestRender: () => void };
   private theme: Theme;
@@ -91,6 +124,7 @@ export class GSDDashboardOverlay {
   private scrollOffset = 0;
   private dashData: AutoDashboardData;
   private milestoneData: MilestoneView | null = null;
+  private accountRows: DashboardAccountRow[] = [];
   private loading = true;
   private loadedDashboardIdentity?: string;
   private refreshInFlight: Promise<void> | null = null;
@@ -165,6 +199,8 @@ export class GSDDashboardOverlay {
   private async loadData(): Promise<boolean> {
     const base = this.dashData.basePath || process.cwd();
     try {
+      await this.loadAccountRows();
+
       const state = await deriveState(base);
       if (!state.activeMilestone) {
         this.milestoneData = null;
@@ -229,6 +265,77 @@ export class GSDDashboardOverlay {
       // Don't crash the overlay
       return false;
     }
+  }
+
+  private async loadAccountRows(): Promise<void> {
+    const authStorage = AuthStorage.create();
+    authStorage.reload();
+
+    const providers = authStorage.list().sort((left, right) => left.localeCompare(right));
+    await Promise.all(providers.map(async (provider) => {
+      if (provider === "anthropic" || provider === "openai-codex") {
+        try {
+          await authStorage.refreshProviderRateLimitInfo(provider);
+        } catch {
+          // Non-fatal: show account info even if live limit fetch fails.
+        }
+      }
+    }));
+
+    const rows: DashboardAccountRow[] = [];
+    for (const provider of providers) {
+      const credentialPool = authStorage.getCredentialPool(provider);
+      const credentials = authStorage.getCredentialsForProvider(provider);
+      const rateLimitById = new Map(authStorage.getProviderRateLimitInfo(provider).map((info) => [info.credentialId, info]));
+
+      for (let index = 0; index < credentialPool.length; index++) {
+        const poolEntry = credentialPool[index]!;
+        const credential = credentials[index];
+        const oauth = credential?.type === "oauth"
+          ? credential as typeof credential & {
+              email?: string;
+              displayName?: string;
+              accountId?: string;
+              organizationName?: string;
+              subscriptionType?: string;
+              rateLimitTier?: string;
+            }
+          : undefined;
+        const limitInfo = rateLimitById.get(poolEntry.id);
+
+        rows.push({
+          provider,
+          label: poolEntry.label,
+          email: typeof oauth?.email === "string" ? oauth.email : undefined,
+          displayName: typeof oauth?.displayName === "string" ? oauth.displayName : undefined,
+          accountId: typeof oauth?.accountId === "string" ? oauth.accountId : undefined,
+          organizationName: typeof oauth?.organizationName === "string" ? oauth.organizationName : undefined,
+          subscriptionType: typeof oauth?.subscriptionType === "string" ? oauth.subscriptionType : undefined,
+          rateLimitTier: typeof oauth?.rateLimitTier === "string" ? oauth.rateLimitTier : undefined,
+          isActive: poolEntry.isActive,
+          isPreferred: poolEntry.isPreferred,
+          isBackedOff: poolEntry.isBackedOff,
+          hasRateLimits: Boolean(limitInfo),
+          rateLimitSummary: limitInfo
+            ? `${formatLimitWindow("5h", limitInfo.fiveHour)} · ${formatLimitWindow("7d", limitInfo.weekly)}`
+            : undefined,
+          status: limitInfo?.error
+            ? "usage unavailable"
+            : poolEntry.isBackedOff
+              ? "cooling down"
+              : "ready",
+        });
+      }
+    }
+
+    this.accountRows = rows.sort((left, right) => {
+      const providerCompare = left.provider.localeCompare(right.provider);
+      if (providerCompare !== 0) return providerCompare;
+      if (left.isActive !== right.isActive) return left.isActive ? -1 : 1;
+      if (left.isPreferred !== right.isPreferred) return left.isPreferred ? -1 : 1;
+      if (left.isBackedOff !== right.isBackedOff) return left.isBackedOff ? 1 : -1;
+      return left.label.localeCompare(right.label);
+    });
   }
 
   handleInput(data: string): void {
@@ -497,6 +604,54 @@ export class GSDDashboardOverlay {
 
       if (this.dashData.completedUnits.length > 10) {
         lines.push(row(th.fg("dim", `  ...and ${this.dashData.completedUnits.length - 10} more`)));
+      }
+    }
+
+    if (this.accountRows.length > 0) {
+      lines.push(blank());
+      lines.push(hr());
+      lines.push(row(th.fg("text", th.bold("Accounts"))));
+      lines.push(blank());
+
+      let currentProvider = "";
+      for (const account of this.accountRows) {
+        if (account.provider !== currentProvider) {
+          currentProvider = account.provider;
+          const providerAccounts = this.accountRows.filter((entry) => entry.provider === currentProvider);
+          const readyCount = providerAccounts.filter((entry) => !entry.isBackedOff).length;
+          const coolingCount = providerAccounts.filter((entry) => entry.isBackedOff).length;
+          lines.push(row(joinColumns(
+            th.fg("dim", currentProvider),
+            th.fg("dim", `${providerAccounts.length} total · ${readyCount} ready${coolingCount > 0 ? ` · ${coolingCount} cooling` : ""}`),
+            contentWidth,
+          )));
+        }
+
+        const badges: string[] = [];
+        if (account.isActive) badges.push(th.fg("success", "[current]"));
+        if (account.isPreferred) badges.push(th.fg("accent", "[active]"));
+        if (account.isBackedOff) badges.push(th.fg("warning", "[cooling]"));
+        const heading = `  ${th.fg("text", account.label)}${badges.length > 0 ? ` ${badges.join(" ")}` : ""}`;
+        const detail = account.accountId ? th.fg("dim", account.accountId.slice(0, 8)) : th.fg("dim", account.status);
+        lines.push(row(joinColumns(heading, detail, contentWidth)));
+
+        if (account.email && account.email !== account.label) {
+          lines.push(row(`    ${th.fg("dim", account.email)}`));
+        }
+        if (account.displayName && account.displayName !== account.label && account.displayName !== account.email) {
+          lines.push(row(`    ${th.fg("dim", account.displayName)}`));
+        }
+        lines.push(row(`    ${th.fg("dim", `status: ${account.status}`)}`));
+        const metadata: string[] = [];
+        if (account.organizationName) metadata.push(`org: ${account.organizationName}`);
+        if (account.subscriptionType) metadata.push(`plan: ${account.subscriptionType}`);
+        if (account.rateLimitTier) metadata.push(`tier: ${account.rateLimitTier}`);
+        if (metadata.length > 0) {
+          lines.push(row(`    ${th.fg("dim", metadata.join(" · "))}`));
+        }
+        if (account.rateLimitSummary) {
+          lines.push(row(`    ${th.fg("dim", account.rateLimitSummary)}`));
+        }
       }
     }
 

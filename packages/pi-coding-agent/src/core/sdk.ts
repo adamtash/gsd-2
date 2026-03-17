@@ -299,6 +299,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const sessionId = sessionManager.getSessionId();
 
 	agent = new Agent({
 		initialState: {
@@ -315,7 +316,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			return runner.emitBeforeProviderRequest(payload, currentModel);
 		},
-		sessionId: sessionManager.getSessionId(),
+		sessionId,
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner) return messages;
@@ -339,7 +340,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const maxAttempts = 3;
 			const baseDelayMs = 2000;
 			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-				const key = await modelRegistry.getApiKeyForProvider(resolvedProvider);
+				const key = await modelRegistry.getApiKeyForProvider(resolvedProvider, sessionId);
 				if (key) return key;
 
 				// On the last attempt, fall through to error handling below
@@ -369,7 +370,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				);
 			}
 			const model = agent.state.model;
-			const isOAuth = model && modelRegistry.isUsingOAuth(model);
+			const isOAuth = model && modelRegistry.isUsingOAuth(model, sessionId);
 			if (isOAuth) {
 				// If credentials exist but are all in a backoff window (quota / rate-limit),
 				// surface a specific message instead of the misleading "Authentication failed".

@@ -8,13 +8,14 @@ import {
 	type Focusable,
 	getEditorKeybindings,
 	Spacer,
-	Text,
 	type TUI,
+	TruncatedText,
 } from "@gsd/pi-tui";
 import type { AuthStorage } from "../../../core/auth-storage.js";
 import { getDiscoverableProviders } from "../../../core/model-discovery.js";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import { theme } from "../theme/theme.js";
+import { DynamicBorder } from "./dynamic-border.js";
 import { rawKeyHint } from "./keybinding-hints.js";
 
 interface ProviderInfo {
@@ -22,6 +23,8 @@ interface ProviderInfo {
 	hasAuth: boolean;
 	supportsDiscovery: boolean;
 	modelCount: number;
+	accountCount: number;
+	backedOffCount: number;
 }
 
 export class ProviderManagerComponent extends Container implements Focusable {
@@ -41,6 +44,8 @@ export class ProviderManagerComponent extends Container implements Focusable {
 	private modelRegistry: ModelRegistry;
 	private onDone: () => void;
 	private onDiscover: (provider: string) => void;
+	private onSetActive: (provider: string) => void;
+	private onRemoveAccount: (provider: string) => void;
 
 	constructor(
 		tui: TUI,
@@ -48,6 +53,8 @@ export class ProviderManagerComponent extends Container implements Focusable {
 		modelRegistry: ModelRegistry,
 		onDone: () => void,
 		onDiscover: (provider: string) => void,
+		onSetActive: (provider: string) => void,
+		onRemoveAccount: (provider: string) => void,
 	) {
 		super();
 
@@ -56,26 +63,48 @@ export class ProviderManagerComponent extends Container implements Focusable {
 		this.modelRegistry = modelRegistry;
 		this.onDone = onDone;
 		this.onDiscover = onDiscover;
+		this.onSetActive = onSetActive;
+		this.onRemoveAccount = onRemoveAccount;
 
-		// Header
-		this.addChild(new Text(theme.fg("accent", "Provider Manager"), 0, 0));
+		this.addChild(new DynamicBorder());
+		this.addChild(new Spacer(1));
+		this.addChild(new TruncatedText(theme.bold("Providers"), 0, 0));
+		this.addChild(new TruncatedText(theme.fg("muted", "Manage accounts, defaults, and model discovery."), 0, 0));
 		this.addChild(new Spacer(1));
 
-		// Hints
 		const hints = [
 			rawKeyHint("d", "discover"),
-			rawKeyHint("r", "remove auth"),
+			rawKeyHint("a", "set default"),
+			rawKeyHint("r", "remove account"),
 			rawKeyHint("esc", "close"),
 		].join("  ");
-		this.addChild(new Text(hints, 0, 0));
+		this.addChild(new TruncatedText(hints, 0, 0));
 		this.addChild(new Spacer(1));
 
-		// List
 		this.listContainer = new Container();
 		this.addChild(this.listContainer);
+		this.addChild(new Spacer(1));
+		this.addChild(new DynamicBorder());
 
 		this.loadProviders();
 		this.updateList();
+	}
+
+	private formatProviderSummary(provider: ProviderInfo): string {
+		const parts = [theme.fg("muted", `${provider.modelCount} model${provider.modelCount === 1 ? "" : "s"}`)];
+		if (provider.accountCount > 0) {
+			parts.push(theme.fg("muted", `${provider.accountCount} account${provider.accountCount === 1 ? "" : "s"}`));
+		}
+		if (provider.backedOffCount > 0) {
+			parts.push(theme.fg("warning", `${provider.backedOffCount} cooling`));
+		}
+		if (provider.supportsDiscovery) {
+			parts.push(theme.fg("accent", "discover"));
+		}
+		if (!provider.hasAuth) {
+			parts.push(theme.fg("dim", "not configured"));
+		}
+		return parts.join(theme.fg("muted", " • "));
 	}
 
 	private loadProviders(): void {
@@ -96,12 +125,17 @@ export class ProviderManagerComponent extends Container implements Focusable {
 
 		this.providers = Array.from(providerNames)
 			.sort()
-			.map((name) => ({
-				name,
-				hasAuth: this.authStorage.hasAuth(name),
-				supportsDiscovery: discoverableSet.has(name),
-				modelCount: providerModelCounts.get(name) ?? 0,
-			}));
+			.map((name) => {
+				const credentialPool = this.authStorage.getCredentialPool(name);
+				return {
+					name,
+					hasAuth: this.authStorage.hasAuth(name),
+					supportsDiscovery: discoverableSet.has(name),
+					modelCount: providerModelCounts.get(name) ?? 0,
+					accountCount: credentialPool.length,
+					backedOffCount: credentialPool.filter((credential) => credential.isBackedOff).length,
+				};
+			});
 	}
 
 	private updateList(): void {
@@ -111,22 +145,19 @@ export class ProviderManagerComponent extends Container implements Focusable {
 			const p = this.providers[i];
 			const isSelected = i === this.selectedIndex;
 
-			const authBadge = p.hasAuth ? theme.fg("success", "[auth]") : theme.fg("muted", "[no auth]");
-			const discoveryBadge = p.supportsDiscovery ? theme.fg("accent", "[discovery]") : "";
-			const countBadge = theme.fg("muted", `(${p.modelCount} models)`);
-
 			const prefix = isSelected ? theme.fg("accent", "> ") : "  ";
-			const nameText = isSelected ? theme.fg("accent", p.name) : p.name;
+			const nameText = isSelected ? theme.fg("accent", p.name) : theme.bold(p.name);
+			const connectionText = p.hasAuth ? theme.fg("success", "connected") : theme.fg("dim", "available");
 
-			const parts = [prefix, nameText, " ", authBadge];
-			if (discoveryBadge) parts.push(" ", discoveryBadge);
-			parts.push(" ", countBadge);
-
-			this.listContainer.addChild(new Text(parts.join(""), 0, 0));
+			this.listContainer.addChild(new TruncatedText(`${prefix}${nameText} ${connectionText}`, 0, 0));
+			this.listContainer.addChild(new TruncatedText(`   ${this.formatProviderSummary(p)}`, 0, 0));
+			if (i < this.providers.length - 1) {
+				this.listContainer.addChild(new Spacer(1));
+			}
 		}
 
 		if (this.providers.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No providers configured"), 0, 0));
+			this.listContainer.addChild(new TruncatedText(theme.fg("muted", "  No providers available"), 0, 0));
 		}
 	}
 
@@ -150,13 +181,15 @@ export class ProviderManagerComponent extends Container implements Focusable {
 			if (provider?.supportsDiscovery) {
 				this.onDiscover(provider.name);
 			}
+		} else if (keyData === "a" || keyData === "A") {
+			const provider = this.providers[this.selectedIndex];
+			if (provider?.accountCount > 0) {
+				this.onSetActive(provider.name);
+			}
 		} else if (keyData === "r" || keyData === "R") {
 			const provider = this.providers[this.selectedIndex];
-			if (provider?.hasAuth) {
-				this.authStorage.remove(provider.name);
-				this.loadProviders();
-				this.updateList();
-				this.tui.requestRender();
+			if (provider?.accountCount > 0) {
+				this.onRemoveAccount(provider.name);
 			}
 		}
 	}

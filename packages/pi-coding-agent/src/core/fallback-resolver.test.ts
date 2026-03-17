@@ -27,6 +27,7 @@ function createMockModel(provider: string, id: string): Model<Api> {
 const zaiModel = createMockModel("zai", "glm-5");
 const alibabaModel = createMockModel("alibaba", "glm-5");
 const openaiModel = createMockModel("openai", "gpt-4.1");
+const openaiDefaultModel = createMockModel("openai-codex", "gpt-5.4");
 
 const defaultChain: FallbackChainEntry[] = [
 	{ provider: "zai", model: "glm-5", priority: 1 },
@@ -39,6 +40,7 @@ function createResolver(overrides?: {
 	isProviderAvailable?: (provider: string) => boolean;
 	hasAuth?: (provider: string) => boolean;
 	find?: (provider: string, modelId: string) => Model<Api> | undefined;
+	getPreferredModelForProvider?: (provider: string, modelId?: string) => Model<Api> | undefined;
 }) {
 	const settingsManager = {
 		getFallbackSettings: () => ({
@@ -58,8 +60,18 @@ function createResolver(overrides?: {
 			if (provider === "zai" && modelId === "glm-5") return zaiModel;
 			if (provider === "alibaba" && modelId === "glm-5") return alibabaModel;
 			if (provider === "openai" && modelId === "gpt-4.1") return openaiModel;
+			if (provider === "openai-codex" && modelId === "gpt-5.4") return openaiDefaultModel;
 			return undefined;
 		}),
+		getPreferredModelForProvider:
+			overrides?.getPreferredModelForProvider ??
+			((provider: string, modelId?: string) => {
+				if (provider === "zai") return zaiModel;
+				if (provider === "alibaba") return alibabaModel;
+				if (provider === "openai" && modelId === "gpt-4.1") return openaiModel;
+				if (provider === "openai-codex") return openaiDefaultModel;
+				return undefined;
+			}),
 	} as unknown as ModelRegistry;
 
 	return { resolver: new FallbackResolver(settingsManager, authStorage, modelRegistry), authStorage };
@@ -133,7 +145,7 @@ describe("FallbackResolver — findFallback", () => {
 		assert.equal(result!.model.provider, "openai");
 	});
 
-	it("skips providers with no model in registry", async () => {
+	it("falls back to the provider-preferred model when the chain model is missing", async () => {
 		const { resolver } = createResolver({
 			find: (provider: string, modelId: string) => {
 				if (provider === "alibaba") return undefined;
@@ -145,7 +157,44 @@ describe("FallbackResolver — findFallback", () => {
 		const result = await resolver.findFallback(zaiModel, "quota_exhausted");
 
 		assert.notEqual(result, null);
-		assert.equal(result!.model.provider, "openai");
+		assert.equal(result!.model.provider, "alibaba");
+		assert.equal(result!.model.id, "glm-5");
+	});
+
+	it("uses the target provider default model when the chain model is unavailable", async () => {
+		const customChain: FallbackChainEntry[] = [
+			{ provider: "zai", model: "glm-5", priority: 1 },
+			{ provider: "openai-codex", model: "claude-opus-4-6[1m]", priority: 2 },
+		];
+		const settingsManager = {
+			getFallbackSettings: () => ({
+				enabled: true,
+				chains: { coding: customChain },
+			}),
+		} as unknown as SettingsManager;
+		const authStorage = {
+			markProviderExhausted: mock.fn(),
+			isProviderAvailable: () => true,
+			hasAuth: () => true,
+		} as unknown as AuthStorage;
+		const modelRegistry = {
+			find: (provider: string, modelId: string) => {
+				if (provider === "zai" && modelId === "glm-5") return zaiModel;
+				return undefined;
+			},
+			getPreferredModelForProvider: (provider: string) => {
+				if (provider === "zai") return zaiModel;
+				if (provider === "openai-codex") return openaiDefaultModel;
+				return undefined;
+			},
+		} as unknown as ModelRegistry;
+
+		const resolver = new FallbackResolver(settingsManager, authStorage, modelRegistry);
+		const result = await resolver.findFallback(zaiModel, "quota_exhausted");
+
+		assert.notEqual(result, null);
+		assert.equal(result!.model.provider, "openai-codex");
+		assert.equal(result!.model.id, "gpt-5.4");
 	});
 });
 
@@ -180,6 +229,15 @@ describe("FallbackResolver — checkForRestoration", () => {
 		const { resolver } = createResolver({ enabled: false });
 		const result = await resolver.checkForRestoration(alibabaModel);
 		assert.equal(result, null);
+	});
+
+	it("matches restoration chains by provider when the current model differs from the chain model", async () => {
+		const { resolver } = createResolver();
+		const altOpenAI = createMockModel("openai", "gpt-5.4");
+		const result = await resolver.checkForRestoration(altOpenAI);
+
+		assert.notEqual(result, null);
+		assert.equal(result!.model.provider, "zai");
 	});
 });
 
