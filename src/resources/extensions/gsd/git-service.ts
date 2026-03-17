@@ -29,7 +29,7 @@ import {
   nativeUpdateRef,
   nativeAddPaths,
 } from "./native-git-bridge.js";
-import { GSDError, GSD_MERGE_CONFLICT } from "./errors.js";
+import { GSDError, GSD_MERGE_CONFLICT, GSD_GIT_ERROR } from "./errors.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -53,6 +53,12 @@ export interface GitPreferences {
    *  Default: true (planning docs are tracked in git).
    */
   commit_docs?: boolean;
+  /** When false, GSD will not modify .gitignore at all — no baseline patterns
+   *  are added and no self-healing occurs. Use this if you manage your own
+   *  .gitignore and don't want GSD touching it.
+   *  Default: true (GSD ensures baseline patterns are present).
+   */
+  manage_gitignore?: boolean;
   /** Script to run after a worktree is created (#597).
    *  Receives SOURCE_DIR and WORKTREE_DIR as environment variables.
    *  Can be an absolute path or relative to the project root.
@@ -286,7 +292,7 @@ export function runGit(basePath: string, args: string[], options: { allowFailure
   } catch (error) {
     if (options.allowFailure) return "";
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`git ${args.join(" ")} failed in ${basePath}: ${filterGitSvnNoise(message)}`);
+    throw new GSDError(GSD_GIT_ERROR, `git ${args.join(" ")} failed in ${basePath}: ${filterGitSvnNoise(message)}`);
   }
 }
 

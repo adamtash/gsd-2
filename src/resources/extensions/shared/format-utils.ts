@@ -11,6 +11,7 @@ import { truncateToWidth, visibleWidth } from "@gsd/pi-tui";
 
 /** Format a millisecond duration as a compact human-readable string. */
 export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -19,6 +20,15 @@ export function formatDuration(ms: number): string {
   const h = Math.floor(m / 60);
   const rm = m % 60;
   return `${h}h ${rm}m`;
+}
+
+// ─── Token Count Formatting ──────────────────────────────────────────────────
+
+/** Format a token count as a compact human-readable string (e.g. 1.5k, 1.50M). */
+export function formatTokenCount(count: number): string {
+  if (count < 1000) return `${count}`;
+  if (count < 1_000_000) return `${(count / 1000).toFixed(1)}k`;
+  return `${(count / 1_000_000).toFixed(2)}M`;
 }
 
 // ─── Layout Helpers ───────────────────────────────────────────────────────────

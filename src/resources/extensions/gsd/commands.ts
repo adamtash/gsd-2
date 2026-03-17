@@ -77,7 +77,7 @@ function projectRoot(): string {
 
 export function registerGSDCommand(pi: ExtensionAPI): void {
   pi.registerCommand("gsd", {
-    description: "GSD — Get Shit Done: /gsd help|next|auto|stop|pause|status|visualize|queue|quick|capture|triage|dispatch|history|undo|skip|export|cleanup|mode|prefs|config|hooks|run-hook|skill-health|doctor|forensics|migrate|remote|steer|knowledge|new-milestone|parallel",
+    description: "GSD — Get Shit Done: /gsd help|next|auto|stop|pause|status|visualize|queue|quick|capture|triage|dispatch|history|undo|skip|export|cleanup|mode|prefs|config|hooks|run-hook|skill-health|doctor|forensics|migrate|remote|steer|knowledge|new-milestone|parallel|update",
     getArgumentCompletions: (prefix: string) => {
       const subcommands = [
         { cmd: "help", desc: "Categorized command reference with descriptions" },
@@ -106,6 +106,8 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         { cmd: "skill-health", desc: "Skill lifecycle dashboard" },
         { cmd: "doctor", desc: "Runtime health checks with auto-fix" },
         { cmd: "forensics", desc: "Examine execution logs" },
+        { cmd: "init", desc: "Project init wizard — detect, configure, bootstrap .gsd/" },
+        { cmd: "setup", desc: "Global setup status and configuration" },
         { cmd: "migrate", desc: "Migrate a v1 .planning directory to .gsd format" },
         { cmd: "remote", desc: "Control remote auto-mode" },
         { cmd: "steer", desc: "Hard-steer plan documents during execution" },
@@ -113,6 +115,7 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         { cmd: "knowledge", desc: "Add persistent project knowledge (rule, pattern, or lesson)" },
         { cmd: "new-milestone", desc: "Create a milestone from a specification document (headless)" },
         { cmd: "parallel", desc: "Parallel milestone orchestration (start, status, stop, merge)" },
+        { cmd: "update", desc: "Update GSD to the latest version" },
       ];
       const parts = prefix.trim().split(/\s+/);
 
@@ -145,6 +148,13 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         return ["start", "status", "stop", "pause", "resume", "merge"]
           .filter((cmd) => cmd.startsWith(subPrefix))
           .map((cmd) => ({ value: `parallel ${cmd}`, label: cmd }));
+      }
+
+      if (parts[0] === "setup" && parts.length <= 2) {
+        const subPrefix = parts[1] ?? "";
+        return ["llm", "search", "remote", "keys", "prefs"]
+          .filter((cmd) => cmd.startsWith(subPrefix))
+          .map((cmd) => ({ value: `setup ${cmd}`, label: cmd }));
       }
 
       if (parts[0] === "prefs" && parts.length <= 2) {
@@ -181,7 +191,7 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
 
       if (parts[0] === "export" && parts.length <= 2) {
         const flagPrefix = parts[1] ?? "";
-        return ["--json", "--markdown"]
+        return ["--json", "--markdown", "--html", "--html --all"]
           .filter((f) => f.startsWith(flagPrefix))
           .map((f) => ({ value: `export ${f}`, label: f }));
       }
@@ -252,6 +262,25 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
 
       if (trimmed === "prefs" || trimmed.startsWith("prefs ")) {
         await handlePrefs(trimmed.replace(/^prefs\s*/, "").trim(), ctx);
+        return;
+      }
+
+      if (trimmed === "init") {
+        const { detectProjectState } = await import("./detection.js");
+        const { showProjectInit, handleReinit } = await import("./init-wizard.js");
+        const basePath = projectRoot();
+        const detection = detectProjectState(basePath);
+        if (detection.state === "v2-gsd" || detection.state === "v2-gsd-empty") {
+          await handleReinit(ctx, detection);
+        } else {
+          await showProjectInit(ctx, pi, basePath, detection);
+        }
+        return;
+      }
+
+      if (trimmed === "setup" || trimmed.startsWith("setup ")) {
+        const setupArgs = trimmed.replace(/^setup\s*/, "").trim();
+        await handleSetup(setupArgs, ctx);
         return;
       }
 
@@ -575,6 +604,11 @@ Examples:
         return;
       }
 
+      if (trimmed === "update") {
+        await handleUpdate(ctx);
+        return;
+      }
+
       if (trimmed === "") {
         // Bare /gsd defaults to step mode
         await startAuto(ctx, pi, projectRoot(), false, { step: true });
@@ -617,7 +651,9 @@ function showHelp(ctx: ExtensionCommandContext): void {
     "PROJECT KNOWLEDGE",
     "  /gsd knowledge <type> <text>   Add rule, pattern, or lesson to KNOWLEDGE.md",
     "",
-    "CONFIGURATION",
+    "SETUP & CONFIGURATION",
+    "  /gsd init           Project init wizard — detect, configure, bootstrap .gsd/",
+    "  /gsd setup          Global setup status  [llm|search|remote|keys|prefs]",
     "  /gsd mode           Set workflow mode (solo/team)  [global|project]",
     "  /gsd prefs          Manage preferences  [global|project|status|wizard|setup]",
     "  /gsd config         Set API keys for external tools",
@@ -625,11 +661,12 @@ function showHelp(ctx: ExtensionCommandContext): void {
     "",
     "MAINTENANCE",
     "  /gsd doctor         Diagnose and repair .gsd/ state  [audit|fix|heal] [scope]",
-    "  /gsd export         Export milestone/slice results  [--json|--markdown|--html]",
+    "  /gsd export         Export milestone/slice results  [--json|--markdown|--html] [--all]",
     "  /gsd cleanup        Remove merged branches or snapshots  [branches|snapshots]",
-    "  /gsd migrate        Upgrade .gsd/ structures to new format",
+    "  /gsd migrate        Migrate .planning/ (v1) to .gsd/ (v2) format",
     "  /gsd remote         Control remote auto-mode  [slack|discord|status|disconnect]",
     "  /gsd inspect        Show SQLite DB diagnostics (schema, row counts, recent entries)",
+    "  /gsd update         Update GSD to the latest version via npm",
   ];
   ctx.ui.notify(lines.join("\n"), "info");
 }
@@ -684,6 +721,59 @@ async function handleVisualize(ctx: ExtensionCommandContext): Promise<void> {
         anchor: "center",
       },
     },
+  );
+}
+
+async function handleSetup(args: string, ctx: ExtensionCommandContext): Promise<void> {
+  const { detectProjectState, hasGlobalSetup } = await import("./detection.js");
+
+  // Show current global setup status
+  const globalConfigured = hasGlobalSetup();
+  const detection = detectProjectState(projectRoot());
+
+  const statusLines = ["GSD Setup Status\n"];
+  statusLines.push(`  Global preferences: ${globalConfigured ? "configured" : "not set"}`);
+  statusLines.push(`  Project state: ${detection.state}`);
+  if (detection.projectSignals.primaryLanguage) {
+    statusLines.push(`  Detected: ${detection.projectSignals.primaryLanguage}`);
+  }
+
+  if (args === "llm" || args === "auth") {
+    ctx.ui.notify("Use /login to configure LLM authentication.", "info");
+    return;
+  }
+
+  if (args === "search") {
+    ctx.ui.notify("Use /search-provider to configure web search.", "info");
+    return;
+  }
+
+  if (args === "remote") {
+    ctx.ui.notify("Use /gsd remote to configure remote questions.", "info");
+    return;
+  }
+
+  if (args === "keys") {
+    await handleConfig(ctx);
+    return;
+  }
+
+  if (args === "prefs") {
+    await ensurePreferencesFile(getGlobalGSDPreferencesPath(), ctx, "global");
+    await handlePrefsWizard(ctx, "global");
+    return;
+  }
+
+  // Full setup summary
+  ctx.ui.notify(statusLines.join("\n"), "info");
+  ctx.ui.notify(
+    "Available setup commands:\n" +
+    "  /gsd setup llm     — LLM authentication\n" +
+    "  /gsd setup search  — Web search provider\n" +
+    "  /gsd setup remote  — Remote questions (Discord/Slack/Telegram)\n" +
+    "  /gsd setup keys    — Tool API keys\n" +
+    "  /gsd setup prefs   — Global preferences wizard",
+    "info",
   );
 }
 
@@ -1063,7 +1153,26 @@ async function configureModels(ctx: ExtensionCommandContext, prefs: Record<strin
 
   const availableModels = ctx.modelRegistry.getAvailable();
   if (availableModels.length > 0) {
-    const modelOptions = availableModels.map(m => `${m.id} · ${m.provider}`);
+    // Group models by provider, sorted alphabetically
+    const byProvider = new Map<string, typeof availableModels>();
+    for (const m of availableModels) {
+      let group = byProvider.get(m.provider);
+      if (!group) {
+        group = [];
+        byProvider.set(m.provider, group);
+      }
+      group.push(m);
+    }
+    const providers = Array.from(byProvider.keys()).sort((a, b) => a.localeCompare(b));
+
+    const modelOptions: string[] = [];
+    for (const provider of providers) {
+      const group = byProvider.get(provider)!;
+      modelOptions.push(`─── ${provider} (${group.length}) ───`);
+      for (const m of group) {
+        modelOptions.push(`${m.id} · ${m.provider}`);
+      }
+    }
     modelOptions.push("(keep current)", "(clear)");
 
     for (const phase of modelPhases) {
@@ -1713,7 +1822,7 @@ async function handleDryRun(ctx: ExtensionCommandContext, basePath: string): Pro
 
   const { getLedger, getProjectTotals, formatCost, formatTokenCount, loadLedgerFromDisk } = await import("./metrics.js");
   const { loadEffectiveGSDPreferences: loadPrefs } = await import("./preferences.js");
-  const { formatDuration } = await import("./history.js");
+  const { formatDuration } = await import("../shared/format-utils.js");
 
   const ledger = getLedger();
   const units = ledger?.units ?? loadLedgerFromDisk(basePath)?.units ?? [];
@@ -2089,5 +2198,50 @@ Examples:
 
   if (!success) {
     ctx.ui.notify("Failed to dispatch hook. Auto-mode may have been cancelled.", "error");
+  }
+}
+
+// ─── Self-update handler ────────────────────────────────────────────────────
+
+async function handleUpdate(ctx: ExtensionCommandContext): Promise<void> {
+  const { execSync } = await import("node:child_process");
+  const { compareSemver } = await import("../../../update-check.js");
+
+  const NPM_PACKAGE = "gsd-pi";
+  const current = process.env.GSD_VERSION || "0.0.0";
+
+  ctx.ui.notify(`Current version: v${current}\nChecking npm registry...`, "info");
+
+  let latest: string;
+  try {
+    latest = execSync(`npm view ${NPM_PACKAGE} version`, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    ctx.ui.notify("Failed to reach npm registry. Check your network connection.", "error");
+    return;
+  }
+
+  if (compareSemver(latest, current) <= 0) {
+    ctx.ui.notify(`Already up to date (v${current}).`, "info");
+    return;
+  }
+
+  ctx.ui.notify(`Updating: v${current} → v${latest}...`, "info");
+
+  try {
+    execSync(`npm install -g ${NPM_PACKAGE}@latest`, {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    ctx.ui.notify(
+      `Updated to v${latest}. Restart your GSD session to use the new version.`,
+      "info",
+    );
+  } catch {
+    ctx.ui.notify(
+      `Update failed. Try manually: npm install -g ${NPM_PACKAGE}@latest`,
+      "error",
+    );
   }
 }

@@ -261,6 +261,7 @@ export function loadEffectiveGSDPreferences(): LoadedGSDPreferences | null {
 }
 
 // ─── Skill Reference Resolution ───────────────────────────────────────────────
+// Focused re-exports available via ./preferences-skills.js
 
 export interface SkillResolution {
   /** The original reference from preferences (bare name or path). */
@@ -547,6 +548,9 @@ export function getIsolationMode(): "none" | "worktree" | "branch" {
   return "worktree"; // default
 }
 
+// ─── Model Resolution ─────────────────────────────────────────────────────────
+// Focused re-exports available via ./preferences-models.js
+
 /**
  * Resolve which model ID to use for a given auto-mode unit type.
  * Returns undefined if no model preference is set for this unit type.
@@ -593,6 +597,18 @@ export function getNextFallbackModel(
   if (!foundCurrent) {
     return modelsToTry[0];
   }
+}
+
+/**
+ * Detect whether an error message indicates a transient network error
+ * (worth retrying the same model) vs a permanent provider error
+ * (auth failure, quota exceeded, etc. — should fall back immediately).
+ */
+export function isTransientNetworkError(errorMsg: string): boolean {
+  if (!errorMsg) return false;
+  const hasNetworkSignal = /network|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|fetch failed|connection.*reset|dns/i.test(errorMsg);
+  const hasPermanentSignal = /auth|unauthorized|forbidden|invalid.*key|quota|billing/i.test(errorMsg);
+  return hasNetworkSignal && !hasPermanentSignal;
 }
 
 export function resolveModelWithFallbacksForUnit(unitType: string): ResolvedModelConfig | undefined {
@@ -1317,6 +1333,10 @@ export function validatePreferences(preferences: GSDPreferences): {
       if (typeof g.commit_docs === "boolean") git.commit_docs = g.commit_docs;
       else errors.push("git.commit_docs must be a boolean");
     }
+    if (g.manage_gitignore !== undefined) {
+      if (typeof g.manage_gitignore === "boolean") git.manage_gitignore = g.manage_gitignore;
+      else errors.push("git.manage_gitignore must be a boolean");
+    }
     if (g.worktree_post_create !== undefined) {
       if (typeof g.worktree_post_create === "string" && g.worktree_post_create.trim()) {
         git.worktree_post_create = g.worktree_post_create.trim();
@@ -1372,6 +1392,9 @@ function mergePostUnitHooks(
   }
   return merged.length > 0 ? merged : undefined;
 }
+
+// ─── Hook Resolution ──────────────────────────────────────────────────────────
+// Focused re-exports available via ./preferences-hooks.js
 
 /**
  * Resolve enabled post-unit hooks from effective preferences.

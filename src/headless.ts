@@ -15,10 +15,8 @@ import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { ChildProcess } from 'node:child_process'
 
-// RpcClient is not in @gsd/pi-coding-agent's public exports — import from dist directly.
-// This relative path resolves correctly from both src/ (via tsx) and dist/ (compiled).
-import { RpcClient } from '../packages/pi-coding-agent/dist/modes/rpc/rpc-client.js'
-import { attachJsonlLineReader, serializeJsonLine } from '../packages/pi-coding-agent/dist/modes/rpc/jsonl.js'
+import { RpcClient, attachJsonlLineReader, serializeJsonLine } from '@gsd/pi-coding-agent'
+import { loadAndValidateAnswerFile, AnswerInjector } from './headless-answers.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,6 +35,8 @@ export interface HeadlessOptions {
   maxRestarts?: number   // auto-restart on crash (default 3, 0 to disable)
   supervised?: boolean   // supervised mode: forward interactive requests to orchestrator
   responseTimeout?: number // timeout for orchestrator response (default 30000ms)
+  answers?: string       // path to answers JSON file
+  eventFilter?: Set<string>  // filter JSONL output to specific event types
 }
 
 interface ExtensionUIRequest {
@@ -102,6 +102,11 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
           process.stderr.write('[headless] Error: --max-restarts must be a non-negative integer\n')
           process.exit(1)
         }
+      } else if (arg === '--answers' && i + 1 < args.length) {
+        options.answers = args[++i]
+      } else if (arg === '--events' && i + 1 < args.length) {
+        options.eventFilter = new Set(args[++i].split(','))
+        options.json = true  // --events implies --json
       } else if (arg === '--supervised') {
         options.supervised = true
         options.json = true  // supervised implies json
@@ -375,6 +380,21 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     process.exit(1)
   }
 
+  // Load answer injection file
+  let injector: AnswerInjector | undefined
+  if (options.answers) {
+    try {
+      const answerFile = loadAndValidateAnswerFile(resolve(options.answers))
+      injector = new AnswerInjector(answerFile)
+      if (!options.json) {
+        process.stderr.write(`[headless] Loaded answer file: ${options.answers}\n`)
+      }
+    } catch (err) {
+      process.stderr.write(`[headless] Error loading answer file: ${err instanceof Error ? err.message : String(err)}\n`)
+      process.exit(1)
+    }
+  }
+
   // For new-milestone, load context and bootstrap .gsd/ before spawning RPC child
   if (isNewMilestone) {
     if (!options.context && !options.contextText) {
@@ -413,6 +433,13 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     process.exit(1)
   }
 
+  // Query: read-only state snapshot, no RPC child needed
+  if (options.command === 'query') {
+    const { handleQuery } = await import('./headless-query.js')
+    const result = await handleQuery(process.cwd())
+    return { exitCode: result.exitCode, interrupted: false }
+  }
+
   // Resolve CLI path for the child process
   const cliPath = process.env.GSD_BIN_PATH || process.argv[1]
   if (!cliPath) {
@@ -427,6 +454,9 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   }
   if (options.model) {
     clientOptions.model = options.model
+  }
+  if (injector) {
+    clientOptions.env = injector.getSecretEnvVars()
   }
 
   const client = new RpcClient(clientOptions)
@@ -511,9 +541,15 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     trackEvent(eventObj)
     resetIdleTimer()
 
-    // --json mode: forward all events as JSONL to stdout
+    // Answer injector: observe events for question metadata
+    injector?.observeEvent(eventObj)
+
+    // --json mode: forward events as JSONL to stdout (filtered if --events)
     if (options.json) {
-      process.stdout.write(JSON.stringify(eventObj) + '\n')
+      const eventType = String(eventObj.type ?? '')
+      if (!options.eventFilter || options.eventFilter.has(eventType)) {
+        process.stdout.write(JSON.stringify(eventObj) + '\n')
+      }
     } else {
       // Progress output to stderr
       const line = formatProgress(eventObj, !!options.verbose)
@@ -534,6 +570,17 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
 
       if (isTerminalNotification(eventObj)) {
         completed = true
+      }
+
+      // Answer injection: try to handle with pre-supplied answers before supervised/auto
+      if (injector && !FIRE_AND_FORGET_METHODS.has(String(eventObj.method ?? ''))) {
+        if (injector.tryHandle(eventObj, stdinWriter)) {
+          if (completed) {
+            exitCode = blocked ? 2 : 0
+            resolveCompletion()
+          }
+          return
+        }
       }
 
       const method = String(eventObj.method ?? '')
@@ -694,8 +741,20 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   process.stderr.write(`[headless] Status: ${status}\n`)
   process.stderr.write(`[headless] Duration: ${duration}s\n`)
   process.stderr.write(`[headless] Events: ${totalEvents} total, ${toolCallCount} tool calls\n`)
+  if (options.eventFilter) {
+    process.stderr.write(`[headless] Event filter: ${[...options.eventFilter].join(', ')}\n`)
+  }
   if (restartCount > 0) {
     process.stderr.write(`[headless] Restarts: ${restartCount}\n`)
+  }
+
+  // Answer injection stats
+  if (injector) {
+    const stats = injector.getStats()
+    process.stderr.write(`[headless] Answers: ${stats.questionsAnswered} answered, ${stats.questionsDefaulted} defaulted, ${stats.secretsProvided} secrets\n`)
+    for (const warning of injector.getUnusedWarnings()) {
+      process.stderr.write(`${warning}\n`)
+    }
   }
 
   // On failure, print last 5 events for diagnostics

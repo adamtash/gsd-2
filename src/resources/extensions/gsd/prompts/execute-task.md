@@ -25,7 +25,7 @@ A researcher explored the codebase and a planner decomposed the work — you are
 {{priorTaskLines}}
 
 Then:
-0. Narrate step transitions, key implementation decisions, and verification outcomes as you work. Keep it terse — one line between tool-call clusters, not between every call.
+0. Narrate step transitions, key implementation decisions, and verification outcomes as you work. Keep it terse — one line between tool-call clusters, not between every call — but write complete sentences in user-facing prose, not shorthand notes or scratchpad fragments.
 1. **Load relevant skills before writing code.** Check the `GSD Skill Preferences` block in system context and the `<available_skills>` catalog in your system prompt. For each skill that matches this task's technology stack (e.g., React, Next.js, accessibility, component design), `read` its SKILL.md file now. Skills contain implementation rules and patterns that should guide your code. If no skills match this task, skip this step.
 2. Execute the steps in the inlined task plan
 3. Build the real thing. If the task plan says "create login endpoint", build an endpoint that actually authenticates against a real store, not one that returns a hardcoded success response. If the task plan says "create dashboard page", build a page that renders real data from the API, not a component with hardcoded props. Stubs and mocks are for tests, not for the shipped feature.
@@ -65,7 +65,6 @@ Then:
 15. Write `{{taskSummaryPath}}`
 16. Mark {{taskId}} done in `{{planPath}}` (change `[ ]` to `[x]`)
 17. Do not run git commands — the system reads your task summary after completion and creates a meaningful commit from it (type inferred from title, message from your one-liner, key files from frontmatter). Write a clear, specific one-liner in the summary — it becomes the commit message.
-18. Update `.gsd/STATE.md`
 
 All work stays in your working directory: `{{workingDirectory}}`.
 

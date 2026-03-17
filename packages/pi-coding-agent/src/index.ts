@@ -302,7 +302,16 @@ export {
 	type PrintModeOptions,
 	runPrintMode,
 	runRpcMode,
+	type ModelInfo,
+	RpcClient,
+	type RpcClientOptions,
+	type RpcEventListener,
+	type RpcCommand,
+	type RpcResponse,
+	type RpcSessionState,
 } from "./modes/index.js";
+// RPC JSONL utilities
+export { attachJsonlLineReader, serializeJsonLine } from "./modes/rpc/jsonl.js";
 // UI components for extensions
 export {
 	ArminComponent,

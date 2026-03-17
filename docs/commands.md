@@ -18,6 +18,7 @@
 | `/gsd forensics` | Post-mortem investigation of auto-mode failures — structured root-cause analysis with log inspection |
 | `/gsd cleanup` | Clean up GSD state files and stale worktrees |
 | `/gsd visualize` | Open workflow visualizer (progress, deps, metrics, timeline) |
+| `/gsd export --html` | Generate self-contained HTML report for current or completed milestone |
 | `/gsd knowledge` | Add persistent project knowledge (rule, pattern, or lesson) |
 | `/gsd help` | Categorized command reference with descriptions for all GSD subcommands |
 
@@ -110,8 +111,8 @@ gsd headless
 # Run a single unit
 gsd headless next
 
-# Machine-readable output
-gsd headless --json status
+# Instant JSON snapshot — no LLM, ~50ms
+gsd headless query
 
 # With timeout for CI
 gsd headless --timeout 600000 auto
@@ -132,6 +133,7 @@ echo "Build a CLI tool" | gsd headless new-milestone --context -
 | Flag | Description |
 |------|-------------|
 | `--timeout N` | Overall timeout in milliseconds (default: 300000 / 5 min) |
+| `--max-restarts N` | Auto-restart on crash with exponential backoff (default: 3). Set 0 to disable |
 | `--json` | Stream all events as JSONL to stdout |
 | `--model ID` | Override the model for the headless session |
 | `--context <file>` | Context file for `new-milestone` (use `-` for stdin) |
@@ -141,6 +143,46 @@ echo "Build a CLI tool" | gsd headless new-milestone --context -
 **Exit codes:** `0` = complete, `1` = error or timeout, `2` = blocked.
 
 Any `/gsd` subcommand works as a positional argument — `gsd headless status`, `gsd headless doctor`, `gsd headless dispatch execute`, etc.
+
+### `gsd headless query`
+
+Returns a single JSON object with the full project snapshot — no LLM session, no RPC child, instant response (~50ms). This is the recommended way for orchestrators and scripts to inspect GSD state.
+
+```bash
+gsd headless query | jq '.state.phase'
+# "executing"
+
+gsd headless query | jq '.next'
+# {"action":"dispatch","unitType":"execute-task","unitId":"M001/S01/T03"}
+
+gsd headless query | jq '.cost.total'
+# 4.25
+```
+
+**Output schema:**
+
+```json
+{
+  "state": {
+    "phase": "executing",
+    "activeMilestone": { "id": "M001", "title": "..." },
+    "activeSlice": { "id": "S01", "title": "..." },
+    "activeTask": { "id": "T01", "title": "..." },
+    "registry": [{ "id": "M001", "status": "active" }, ...],
+    "progress": { "milestones": { "done": 0, "total": 2 }, "slices": { "done": 1, "total": 3 } },
+    "blockers": []
+  },
+  "next": {
+    "action": "dispatch",
+    "unitType": "execute-task",
+    "unitId": "M001/S01/T01"
+  },
+  "cost": {
+    "workers": [{ "milestoneId": "M001", "cost": 1.50, "state": "running", ... }],
+    "total": 1.50
+  }
+}
+```
 
 ## MCP Server Mode
 

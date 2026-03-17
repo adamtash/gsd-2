@@ -13,7 +13,17 @@ Run GSD commands without TUI via `gsd headless`. Spawns an RPC child process, au
 gsd headless [flags] [command] [args...]
 ```
 
-**Flags:** `--timeout N` (ms, default 300000), `--json` (JSONL to stdout), `--model ID`, `--verbose`
+**Flags:**
+- `--timeout N` — overall timeout in ms (default 300000)
+- `--json` — JSONL event stream to stdout
+- `--model ID` — override LLM model
+- `--verbose` — show tool calls in progress output
+- `--supervised` — forward interactive UI requests to orchestrator via stdout/stdin
+- `--response-timeout N` — timeout for orchestrator response in supervised mode (default 30000)
+- `--max-restarts N` — auto-restart on crash with backoff (default 3, 0 to disable)
+- `--answers <path>` — pre-supply answers and secrets from JSON file
+- `--events <types>` — filter JSONL output to specific event types (comma-separated, implies `--json`)
+
 **Exit codes:** 0=complete, 1=error/timeout, 2=blocked
 
 ## Core Workflows
@@ -44,13 +54,32 @@ gsd headless next
 
 Execute exactly one unit (task/slice/milestone step), then exit. Ideal for step-by-step orchestration with external decision logic between steps.
 
-### 4. Check Status
+### 4. Instant State Snapshot (no LLM)
 
 ```bash
-gsd headless --json status
+gsd headless query
 ```
 
-Returns project state: active milestone/slice/task, phase, progress counts, blockers. Parse the JSONL output for machine-readable state.
+Returns a single JSON object with the full project snapshot — no LLM session, instant (~50ms). **This is the recommended way for orchestrators to inspect state.**
+
+```json
+{
+  "state": { "phase": "executing", "activeMilestone": {...}, "activeSlice": {...}, "progress": {...}, "registry": [...] },
+  "next":  { "action": "dispatch", "unitType": "execute-task", "unitId": "M001/S01/T01" },
+  "cost":  { "workers": [{ "milestoneId": "M001", "cost": 1.50, ... }], "total": 1.50 }
+}
+```
+
+```bash
+# What phase is the project in?
+gsd headless query | jq '.state.phase'
+
+# What would auto-mode do next?
+gsd headless query | jq '.next'
+
+# Total spend across parallel workers
+gsd headless query | jq '.cost.total'
+```
 
 ### 5. Dispatch Specific Phase
 
@@ -65,14 +94,14 @@ Force-route to a specific phase, bypassing normal state-machine routing.
 ### Poll-and-React Loop
 
 ```bash
-# Check status, decide what to do
-STATUS=$(gsd headless --json status 2>/dev/null)
-EXIT=$?
+# Instant state check — no LLM cost
+PHASE=$(gsd headless query | jq -r '.state.phase')
+NEXT_ACTION=$(gsd headless query | jq -r '.next.action')
 
-case $EXIT in
-  0) echo "Complete" ;;
-  2) echo "Blocked — needs intervention" ;;
-  *) echo "Error" ;;
+case "$PHASE" in
+  complete) echo "Done" ;;
+  blocked)  echo "Needs intervention" ;;
+  *)        [ "$NEXT_ACTION" = "dispatch" ] && gsd headless next ;;
 esac
 ```
 
@@ -83,8 +112,8 @@ while true; do
   gsd headless next
   EXIT=$?
   [ $EXIT -ne 0 ] && break
-  # Check progress, log, decide whether to continue
-  gsd headless --json status
+  # Instant progress check between steps
+  gsd headless query | jq '{phase: .state.phase, progress: .state.progress}'
 done
 ```
 
@@ -137,9 +166,44 @@ done
 
 Event types: `agent_start`, `agent_end`, `tool_execution_start`, `tool_execution_end`, `extension_ui_request`, `message_update`, `error`.
 
+### Filtered Event Stream
+
+Use `--events` to receive only specific event types — reduces noise for orchestrators:
+
+```bash
+# Only phase-relevant events
+gsd headless --events agent_end,extension_ui_request auto 2>/dev/null
+
+# Only tool execution events
+gsd headless --events tool_execution_start,tool_execution_end auto
+```
+
+The filter applies only to stdout output. Internal processing (completion detection, supervised mode, answer injection) is unaffected — all events are still processed internally.
+
+Available event types: `agent_start`, `agent_end`, `tool_execution_start`, `tool_execution_end`, `tool_execution_update`, `extension_ui_request`, `message_start`, `message_end`, `message_update`, `turn_start`, `turn_end`.
+
 ## Answer Injection
 
-Pre-supply answers for non-interactive runs. See [references/answer-injection.md](references/answer-injection.md) for schema and usage.
+Pre-supply answers and secrets for headless runs via `--answers`:
+
+```bash
+gsd headless --answers answers.json auto
+```
+
+Answer file schema:
+```json
+{
+  "questions": { "question_id": "selected_option" },
+  "secrets": { "API_KEY": "sk-..." },
+  "defaults": { "strategy": "first_option" }
+}
+```
+
+- **questions** — question ID → answer (string or string[])
+- **secrets** — env var → value, injected into child process env
+- **defaults.strategy** — `"first_option"` (default) or `"cancel"` for unmatched
+
+See [references/answer-injection.md](references/answer-injection.md) for full details.
 
 ## GSD Project Structure
 
@@ -167,7 +231,7 @@ Quick reference — see [references/commands.md](references/commands.md) for the
 |---------|---------|
 | `auto` | Run all queued units (default) |
 | `next` | Run one unit |
-| `status` | Progress dashboard |
+| `query` | Instant JSON snapshot — state, next dispatch, costs (no LLM) |
 | `new-milestone` | Create milestone from spec |
 | `queue` | Queue/reorder milestones |
 | `history` | View execution history |

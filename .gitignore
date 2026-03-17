@@ -50,6 +50,7 @@ AGENTS.md
 TODOS.md
 .planning/
 .audits/
+docs/coherence-audit/
 
 # ── GSD baseline (auto-generated) ──
 .gsd/activity/
@@ -67,3 +68,7 @@ TODOS.md
 # ── GSD baseline (auto-generated) ──
 .gsd/forensics/
 .gsd/parallel/
+
+# ── Stale lock files (npm is canonical) ──
+pnpm-lock.yaml
+bun.lock

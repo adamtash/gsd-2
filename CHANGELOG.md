@@ -6,6 +6,65 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.28.0] - 2026-03-17
+
+### Added
+- `gsd headless query` command for instant, read-only state inspection — returns phase, cost, progress, and next-unit as parseable JSON without spawning an LLM session
+- `/gsd update` slash command for in-session self-update
+- `/gsd export --html --all` for retrospective milestone reports
+
+### Fixed
+- Failure recovery & resume safeguards: atomic file writes, OAuth fetch timeouts (30s), RPC subprocess exit detection, extension command context guards, bash temp file cleanup, settings write queue flush, LSP init retry with backoff, crash detection on session resume, blob garbage collection
+- Consolidated duplicate `mcp-server.ts` into single implementation
+- Consolidated duplicate `bundled-extension-paths.ts` into single module
+- Removed duplicate `marketplace-discovery.test.ts` test file
+- Established npm as canonical package manager
+- Exported RPC utilities from pi-coding-agent public API
+- Prompt system requires grammatical narration for clearer agent output
+
+### Changed
+- Updated documentation for v2.26 and v2.27.0 features
+- Documented all `preferences.md` fields in reference and template
+- Removed stale `.pi/agents/` files superseded by built-in agent definitions
+
+## [2.27.0] - 2026-03-17
+
+### Added
+- HTML report generator with progression index across milestones
+- Crash recovery for parallel orchestrator — persisted state with PID liveness detection
+- Headless orchestration skill with supervised mode
+- Verification enforcement gate for milestone completion
+- `git.manage_gitignore` preference to opt out of automatic `.gitignore` changes
+
+### Changed
+- Encapsulated auto.ts state into AutoSession class (cleaner session lifecycle)
+- Extracted 7 focused modules from auto.ts (auto-worktree-sync, resource staleness, stale escape)
+- TUI dashboard cleanup, dedup, and feature improvements
+- Reordered visualizer tabs and HTML report sections into logical groupings
+
+### Fixed
+- Single ENTER now correctly submits slash command argument autocomplete
+- Web search loop broken with consecutive duplicate guard
+- Transient network errors retried before model fallback
+- Parallel worker PID tracking, spawn-status race, and exit persistence
+- `/gsd discuss` now recommends next undiscussed slice
+- Roadmap parser allows suffix text after `## Slices` heading
+- User's model choice no longer overwritten when API key is temporarily unavailable
+- Reassess-roadmap skip loop broken by preventing re-persistence of evicted keys
+- LSP command resolution and ENOENT crash on Windows/MSYS
+- Dispatch plan-slice when task plan files are missing
+- Reduced CPU usage on long auto-mode sessions
+- Orphan-prone child processes reaped across session churn
+- Symlinked skill directories resolved in `always_use_skills` and preferences
+- Replan-slice infinite loop and non-standard `finish_reason` crash
+- Skip slice plan commit when `commit_docs` is false
+- Context-pressure monitor wired to send wrap-up signal at 70%
+- Missing STATE.md in fresh worktree no longer deadlocks pre-dispatch health gate
+- Stale runtime unit files for completed milestones cleaned on startup
+- Broken install detection with Windows symlink fallback
+- Auto-restart headless mode on crash with exponential backoff
+- Generic type preserved on `resolveModelId` through resolution
+
 ## [2.26.0] - 2026-03-17
 
 ### Added
@@ -982,7 +1041,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.26.0...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.28.0...HEAD
+[2.28.0]: https://github.com/gsd-build/gsd-2/compare/v2.27.0...v2.28.0
+[2.27.0]: https://github.com/gsd-build/gsd-2/compare/v2.26.0...v2.27.0
 [2.26.0]: https://github.com/gsd-build/gsd-2/compare/v2.25.0...v2.26.0
 [2.25.0]: https://github.com/gsd-build/gsd-2/releases/tag/v2.25.0
 [2.24.0]: https://github.com/gsd-build/gsd-2/compare/v2.23.0...v2.24.0

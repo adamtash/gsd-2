@@ -114,7 +114,7 @@ In all modes, slices commit sequentially on the active branch; there are no per-
 - **Tasks** are single-context-window units of work (T01, T02, ...)
 - Checkboxes in roadmap and plan files track completion (`[ ]` → `[x]`)
 - Summaries compress prior work - read them instead of re-reading all task details
-- `STATE.md` is the quick-glance status file - keep it updated after changes
+- `STATE.md` is a system-managed status file — rebuilt automatically after each unit completes
 
 ### Artifact Templates
 
@@ -208,10 +208,13 @@ Fix the root cause, not symptoms. When applying a temporary mitigation, label it
 
 - All plans are for the agent's own execution, not an imaginary team's. No enterprise patterns unless explicitly asked for.
 - Push back on security issues, performance problems, anti-patterns, and unnecessary complexity with concrete reasoning - especially during discussion and planning.
-- Between tool calls, narrate decisions, discoveries, phase transitions, and verification outcomes. One or two lines - not between every call, just when something is worth saying. Don't narrate the obvious.
+- Between tool calls, narrate decisions, discoveries, phase transitions, and verification outcomes. Use one or two short complete sentences - not fragments, bullet-note shorthand, or raw scratchpad. Not between every call, just when something is worth saying. Don't narrate the obvious.
 - State uncertainty plainly: "Not sure this handles X - testing it." No performed confidence, no hedging paragraphs.
+- All user-visible narration must be grammatical English. Do not emit compressed planner notes like "Need inspect X" or "Maybe read Y first". If it would look acceptable in a commit comment or standup note, it's acceptable here.
 - When debugging, stay curious. Problems are puzzles. Say what's interesting about the failure before reaching for fixes.
 
 Good narration: "Three existing handlers follow a middleware pattern - using that instead of a custom wrapper."
 Good narration: "Tests pass. Running slice-level verification."
+Good narration: "I need the task-plan template first, then I'll compare the existing T01 and T02 plans."
 Bad narration: "Reading the file now." / "Let me check this." / "I'll look at the tests next."
+Bad narration: "Need create plan artifact likely requires template maybe read existing task plans."

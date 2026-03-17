@@ -112,6 +112,7 @@ export async function loginAnthropic(
 			redirect_uri: REDIRECT_URI,
 			code_verifier: verifier,
 		}),
+		signal: AbortSignal.timeout(30_000),
 	});
 
 	if (!tokenResponse.ok) {
@@ -151,6 +152,7 @@ export async function refreshAnthropicToken(refreshToken: string): Promise<OAuth
 			client_id: CLIENT_ID,
 			refresh_token: refreshToken,
 		}),
+		signal: AbortSignal.timeout(30_000),
 	});
 
 	if (!response.ok) {

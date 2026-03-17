@@ -21,6 +21,7 @@
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { nativeParseJsonlTail } from "./native-parser-bridge.js";
+import { MAX_JSONL_BYTES, parseJSONL } from "./jsonl-utils.js";
 import { nativeWorkingTreeStatus, nativeDiffStat } from "./native-git-bridge.js";
 import { getAutoWorktreePath } from "./auto-worktree.js";
 
@@ -63,21 +64,7 @@ export interface RecoveryBriefing {
 }
 
 // ─── JSONL Parsing ────────────────────────────────────────────────────────────
-
-/** Max bytes to parse from a JSONL source. Prevents V8 OOM on bloated activity logs. */
-const MAX_JSONL_BYTES = 10 * 1024 * 1024; // 10 MB
-
-function parseJSONL(raw: string): unknown[] {
-  // If the file is enormous, only parse the tail (most recent entries).
-  // This prevents the OOM crash path: large file → split → map → parse → OOM.
-  const source = raw.length > MAX_JSONL_BYTES
-    ? raw.slice(-MAX_JSONL_BYTES)
-    : raw;
-  return source.trim().split("\n").map(line => {
-    try { return JSON.parse(line); }
-    catch { return null; }
-  }).filter(Boolean) as unknown[];
-}
+// MAX_JSONL_BYTES and parseJSONL are imported from ./jsonl-utils.js
 
 /**
  * Find the entries belonging to the last session in a JSONL file.

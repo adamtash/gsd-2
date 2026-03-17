@@ -10,7 +10,8 @@ import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@g
 import { showNextAction } from "../shared/next-action-ui.js";
 import { loadFile, parseRoadmap } from "./files.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
-import { deriveState, invalidateStateCache } from "./state.js";
+import { deriveState } from "./state.js";
+import { invalidateAllCaches } from "./cache.js";
 import { startAuto } from "./auto.js";
 import { readCrashLock, clearLock, formatCrashInfo } from "./crash-recovery.js";
 import { listUnitRuntimeRecords, clearUnitRuntimeRecord } from "./unit-runtime.js";
@@ -23,11 +24,14 @@ import {
 import { randomInt } from "node:crypto";
 import { join } from "node:path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync, unlinkSync } from "node:fs";
-import { nativeIsRepo, nativeInit, nativeAddPaths, nativeCommit } from "./native-git-bridge.js";
+import { nativeIsRepo, nativeInit, nativeAddPaths, nativeAddAll, nativeCommit } from "./native-git-bridge.js";
 import { ensureGitignore, ensurePreferences, untrackRuntimeFiles } from "./gitignore.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { detectProjectState } from "./detection.js";
+import { showProjectInit, offerMigration } from "./init-wizard.js";
 import { showConfirm } from "../shared/confirm-ui.js";
 import { loadQueueOrder, sortByQueueOrder, saveQueueOrder } from "./queue-order.js";
+import { debugLog } from "./debug-logger.js";
 
 // ─── Commit Instruction Helpers ──────────────────────────────────────────────
 
@@ -36,7 +40,7 @@ function buildDocsCommitInstruction(message: string): string {
   const prefs = loadEffectiveGSDPreferences();
   const commitDocsEnabled = prefs?.preferences?.git?.commit_docs !== false;
   return commitDocsEnabled
-    ? `Commit: \`${message}\``
+    ? `Commit: \`${message}\`. Stage only the .gsd/milestones/, .gsd/PROJECT.md, .gsd/REQUIREMENTS.md, .gsd/DECISIONS.md, and .gitignore files you changed — do not stage .gsd/STATE.md or other runtime files.`
     : "Do not commit — planning docs are not tracked in git for this project.";
 }
 
@@ -146,8 +150,9 @@ export function checkAutoStartAfterDiscuss(): boolean {
 
   pendingAutoStart = null;
   startAuto(ctx, pi, basePath, false, { step }).catch((err) => {
-    ctx.ui.notify(`Auto-start failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+    ctx.ui.notify(`Auto-start failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     if (process.env.GSD_DEBUG) console.error('[gsd] auto start error:', err);
+    debugLog("auto-start-failed", { error: err instanceof Error ? err.message : String(err) });
   });
   return true;
 }
@@ -450,7 +455,6 @@ async function handleQueueReorder(
   state: Awaited<ReturnType<typeof deriveState>>,
 ): Promise<void> {
   const { showQueueReorder: showReorderUI } = await import("./queue-reorder-ui.js");
-  const { invalidateStateCache } = await import("./state.js");
 
   const completed = state.registry
     .filter(m => m.status === "complete")
@@ -468,7 +472,7 @@ async function handleQueueReorder(
 
   // Save the new order
   saveQueueOrder(basePath, result.order);
-  invalidateStateCache();
+  invalidateAllCaches();
 
   // Remove conflicting depends_on entries from CONTEXT.md files
   if (result.depsToRemove.length > 0) {
@@ -1014,7 +1018,7 @@ export async function showDiscuss(
 
     // Wait for the discuss session to finish, then loop back to the picker
     await ctx.waitForIdle();
-    invalidateStateCache();
+    invalidateAllCaches();
   }
 }
 
@@ -1067,6 +1071,30 @@ export async function showSmartEntry(
 ): Promise<void> {
   const stepMode = options?.step;
 
+  // ── Detection preamble — run before any bootstrap ────────────────────
+  if (!existsSync(join(basePath, ".gsd"))) {
+    const detection = detectProjectState(basePath);
+
+    // v1 .planning/ detected — offer migration before anything else
+    if (detection.state === "v1-planning" && detection.v1) {
+      const migrationChoice = await offerMigration(ctx, detection.v1);
+      if (migrationChoice === "cancel") return;
+      if (migrationChoice === "migrate") {
+        const { handleMigrate } = await import("./migrate/command.js");
+        await handleMigrate("", ctx, pi);
+        return;
+      }
+      // "fresh" — fall through to init wizard
+    }
+
+    // No .gsd/ — run the project init wizard
+    const result = await showProjectInit(ctx, pi, basePath, detection);
+    if (!result.completed) return; // User cancelled
+
+    // Init wizard bootstrapped .gsd/ — fall through to the normal flow below
+    // which will detect "no milestones" and start the discuss prompt
+  }
+
   // ── Ensure git repo exists — GSD needs it for worktree isolation ──────
   if (!nativeIsRepo(basePath)) {
     const mainBranch = loadEffectiveGSDPreferences()?.preferences?.git?.main_branch || "main";
@@ -1077,25 +1105,6 @@ export async function showSmartEntry(
   const commitDocs = loadEffectiveGSDPreferences()?.preferences?.git?.commit_docs;
   ensureGitignore(basePath, { commitDocs });
   untrackRuntimeFiles(basePath);
-
-  // ── No GSD project OR no milestone → Create first/next milestone ────
-  if (!existsSync(join(basePath, ".gsd"))) {
-    // Bootstrap .gsd/ silently — the user wants a milestone, not to "init"
-    const gsd = gsdRoot(basePath);
-    mkdirSync(join(gsd, "milestones"), { recursive: true });
-
-    // ── Create PREFERENCES.md template ────────────────────────────────
-    ensurePreferences(basePath);
-    // Only commit .gsd/ init when commit_docs is not explicitly false
-    if (commitDocs !== false) {
-      try {
-        nativeAddPaths(basePath, [".gsd", ".gitignore"]);
-        nativeCommit(basePath, "chore: init gsd");
-      } catch {
-        // nothing to commit — that's fine
-      }
-    }
-  }
 
   // ── Self-heal stale runtime records from crashed auto-mode sessions ──
   selfHealRuntimeRecords(basePath, ctx);

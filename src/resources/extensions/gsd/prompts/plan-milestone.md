@@ -16,7 +16,7 @@ A **researcher agent** already explored the codebase and documented findings in 
 
 After you finish, each slice goes through its own research → plan → execute cycle. Slice researchers dive deeper into the specific area. Slice planners decompose into tasks. Executors build each task. Your roadmap sets the strategic frame for all of them.
 
-Narrate your decomposition reasoning — why you're grouping work this way, what risks are driving the order, what verification strategy you're choosing and why.
+Narrate your decomposition reasoning — why you're grouping work this way, what risks are driving the order, what verification strategy you're choosing and why. Use complete sentences rather than planner shorthand or fragmentary notes.
 
 Then:
 1. Use the **Roadmap** output template from the inlined context above
@@ -25,7 +25,6 @@ Then:
 4. Order by risk (high-risk first)
 5. Write `{{outputPath}}` with checkboxes, risk, depends, demo sentences, proof strategy, verification classes, milestone definition of done, **requirement coverage**, and a boundary map. Write success criteria as observable truths, not implementation tasks. If the milestone crosses multiple runtime boundaries, include an explicit final integration slice that proves the assembled system works end-to-end in a real environment
 6. If planning produced structural decisions (e.g. slice ordering rationale, technology choices, scope exclusions), append them to `.gsd/DECISIONS.md` (use the **Decisions** output template from the inlined context above if the file doesn't exist yet)
-7. Update `.gsd/STATE.md`
 
 ## Requirement Mapping Rules
 
