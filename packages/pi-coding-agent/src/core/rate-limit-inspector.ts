@@ -114,8 +114,8 @@ export function formatResetTime(resetAt: number | null | undefined): string {
 	});
 }
 
-function formatUtilization(window: RateLimitWindow | null): string {
-	if (!window || window.utilization == null) return "n/a";
+function formatUtilization(window: RateLimitWindow | null): string | null {
+	if (!window || window.utilization == null) return null;
 	return `${Math.round(window.utilization)}%`;
 }
 
@@ -123,10 +123,12 @@ export function formatActiveRateLimitSummary(info: CredentialRateLimitInfo | und
 	if (!info) return undefined;
 	const windows: string[] = [];
 	if (info.fiveHour) {
-		windows.push(`5h ${formatUtilization(info.fiveHour)} reset ${formatResetTime(info.fiveHour.resetsAt)}`);
+		const util = formatUtilization(info.fiveHour);
+		windows.push(`5h${util ? ` ${util}` : ""} reset ${formatResetTime(info.fiveHour.resetsAt)}`);
 	}
 	if (info.weekly) {
-		windows.push(`7d ${formatUtilization(info.weekly)} reset ${formatResetTime(info.weekly.resetsAt)}`);
+		const util = formatUtilization(info.weekly);
+		windows.push(`7d${util ? ` ${util}` : ""} reset ${formatResetTime(info.weekly.resetsAt)}`);
 	}
 	if (info.isRateLimited) {
 		const waitText = info.availableAt ? formatRelativeTime(info.availableAt) : "until reset";

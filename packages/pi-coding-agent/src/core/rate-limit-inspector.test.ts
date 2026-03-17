@@ -96,6 +96,17 @@ describe("formatActiveRateLimitSummary", () => {
 		assert.ok(result.includes("5h 42%"));
 	});
 
+	it("omits utilization when API returns null (no n/a shown)", () => {
+		const result = formatActiveRateLimitSummary(makeInfo({
+			fiveHour: { utilization: null, resetsAt: 1_700_000_000_000 },
+			weekly: { utilization: null, resetsAt: 1_700_000_000_000 },
+		}));
+		assert.ok(result);
+		assert.ok(!result.includes("n/a"), "should not show n/a");
+		assert.ok(result.includes("5h reset"), "should show 5h reset without utilization");
+		assert.ok(result.includes("7d reset"), "should show 7d reset without utilization");
+	});
+
 	it("returns blocked message when rate-limited", () => {
 		const now = Date.now();
 		const result = formatActiveRateLimitSummary(makeInfo({
