@@ -17,8 +17,8 @@ import type {
 } from "@gsd/pi-coding-agent";
 
 import { deriveState } from "./state.js";
-import type { BudgetEnforcementMode, GSDState } from "./types.js";
-import { loadFile, parseRoadmap, getManifestStatus, resolveAllOverrides, parsePlan, parseSummary } from "./files.js";
+import type { GSDState } from "./types.js";
+import { loadFile, getManifestStatus, resolveAllOverrides, parsePlan, parseSummary } from "./files.js";
 import { loadPrompt } from "./prompt-loader.js";
 import { runVerificationGate, formatFailureContext, captureRuntimeErrors, runDependencyAudit } from "./verification-gate.js";
 import { writeVerificationJSON } from "./verification-evidence.js";
@@ -27,9 +27,7 @@ import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
 import {
   gsdRoot, resolveMilestoneFile, resolveSliceFile, resolveSlicePath,
   resolveMilestonePath, resolveDir, resolveTasksDir, resolveTaskFile,
-  relMilestoneFile, relSliceFile, relSlicePath, relMilestonePath,
-  milestonesDir,
-  buildMilestoneFileName, buildSliceFileName, buildTaskFileName,
+  milestonesDir, buildTaskFileName,
 } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
 import { saveActivityLog, clearActivityLogState } from "./activity-log.js";
@@ -37,16 +35,42 @@ import { synthesizeCrashRecovery, getDeepDiagnostic } from "./session-forensics.
 import { writeLock, clearLock, readCrashLock, formatCrashInfo, isLockProcessAlive } from "./crash-recovery.js";
 import {
   clearUnitRuntimeRecord,
-  formatExecuteTaskRecoveryStatus,
   inspectExecuteTaskDurability,
   readUnitRuntimeRecord,
   writeUnitRuntimeRecord,
 } from "./unit-runtime.js";
-import { resolveAutoSupervisorConfig, resolveModelWithFallbacksForUnit, loadEffectiveGSDPreferences, resolveSkillDiscoveryMode, resolveDynamicRoutingConfig, getIsolationMode } from "./preferences.js";
+import { resolveAutoSupervisorConfig, loadEffectiveGSDPreferences, resolveSkillDiscoveryMode, getIsolationMode } from "./preferences.js";
 import { sendDesktopNotification } from "./notifications.js";
 import type { GSDPreferences } from "./preferences.js";
-import { classifyUnitComplexity, tierLabel } from "./complexity-classifier.js";
-import { resolveModelForComplexity } from "./model-router.js";
+import {
+  type BudgetAlertLevel,
+  getBudgetAlertLevel,
+  getNewBudgetAlertLevel,
+  getBudgetEnforcementAction,
+} from "./auto-budget.js";
+import {
+  markToolStart as _markToolStart,
+  markToolEnd as _markToolEnd,
+  getOldestInFlightToolAgeMs as _getOldestInFlightToolAgeMs,
+  getInFlightToolCount,
+  getOldestInFlightToolStart,
+  clearInFlightTools,
+} from "./auto-tool-tracking.js";
+import {
+  collectObservabilityWarnings as _collectObservabilityWarnings,
+  buildObservabilityRepairBlock,
+} from "./auto-observability.js";
+import { closeoutUnit } from "./auto-unit-closeout.js";
+import { recoverTimedOutUnit } from "./auto-timeout-recovery.js";
+import { selectAndApplyModel } from "./auto-model-selection.js";
+import {
+  syncProjectRootToWorktree,
+  syncStateToProjectRoot,
+  readResourceVersion,
+  checkResourcesStale,
+  escapeStaleWorktree,
+} from "./auto-worktree-sync.js";
+// complexity-classifier + model-router imports moved to auto-model-selection.ts
 import { initRoutingHistory, resetRoutingHistory, recordOutcome } from "./routing-history.js";
 import {
   checkPostUnitHooks,
@@ -59,12 +83,7 @@ import {
   restoreHookState,
   clearPersistedHookState,
 } from "./post-unit-hooks.js";
-import {
-  validatePlanBoundary,
-  validateExecuteBoundary,
-  validateCompleteBoundary,
-  formatValidationIssues,
-} from "./observability-validator.js";
+// observability-validator imports moved to auto-observability.ts
 import { ensureGitignore, untrackRuntimeFiles } from "./gitignore.js";
 import { runGSDDoctor, rebuildState, summarizeDoctorIssues } from "./doctor.js";
 import {
@@ -78,14 +97,13 @@ import {
 import { snapshotSkills, clearSkillSnapshot } from "./skill-discovery.js";
 import { captureAvailableSkills, getAndClearSkills, resetSkillTelemetry } from "./skill-telemetry.js";
 import {
-  initMetrics, resetMetrics, snapshotUnitMetrics, getLedger,
+  initMetrics, resetMetrics, getLedger,
   getProjectTotals, formatCost, formatTokenCount,
 } from "./metrics.js";
 import { computeBudgets, resolveExecutorContextWindow } from "./context-budget.js";
 import { join } from "node:path";
 import { sep as pathSep } from "node:path";
-import { homedir } from "node:os";
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, statSync, cpSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, statSync } from "node:fs";
 import { nativeIsRepo, nativeInit, nativeAddPaths, nativeCommit } from "./native-git-bridge.js";
 import {
   autoCommitCurrentBranch,
@@ -129,18 +147,7 @@ import {
   reconcileMergeState,
 } from "./auto-recovery.js";
 import { resolveDispatch, resetRewriteCircuitBreaker } from "./auto-dispatch.js";
-import {
-  buildResearchSlicePrompt,
-  buildResearchMilestonePrompt,
-  buildPlanSlicePrompt,
-  buildPlanMilestonePrompt,
-  buildExecuteTaskPrompt,
-  buildCompleteSlicePrompt,
-  buildCompleteMilestonePrompt,
-  buildReassessRoadmapPrompt,
-  buildRunUatPrompt,
-  buildReplanSlicePrompt,
-} from "./auto-prompts.js";
+// Prompt builders moved to auto-direct-dispatch.ts (only used there now)
 import {
   type AutoDashboardData,
   updateProgressWidget as _updateProgressWidget,
@@ -148,7 +155,6 @@ import {
   clearSliceProgressCache,
   describeNextUnit as _describeNextUnit,
   unitVerb,
-  unitPhaseLabel,
   formatAutoElapsed as _formatAutoElapsed,
   formatWidgetTokens,
   hideFooter,
@@ -162,108 +168,7 @@ import {
 import { isDbAvailable } from "./gsd-db.js";
 import { hasPendingCaptures, loadPendingCaptures, countPendingCaptures } from "./captures.js";
 
-// ─── Worktree → Project Root State Sync ───────────────────────────────────────
-// When running in an auto-worktree, dispatch state (.gsd/ metadata) diverges
-// between the worktree (where work happens) and the project root (where
-// startAutoMode reads initial state on restart). Without syncing, restarting
-// auto-mode reads stale state from the project root and re-dispatches
-// already-completed units.
-
-/**
- * Sync milestone artifacts from project root INTO worktree before deriveState.
- * Covers the case where the LLM wrote artifacts to the main repo filesystem
- * (e.g. via absolute paths) but the worktree has stale data. Also deletes
- * gsd.db in the worktree so it rebuilds from fresh disk state (#853).
- * Non-fatal — sync failure should never block dispatch.
- */
-function syncProjectRootToWorktree(projectRoot: string, worktreePath: string, milestoneId: string | null): void {
-  if (!worktreePath || !projectRoot || worktreePath === projectRoot) return;
-  if (!milestoneId) return;
-
-  const prGsd = join(projectRoot, ".gsd");
-  const wtGsd = join(worktreePath, ".gsd");
-
-  // Copy milestone directory from project root to worktree if the project root
-  // has newer artifacts (e.g. slices that don't exist in the worktree yet)
-  try {
-    const srcMilestone = join(prGsd, "milestones", milestoneId);
-    const dstMilestone = join(wtGsd, "milestones", milestoneId);
-    if (existsSync(srcMilestone)) {
-      mkdirSync(dstMilestone, { recursive: true });
-      cpSync(srcMilestone, dstMilestone, { recursive: true, force: false });
-    }
-  } catch { /* non-fatal */ }
-
-  // Delete worktree gsd.db so it rebuilds from the freshly synced files.
-  // Stale DB rows are the root cause of the infinite skip loop (#853).
-  try {
-    const wtDb = join(wtGsd, "gsd.db");
-    if (existsSync(wtDb)) {
-      unlinkSync(wtDb);
-    }
-  } catch { /* non-fatal */ }
-}
-
-/**
- * Sync dispatch-critical .gsd/ state files from worktree to project root.
- * Only runs when inside an auto-worktree (worktreePath differs from projectRoot).
- * Copies: STATE.md + active milestone directory (roadmap, slice plans, task summaries).
- * Non-fatal — sync failure should never block dispatch.
- */
-function syncStateToProjectRoot(worktreePath: string, projectRoot: string, milestoneId: string | null): void {
-  if (!worktreePath || !projectRoot || worktreePath === projectRoot) return;
-  if (!milestoneId) return;
-
-  const wtGsd = join(worktreePath, ".gsd");
-  const prGsd = join(projectRoot, ".gsd");
-
-  // 1. STATE.md — the quick-glance status used by initial deriveState()
-  try {
-    const src = join(wtGsd, "STATE.md");
-    const dst = join(prGsd, "STATE.md");
-    if (existsSync(src)) cpSync(src, dst, { force: true });
-  } catch { /* non-fatal */ }
-
-  // 2. Milestone directory — ROADMAP, slice PLANs, task summaries
-  // Copy the entire milestone .gsd subtree so deriveState reads current checkboxes
-  try {
-    const srcMilestone = join(wtGsd, "milestones", milestoneId);
-    const dstMilestone = join(prGsd, "milestones", milestoneId);
-    if (existsSync(srcMilestone)) {
-      mkdirSync(dstMilestone, { recursive: true });
-      cpSync(srcMilestone, dstMilestone, { recursive: true, force: true });
-    }
-  } catch { /* non-fatal */ }
-
-  // 3. Merge completed-units.json (set-union of both locations)
-  // Prevents already-completed units from being re-dispatched after crash/restart.
-  const srcKeysFile = join(wtGsd, "completed-units.json");
-  const dstKeysFile = join(prGsd, "completed-units.json");
-  if (existsSync(srcKeysFile)) {
-    try {
-      const srcKeys: string[] = JSON.parse(readFileSync(srcKeysFile, "utf8"));
-      let dstKeys: string[] = [];
-      if (existsSync(dstKeysFile)) {
-        try { dstKeys = JSON.parse(readFileSync(dstKeysFile, "utf8")); } catch { /* ignore corrupt dst */ }
-      }
-      const merged = [...new Set([...dstKeys, ...srcKeys])];
-      writeFileSync(dstKeysFile, JSON.stringify(merged, null, 2));
-    } catch { /* non-fatal */ }
-  }
-
-  // 4. Runtime records — unit dispatch state used by selfHealRuntimeRecords().
-  // Without this, a crash during a unit leaves the runtime record only in the
-  // worktree. If the next session resolves basePath before worktree re-entry,
-  // selfHeal can't find or clear the stale record (#769).
-  try {
-    const srcRuntime = join(wtGsd, "runtime", "units");
-    const dstRuntime = join(prGsd, "runtime", "units");
-    if (existsSync(srcRuntime)) {
-      mkdirSync(dstRuntime, { recursive: true });
-      cpSync(srcRuntime, dstRuntime, { recursive: true, force: true });
-    }
-  } catch { /* non-fatal */ }
-}
+// Worktree sync, resource staleness, stale worktree escape → auto-worktree-sync.ts
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -299,75 +204,13 @@ const MAX_CONSECUTIVE_SKIPS = 3;
 /** Persisted completed-unit keys — survives restarts. Loaded from .gsd/completed-units.json. */
 const completedKeySet = new Set<string>();
 
-/** Resource version captured at auto-mode start. If the managed-resources
- *  manifest version changes mid-session (e.g. npm update -g gsd-pi),
- *  templates on disk may expect variables the in-memory code doesn't provide.
- *  Detect this and stop gracefully instead of crashing.
- *  Uses gsdVersion (semver) instead of syncedAt (timestamp) so that
- *  launching a second session doesn't falsely trigger staleness (#804). */
 let resourceVersionOnStart: string | null = null;
 
-function readResourceVersion(): string | null {
-  const agentDir = process.env.GSD_CODING_AGENT_DIR || join(homedir(), ".gsd", "agent");
-  const manifestPath = join(agentDir, "managed-resources.json");
-  try {
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-    return typeof manifest?.gsdVersion === "string" ? manifest.gsdVersion : null;
-  } catch {
-    return null;
-  }
-}
-
-function checkResourcesStale(): string | null {
-  if (resourceVersionOnStart === null) return null;
-  const current = readResourceVersion();
-  if (current === null) return null;
-  if (current !== resourceVersionOnStart) {
-    return "GSD resources were updated since this session started. Restart gsd to load the new code.";
-  }
-  return null;
-}
-
-/**
- * Resolve whether auto-mode should use worktree isolation.
- * Returns true for worktree mode (default), false for branch and none modes.
- * Branch mode works directly in the project root — useful for repos
- * with git submodules where worktrees don't work well (#531).
- * None mode skips all worktree and milestone-branch logic — commits
- * land on the current branch with no isolation (#M001-S02).
- */
 export function shouldUseWorktreeIsolation(): boolean {
   const prefs = loadEffectiveGSDPreferences()?.preferences?.git;
   if (prefs?.isolation === "none") return false;
   if (prefs?.isolation === "branch") return false;
   return true; // default: worktree
-}
-
-/**
- * Detect and escape a stale worktree cwd (#608).
- *
- * After milestone completion + merge, the worktree directory is removed but
- * the process cwd may still point inside `.gsd/worktrees/<MID>/`.
- * When a new session starts, `process.cwd()` is passed as `base` to startAuto
- * and all subsequent writes land in the wrong directory. This function detects
- * that scenario and chdir back to the project root.
- *
- * Returns the corrected base path.
- */
-function escapeStaleWorktree(base: string): string {
-  const marker = `${pathSep}.gsd${pathSep}worktrees${pathSep}`;
-  const idx = base.indexOf(marker);
-  if (idx === -1) return base;
-
-  // base is inside .gsd/worktrees/<something> — extract the project root
-  const projectRoot = base.slice(0, idx);
-  try {
-    process.chdir(projectRoot);
-  } catch {
-    // If chdir fails, return the original — caller will handle errors downstream
-    return base;
-  }
-  return projectRoot;
 }
 
 /** Crash recovery prompt — set by startAuto, consumed by first dispatchNextUnit */
@@ -436,33 +279,8 @@ let _sigtermHandler: (() => void) | null = null;
  * Maps toolCallId → start timestamp (ms) so the idle watchdog can detect tools that have been
  * running suspiciously long (e.g., a Bash command hung because `&` kept stdout open).
  */
-const inFlightTools = new Map<string, number>();
-
-type BudgetAlertLevel = 0 | 75 | 80 | 90 | 100;
-
-export function getBudgetAlertLevel(budgetPct: number): BudgetAlertLevel {
-  if (budgetPct >= 1.0) return 100;
-  if (budgetPct >= 0.90) return 90;
-  if (budgetPct >= 0.80) return 80;
-  if (budgetPct >= 0.75) return 75;
-  return 0;
-}
-
-export function getNewBudgetAlertLevel(previousLevel: BudgetAlertLevel, budgetPct: number): BudgetAlertLevel | null {
-  const currentLevel = getBudgetAlertLevel(budgetPct);
-  if (currentLevel === 0 || currentLevel <= previousLevel) return null;
-  return currentLevel;
-}
-
-export function getBudgetEnforcementAction(
-  enforcement: BudgetEnforcementMode,
-  budgetPct: number,
-): "none" | "warn" | "pause" | "halt" {
-  if (budgetPct < 1.0) return "none";
-  if (enforcement === "halt") return "halt";
-  if (enforcement === "pause") return "pause";
-  return "warn";
-}
+// Re-export budget utilities for external consumers
+export { getBudgetAlertLevel, getNewBudgetAlertLevel, getBudgetEnforcementAction } from "./auto-budget.js";
 
 /** Wrapper: register SIGTERM handler and store reference. */
 function registerSigtermHandler(currentBasePath: string): void {
@@ -514,30 +332,17 @@ export function isAutoPaused(): boolean {
   return paused;
 }
 
-/**
- * Mark a tool execution as in-flight. Called from index.ts on tool_execution_start.
- * Records start time so the idle watchdog can detect tools hung longer than the idle timeout.
- */
+// Tool tracking — delegates to auto-tool-tracking.ts
 export function markToolStart(toolCallId: string): void {
-  if (!active) return;
-  inFlightTools.set(toolCallId, Date.now());
+  _markToolStart(toolCallId, active);
 }
 
-/**
- * Mark a tool execution as completed. Called from index.ts on tool_execution_end.
- */
 export function markToolEnd(toolCallId: string): void {
-  inFlightTools.delete(toolCallId);
+  _markToolEnd(toolCallId);
 }
 
-/**
- * Returns the age (ms) of the oldest currently in-flight tool, or 0 if none.
- * Exported for testing.
- */
 export function getOldestInFlightToolAgeMs(): number {
-  if (inFlightTools.size === 0) return 0;
-  const oldestStart = Math.min(...inFlightTools.values());
-  return Date.now() - oldestStart;
+  return _getOldestInFlightToolAgeMs();
 }
 
 /**
@@ -596,7 +401,7 @@ function clearUnitTimeout(): void {
     clearInterval(continueHereHandle);
     continueHereHandle = null;
   }
-  inFlightTools.clear();
+  clearInFlightTools();
   clearDispatchGapWatchdog();
 }
 
@@ -742,7 +547,7 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI, reason
   unitDispatchCount.clear();
   unitRecoveryCount.clear();
   unitConsecutiveSkips.clear();
-  inFlightTools.clear();
+  clearInFlightTools();
   lastBudgetAlertLevel = 0;
   unitLifetimeDispatches.clear();
   currentUnit = null;
@@ -1779,18 +1584,7 @@ export async function handleAgentEnd(
       // Dispatch the hook unit instead of normal flow
       const hookStartedAt = Date.now();
       if (currentUnit) {
-        const modelId = ctx.model?.id ?? "unknown";
-        snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
-        const hookActivityFile = saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-        if (hookActivityFile) {
-          try {
-            const { buildMemoryLLMCall, extractMemoriesFromUnit } = await import('./memory-extractor.js');
-            const llmCallFn = buildMemoryLLMCall(ctx);
-            if (llmCallFn) {
-              extractMemoriesFromUnit(hookActivityFile, currentUnit.type, currentUnit.id, llmCallFn).catch(() => {});
-            }
-          } catch { /* non-fatal */ }
-        }
+        await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
       }
       currentUnit = { type: hookUnit.unitType, id: hookUnit.unitId, startedAt: hookStartedAt };
       writeUnitRuntimeRecord(basePath, hookUnit.unitType, hookUnit.unitId, hookStartedAt, {
@@ -1930,18 +1724,7 @@ export async function handleAgentEnd(
 
             // Close out previous unit metrics
             if (currentUnit) {
-              const modelId = ctx.model?.id ?? "unknown";
-              snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
-              const triageActivityFile = saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-              if (triageActivityFile) {
-                try {
-                  const { buildMemoryLLMCall, extractMemoriesFromUnit } = await import('./memory-extractor.js');
-                  const llmCallFn = buildMemoryLLMCall(ctx);
-                  if (llmCallFn) {
-                    extractMemoriesFromUnit(triageActivityFile, currentUnit.type, currentUnit.id, llmCallFn).catch(() => {});
-                  }
-                } catch { /* non-fatal */ }
-              }
+              await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt);
             }
 
             // Dispatch triage as a new unit (early-dispatch-and-return)
@@ -2017,18 +1800,7 @@ export async function handleAgentEnd(
 
       // Close out previous unit metrics
       if (currentUnit) {
-        const modelId = ctx.model?.id ?? "unknown";
-        snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
-        const qtActivityFile = saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-        if (qtActivityFile) {
-          try {
-            const { buildMemoryLLMCall, extractMemoriesFromUnit } = await import('./memory-extractor.js');
-            const llmCallFn = buildMemoryLLMCall(ctx);
-            if (llmCallFn) {
-              extractMemoriesFromUnit(qtActivityFile, currentUnit.type, currentUnit.id, llmCallFn).catch(() => {});
-            }
-          } catch { /* non-fatal */ }
-        }
+        await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt);
       }
 
       // Dispatch quick-task as a new unit
@@ -2273,7 +2045,7 @@ async function dispatchNextUnit(
   // once at startup. If resources were re-synced (e.g. /gsd:update, npm update,
   // or dev copy-resources), templates may expect variables the in-memory code
   // doesn't provide. Stop gracefully instead of crashing.
-  const staleMsg = checkResourcesStale();
+  const staleMsg = checkResourcesStale(resourceVersionOnStart);
   if (staleMsg) {
     await stopAuto(ctx, pi, staleMsg);
     return;
@@ -2475,9 +2247,7 @@ async function dispatchNextUnit(
   if (!mid) {
     // Save final session before stopping
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
-      saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
     }
 
     const incomplete = state.registry.filter(m => m.status !== "complete");
@@ -2520,9 +2290,7 @@ async function dispatchNextUnit(
   // After merge guard removal (branchless architecture), mid/midTitle could be undefined
   if (!mid || !midTitle) {
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
-      saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
     }
     const noMilestoneReason = !mid
       ? "No active milestone after merge reconciliation"
@@ -2538,9 +2306,7 @@ async function dispatchNextUnit(
 
   if (state.phase === "complete") {
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
-      saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
     }
     // Clear completed-units.json for the finished milestone so it doesn't grow unbounded.
     try {
@@ -2608,9 +2374,7 @@ async function dispatchNextUnit(
 
   if (state.phase === "blocked") {
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
-      saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
     }
     const blockerMsg = `Blocked: ${state.blockers.join(", ")}`;
     await stopAuto(ctx, pi, blockerMsg);
@@ -2719,9 +2483,7 @@ async function dispatchNextUnit(
 
   if (dispatchResult.action === "stop") {
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
-      saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
     }
     await stopAuto(ctx, pi, dispatchResult.reason);
     return;
@@ -2767,7 +2529,7 @@ async function dispatchNextUnit(
     return;
   }
 
-  const observabilityIssues = await collectObservabilityWarnings(ctx, unitType, unitId);
+  const observabilityIssues = await _collectObservabilityWarnings(ctx, basePath, unitType, unitId);
 
   // Idempotency: skip units already completed in a prior session.
   const idempotencyKey = `${unitType}/${unitId}`;
@@ -2941,10 +2703,10 @@ async function dispatchNextUnit(
   unitLifetimeDispatches.set(dispatchKey, lifetimeCount);
   if (lifetimeCount > MAX_LIFETIME_DISPATCHES) {
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+    } else {
+      saveActivityLog(ctx, basePath, unitType, unitId);
     }
-    saveActivityLog(ctx, basePath, unitType, unitId);
     const expected = diagnoseExpectedArtifact(unitType, unitId, basePath);
     await stopAuto(ctx, pi, `Hard loop: ${unitType} ${unitId}`);
     ctx.ui.notify(
@@ -2955,10 +2717,10 @@ async function dispatchNextUnit(
   }
   if (prevCount >= MAX_UNIT_DISPATCHES) {
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+    } else {
+      saveActivityLog(ctx, basePath, unitType, unitId);
     }
-    saveActivityLog(ctx, basePath, unitType, unitId);
 
     // Final reconciliation pass for execute-task: write any missing durable
     // artifacts (summary placeholder + [x] checkbox) so the pipeline can
@@ -3113,20 +2875,7 @@ async function dispatchNextUnit(
   // Snapshot metrics + activity log for the PREVIOUS unit before we reassign.
   // The session still holds the previous unit's data (newSession hasn't fired yet).
   if (currentUnit) {
-    const modelId = ctx.model?.id ?? "unknown";
-    snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
-    const activityFile = saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-
-    // Fire-and-forget memory extraction from completed unit
-    if (activityFile) {
-      try {
-        const { buildMemoryLLMCall, extractMemoriesFromUnit } = await import('./memory-extractor.js');
-        const llmCallFn = buildMemoryLLMCall(ctx);
-        if (llmCallFn) {
-          extractMemoriesFromUnit(activityFile, currentUnit.type, currentUnit.id, llmCallFn).catch(() => {});
-        }
-      } catch { /* non-fatal */ }
-    }
+    await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
 
     // Record routing outcome for adaptive learning
     if (currentUnitRouting) {
@@ -3266,158 +3015,9 @@ async function dispatchNextUnit(
     }
   }
 
-  // Switch model if preferences specify one for this unit type
-  // Try primary model, then fallbacks in order if setting fails
-  const modelConfig = resolveModelWithFallbacksForUnit(unitType);
-  if (modelConfig) {
-    const availableModels = ctx.modelRegistry.getAvailable();
-
-    // ─── Dynamic Model Routing ─────────────────────────────────────────
-    // If enabled, classify unit complexity and potentially downgrade to a
-    // cheaper model. The user's configured model is the ceiling.
-    const routingConfig = resolveDynamicRoutingConfig();
-    let effectiveModelConfig = modelConfig;
-    let routingTierLabel = "";
-    currentUnitRouting = null;
-
-    if (routingConfig.enabled) {
-      // Compute budget pressure if budget ceiling is set
-      let budgetPct: number | undefined;
-      if (routingConfig.budget_pressure !== false) {
-        const budgetCeiling = prefs?.budget_ceiling;
-        if (budgetCeiling !== undefined && budgetCeiling > 0) {
-          const currentLedger = getLedger();
-          const totalCost = currentLedger ? getProjectTotals(currentLedger.units).cost : 0;
-          budgetPct = totalCost / budgetCeiling;
-        }
-      }
-
-      // Classify complexity (hook routing controlled by config.hooks)
-      const isHook = unitType.startsWith("hook/");
-      const shouldClassify = !isHook || routingConfig.hooks !== false;
-
-      if (shouldClassify) {
-        const classification = classifyUnitComplexity(unitType, unitId, basePath, budgetPct);
-        const availableModelIds = availableModels.map(m => m.id);
-        const routing = resolveModelForComplexity(classification, modelConfig, routingConfig, availableModelIds);
-
-        if (routing.wasDowngraded) {
-          effectiveModelConfig = {
-            primary: routing.modelId,
-            fallbacks: routing.fallbacks,
-          };
-          if (verbose) {
-            ctx.ui.notify(
-              `Dynamic routing [${tierLabel(classification.tier)}]: ${routing.modelId} (${classification.reason})`,
-              "info",
-            );
-          }
-        }
-        routingTierLabel = ` [${tierLabel(classification.tier)}]`;
-        currentUnitRouting = { tier: classification.tier, modelDowngraded: routing.wasDowngraded };
-      }
-    }
-
-    const modelsToTry = [effectiveModelConfig.primary, ...effectiveModelConfig.fallbacks];
-    let modelSet = false;
-
-    for (const modelId of modelsToTry) {
-      // Resolve model from available models.
-      // Handles multiple formats:
-      //   "provider/model"           → explicit provider targeting (e.g. "anthropic/claude-opus-4-6")
-      //   "bare-id"                  → match by ID across providers
-      //   "org/model-name"           → OpenRouter-style IDs where the full string is the model ID
-      //   "openrouter/org/model"     → explicit provider + OpenRouter model ID
-      const slashIdx = modelId.indexOf("/");
-      let model;
-      if (slashIdx !== -1) {
-        const maybeProvider = modelId.substring(0, slashIdx);
-        const id = modelId.substring(slashIdx + 1);
-
-        // Check if the prefix before the first slash is a known provider
-        const knownProviders = new Set(availableModels.map(m => m.provider.toLowerCase()));
-        if (knownProviders.has(maybeProvider.toLowerCase())) {
-          // Explicit "provider/model" format (handles "openrouter/org/model" too)
-          model = availableModels.find(
-            m => m.provider.toLowerCase() === maybeProvider.toLowerCase()
-              && m.id.toLowerCase() === id.toLowerCase(),
-          );
-        }
-
-        // If the prefix wasn't a known provider, or no match was found within that provider,
-        // try matching the full string as a model ID (OpenRouter-style IDs like "org/model-name")
-        if (!model) {
-          const lower = modelId.toLowerCase();
-          model = availableModels.find(
-            m => m.id.toLowerCase() === lower
-              || `${m.provider}/${m.id}`.toLowerCase() === lower,
-          );
-        }
-      } else {
-        // For bare IDs, prefer the current session's provider, then first available match
-        const currentProvider = ctx.model?.provider;
-        const exactProviderMatch = availableModels.find(
-          m => m.id === modelId && m.provider === currentProvider,
-        );
-        const anyMatch = availableModels.find(m => m.id === modelId);
-        model = exactProviderMatch ?? anyMatch;
-
-        // Warn if the ID is ambiguous across providers
-        if (anyMatch && !exactProviderMatch) {
-          const providers = availableModels
-            .filter(m => m.id === modelId)
-            .map(m => m.provider);
-          if (providers.length > 1) {
-            ctx.ui.notify(
-              `Model ID "${modelId}" exists in multiple providers (${providers.join(", ")}). ` +
-              `Resolved to ${anyMatch.provider}. Use "provider/model" format for explicit targeting.`,
-              "warning",
-            );
-          }
-        }
-      }
-      if (!model) {
-        if (verbose) ctx.ui.notify(`Model ${modelId} not found, trying fallback.`, "info");
-        continue;
-      }
-
-      const ok = await pi.setModel(model, { persist: false });
-      if (ok) {
-        const fallbackNote = modelId === effectiveModelConfig.primary
-          ? ""
-          : ` (fallback from ${effectiveModelConfig.primary})`;
-        const phase = unitPhaseLabel(unitType);
-        ctx.ui.notify(`Model [${phase}]${routingTierLabel}: ${model.provider}/${model.id}${fallbackNote}`, "info");
-        modelSet = true;
-        break;
-      } else {
-        const nextModel = modelsToTry[modelsToTry.indexOf(modelId) + 1];
-        if (nextModel) {
-          if (verbose) ctx.ui.notify(`Failed to set model ${modelId}, trying ${nextModel}...`, "info");
-        } else {
-          ctx.ui.notify(`All preferred models unavailable for ${unitType}. Using default.`, "warning");
-        }
-      }
-    }
-
-    // modelSet=false is already handled by the "all fallbacks exhausted" warning above
-  } else if (autoModeStartModel) {
-    // No model preference for this unit type — re-apply the model captured
-    // at auto-mode start to prevent bleed from the shared global settings.json
-    // when multiple GSD instances run concurrently (#650).
-    const availableModels = ctx.modelRegistry.getAvailable();
-    const startModel = availableModels.find(
-      m => m.provider === autoModeStartModel!.provider && m.id === autoModeStartModel!.id,
-    );
-    if (startModel) {
-      const ok = await pi.setModel(startModel, { persist: false });
-      if (!ok) {
-        // Fallback: try matching just by ID across providers
-        const byId = availableModels.find(m => m.id === autoModeStartModel!.id);
-        if (byId) await pi.setModel(byId, { persist: false });
-      }
-    }
-  }
+  // Select and apply model for this unit (dynamic routing, fallback chains, etc.)
+  const modelResult = await selectAndApplyModel(ctx, pi, unitType, unitId, basePath, prefs, verbose, autoModeStartModel);
+  currentUnitRouting = modelResult.routing;
 
   // Start progress-aware supervision: a soft warning, an idle watchdog, and
   // a larger hard ceiling. Productive long-running tasks may continue past the
@@ -3464,8 +3064,8 @@ async function dispatchNextUnit(
     // if the tool started recently. A tool in-flight for longer than the idle
     // timeout is likely stuck — e.g., `python -m http.server 8080 &` keeps the
     // shell's stdout/stderr open, causing the Bash tool to hang indefinitely.
-    if (inFlightTools.size > 0) {
-      const oldestStart = Math.min(...inFlightTools.values());
+    if (getInFlightToolCount() > 0) {
+      const oldestStart = getOldestInFlightToolStart()!;
       const toolAgeMs = Date.now() - oldestStart;
       if (toolAgeMs < idleTimeoutMs) {
         writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
@@ -3495,12 +3095,12 @@ async function dispatchNextUnit(
     }
 
     if (currentUnit) {
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+    } else {
+      saveActivityLog(ctx, basePath, unitType, unitId);
     }
-    saveActivityLog(ctx, basePath, unitType, unitId);
 
-    const recovery = await recoverTimedOutUnit(ctx, pi, unitType, unitId, "idle");
+    const recovery = await recoverTimedOutUnit(ctx, pi, unitType, unitId, "idle", buildRecoveryContext());
     if (recovery === "recovered") return;
 
     writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
@@ -3521,12 +3121,12 @@ async function dispatchNextUnit(
         phase: "timeout",
         timeoutAt: Date.now(),
       });
-      const modelId = ctx.model?.id ?? "unknown";
-      snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+      await closeoutUnit(ctx, basePath, currentUnit.type, currentUnit.id, currentUnit.startedAt, buildSnapshotOpts(currentUnit.type, currentUnit.id));
+    } else {
+      saveActivityLog(ctx, basePath, unitType, unitId);
     }
-    saveActivityLog(ctx, basePath, unitType, unitId);
 
-    const recovery = await recoverTimedOutUnit(ctx, pi, unitType, unitId, "hard");
+    const recovery = await recoverTimedOutUnit(ctx, pi, unitType, unitId, "hard", buildRecoveryContext());
     if (recovery === "recovered") return;
 
     ctx.ui.notify(
@@ -3665,296 +3265,19 @@ function ensurePreconditions(
 
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
 
-async function collectObservabilityWarnings(
-  ctx: ExtensionContext,
-  unitType: string,
-  unitId: string,
-): Promise<import("./observability-validator.ts").ValidationIssue[]> {
-  // Hook units have custom artifacts — skip standard observability checks
-  if (unitType.startsWith("hook/")) return [];
+// collectObservabilityWarnings + buildObservabilityRepairBlock → auto-observability.ts
 
-  const parts = unitId.split("/");
-  const mid = parts[0];
-  const sid = parts[1];
-  const tid = parts[2];
+// recoverTimedOutUnit → auto-timeout-recovery.ts
 
-  if (!mid || !sid) return [];
-
-  let issues = [] as Awaited<ReturnType<typeof validatePlanBoundary>>;
-
-  if (unitType === "plan-slice") {
-    issues = await validatePlanBoundary(basePath, mid, sid);
-  } else if (unitType === "execute-task" && tid) {
-    issues = await validateExecuteBoundary(basePath, mid, sid, tid);
-  } else if (unitType === "complete-slice") {
-    issues = await validateCompleteBoundary(basePath, mid, sid);
-  }
-
-  if (issues.length > 0) {
-    ctx.ui.notify(
-      `Observability check (${unitType}) found ${issues.length} warning${issues.length === 1 ? "" : "s"}:\n${formatValidationIssues(issues)}`,
-      "warning",
-    );
-  }
-
-  return issues;
-}
-
-function buildObservabilityRepairBlock(issues: import("./observability-validator.ts").ValidationIssue[]): string {
-  if (issues.length === 0) return "";
-  const items = issues.map(issue => {
-    const fileName = issue.file.split("/").pop() || issue.file;
-    let line = `- **${fileName}**: ${issue.message}`;
-    if (issue.suggestion) line += ` → ${issue.suggestion}`;
-    return line;
-  });
-  return [
-    "",
-    "---",
-    "",
-    "## Pre-flight: Observability gaps to fix FIRST",
-    "",
-    "The following issues were detected in plan/summary files for this unit.",
-    "**Read each flagged file, apply the fix described, then proceed with the unit.**",
-    "",
-    ...items,
-    "",
-    "---",
-    "",
-  ].join("\n");
-}
-
-async function recoverTimedOutUnit(
-  ctx: ExtensionContext,
-  pi: ExtensionAPI,
-  unitType: string,
-  unitId: string,
-  reason: "idle" | "hard",
-): Promise<"recovered" | "paused"> {
-  if (!currentUnit) return "paused";
-
-  const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
-  const recoveryAttempts = runtime?.recoveryAttempts ?? 0;
-  const maxRecoveryAttempts = reason === "idle" ? 2 : 1;
-
-  const recoveryKey = `${unitType}/${unitId}`;
-  const attemptNumber = (unitRecoveryCount.get(recoveryKey) ?? 0) + 1;
-  unitRecoveryCount.set(recoveryKey, attemptNumber);
-
-  if (attemptNumber > 1) {
-    // Exponential backoff: 2^(n-1) seconds, capped at 30s
-    const backoffMs = Math.min(1000 * Math.pow(2, attemptNumber - 2), 30000);
-    ctx.ui.notify(
-      `Recovery attempt ${attemptNumber} for ${unitType} ${unitId}. Waiting ${backoffMs / 1000}s before retry.`,
-      "info",
-    );
-    await new Promise(r => setTimeout(r, backoffMs));
-  }
-
-  if (unitType === "execute-task") {
-    const status = await inspectExecuteTaskDurability(basePath, unitId);
-    if (!status) return "paused";
-
-    writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-      recovery: status,
-    });
-
-    const durableComplete = status.summaryExists && status.taskChecked && status.nextActionAdvanced;
-    if (durableComplete) {
-      writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-        phase: "finalized",
-        recovery: status,
-      });
-      ctx.ui.notify(
-        `${reason === "idle" ? "Idle" : "Timeout"} recovery: ${unitType} ${unitId} already completed on disk. Continuing auto-mode. (attempt ${attemptNumber})`,
-        "info",
-      );
-      unitRecoveryCount.delete(recoveryKey);
-      await dispatchNextUnit(ctx, pi);
-      return "recovered";
-    }
-
-    if (recoveryAttempts < maxRecoveryAttempts) {
-      const isEscalation = recoveryAttempts > 0;
-      writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-        phase: "recovered",
-        recovery: status,
-        recoveryAttempts: recoveryAttempts + 1,
-        lastRecoveryReason: reason,
-        lastProgressAt: Date.now(),
-        progressCount: (runtime?.progressCount ?? 0) + 1,
-        lastProgressKind: reason === "idle" ? "idle-recovery-retry" : "hard-recovery-retry",
-      });
-
-      const steeringLines = isEscalation
-        ? [
-            `**FINAL ${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — last chance before this task is skipped.**`,
-            `You are still executing ${unitType} ${unitId}.`,
-            `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts}.`,
-            `Current durability status: ${formatExecuteTaskRecoveryStatus(status)}.`,
-            "You MUST finish the durable output NOW, even if incomplete.",
-            "Write the task summary with whatever you have accomplished so far.",
-            "Mark the task [x] in the plan. Commit your work.",
-            "A partial summary is infinitely better than no summary.",
-          ]
-        : [
-            `**${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — do not stop.**`,
-            `You are still executing ${unitType} ${unitId}.`,
-            `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts}.`,
-            `Current durability status: ${formatExecuteTaskRecoveryStatus(status)}.`,
-            "Do not keep exploring.",
-            "Immediately finish the required durable output for this unit.",
-            "If full completion is impossible, write the partial artifact/state needed for recovery and make the blocker explicit.",
-          ];
-
-      pi.sendMessage(
-        {
-          customType: "gsd-auto-timeout-recovery",
-          display: verbose,
-          content: steeringLines.join("\n"),
-        },
-        { triggerTurn: true, deliverAs: "steer" },
-      );
-      ctx.ui.notify(
-        `${reason === "idle" ? "Idle" : "Timeout"} recovery: steering ${unitType} ${unitId} to finish durable output (attempt ${attemptNumber}, session ${recoveryAttempts + 1}/${maxRecoveryAttempts}).`,
-        "warning",
-      );
-      return "recovered";
-    }
-
-    // Retries exhausted — write missing durable artifacts and advance.
-    const diagnostic = formatExecuteTaskRecoveryStatus(status);
-    const [mid, sid, tid] = unitId.split("/");
-    const skipped = mid && sid && tid
-      ? skipExecuteTask(basePath, mid, sid, tid, status, reason, maxRecoveryAttempts)
-      : false;
-
-    if (skipped) {
-      writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-        phase: "skipped",
-        recovery: status,
-        recoveryAttempts: recoveryAttempts + 1,
-        lastRecoveryReason: reason,
-      });
-      ctx.ui.notify(
-        `${unitType} ${unitId} skipped after ${maxRecoveryAttempts} recovery attempts (${diagnostic}). Blocker artifacts written. Advancing pipeline. (attempt ${attemptNumber})`,
-        "warning",
-      );
-      unitRecoveryCount.delete(recoveryKey);
-      await dispatchNextUnit(ctx, pi);
-      return "recovered";
-    }
-
-    // Fallback: couldn't write skip artifacts — pause as before.
-    writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-      phase: "paused",
-      recovery: status,
-      recoveryAttempts: recoveryAttempts + 1,
-      lastRecoveryReason: reason,
-    });
-    ctx.ui.notify(
-      `${reason === "idle" ? "Idle" : "Timeout"} recovery check for ${unitType} ${unitId}: ${diagnostic}`,
-      "warning",
-    );
-    return "paused";
-  }
-
-  const expected = diagnoseExpectedArtifact(unitType, unitId, basePath) ?? "required durable artifact";
-
-  // Check if the artifact already exists on disk — agent may have written it
-  // without signaling completion.
-  const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
-  if (artifactPath && existsSync(artifactPath)) {
-    writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-      phase: "finalized",
-      recoveryAttempts: recoveryAttempts + 1,
-      lastRecoveryReason: reason,
-    });
-    ctx.ui.notify(
-      `${reason === "idle" ? "Idle" : "Timeout"} recovery: ${unitType} ${unitId} artifact already exists on disk. Advancing. (attempt ${attemptNumber})`,
-      "info",
-    );
-    unitRecoveryCount.delete(recoveryKey);
-    await dispatchNextUnit(ctx, pi);
-    return "recovered";
-  }
-
-  if (recoveryAttempts < maxRecoveryAttempts) {
-    const isEscalation = recoveryAttempts > 0;
-    writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-      phase: "recovered",
-      recoveryAttempts: recoveryAttempts + 1,
-      lastRecoveryReason: reason,
-      lastProgressAt: Date.now(),
-      progressCount: (runtime?.progressCount ?? 0) + 1,
-      lastProgressKind: reason === "idle" ? "idle-recovery-retry" : "hard-recovery-retry",
-    });
-
-    const steeringLines = isEscalation
-      ? [
-          `**FINAL ${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — last chance before skip.**`,
-          `You are still executing ${unitType} ${unitId}.`,
-          `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts} — next failure skips this unit.`,
-          `Expected durable output: ${expected}.`,
-          "You MUST write the artifact file NOW, even if incomplete.",
-          "Write whatever you have — partial research, preliminary findings, best-effort analysis.",
-          "A partial artifact is infinitely better than no artifact.",
-          "If you are truly blocked, write the file with a BLOCKER section explaining why.",
-        ]
-      : [
-          `**${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — stay in auto-mode.**`,
-          `You are still executing ${unitType} ${unitId}.`,
-          `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts}.`,
-          `Expected durable output: ${expected}.`,
-          "Stop broad exploration.",
-          "Write the required artifact now.",
-          "If blocked, write the partial artifact and explicitly record the blocker instead of going silent.",
-        ];
-
-    pi.sendMessage(
-      {
-        customType: "gsd-auto-timeout-recovery",
-        display: verbose,
-        content: steeringLines.join("\n"),
-      },
-      { triggerTurn: true, deliverAs: "steer" },
-    );
-    ctx.ui.notify(
-      `${reason === "idle" ? "Idle" : "Timeout"} recovery: steering ${unitType} ${unitId} to produce ${expected} (attempt ${attemptNumber}, session ${recoveryAttempts + 1}/${maxRecoveryAttempts}).`,
-      "warning",
-    );
-    return "recovered";
-  }
-
-  // Retries exhausted — write a blocker placeholder and advance the pipeline
-  // instead of silently stalling.
-  const placeholder = writeBlockerPlaceholder(
-    unitType, unitId, basePath,
-    `${reason} recovery exhausted ${maxRecoveryAttempts} attempts without producing the artifact.`,
-  );
-
-  if (placeholder) {
-    writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-      phase: "skipped",
-      recoveryAttempts: recoveryAttempts + 1,
-      lastRecoveryReason: reason,
-    });
-    ctx.ui.notify(
-      `${unitType} ${unitId} skipped after ${maxRecoveryAttempts} recovery attempts. Blocker placeholder written to ${placeholder}. Advancing pipeline. (attempt ${attemptNumber})`,
-      "warning",
-    );
-    unitRecoveryCount.delete(recoveryKey);
-    await dispatchNextUnit(ctx, pi);
-    return "recovered";
-  }
-
-  // Fallback: couldn't resolve artifact path — pause as before.
-  writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
-    phase: "paused",
-    recoveryAttempts: recoveryAttempts + 1,
-    lastRecoveryReason: reason,
-  });
-  return "paused";
+/** Build recovery context from module state for recoverTimedOutUnit */
+function buildRecoveryContext(): import("./auto-timeout-recovery.js").RecoveryContext {
+  return {
+    basePath,
+    verbose,
+    currentUnitStartedAt: currentUnit?.startedAt ?? Date.now(),
+    unitRecoveryCount,
+    dispatchNextUnit,
+  };
 }
 
 // Re-export recovery functions for external consumers
@@ -4081,204 +3404,5 @@ export async function dispatchHookUnit(
 }
 
 
-// ─── Direct Phase Dispatch ────────────────────────────────────────────────────
-
-export async function dispatchDirectPhase(
-  ctx: ExtensionCommandContext,
-  pi: ExtensionAPI,
-  phase: string,
-  base: string,
-): Promise<void> {
-  const state = await deriveState(base);
-  const mid = state.activeMilestone?.id;
-  const midTitle = state.activeMilestone?.title ?? "";
-
-  if (!mid) {
-    ctx.ui.notify("Cannot dispatch: no active milestone.", "warning");
-    return;
-  }
-
-  const normalized = phase.toLowerCase();
-  let unitType: string;
-  let unitId: string;
-  let prompt: string;
-
-  switch (normalized) {
-    case "research":
-    case "research-milestone":
-    case "research-slice": {
-      const isSlice = normalized === "research-slice" || (normalized === "research" && state.phase !== "pre-planning");
-      if (isSlice) {
-        const sid = state.activeSlice?.id;
-        const sTitle = state.activeSlice?.title ?? "";
-        if (!sid) {
-          ctx.ui.notify("Cannot dispatch research-slice: no active slice.", "warning");
-          return;
-        }
-
-        // When require_slice_discussion is enabled, pause auto-mode before
-        // each new slice so the user can discuss requirements first (#789).
-        const sliceContextFile = resolveSliceFile(base, mid, sid, "CONTEXT");
-        const requireDiscussion = loadEffectiveGSDPreferences()?.preferences?.phases?.require_slice_discussion;
-        if (requireDiscussion && !sliceContextFile) {
-          ctx.ui.notify(
-            `Slice ${sid} requires discussion before planning. Run /gsd discuss to discuss this slice, then /gsd auto to resume.`,
-            "info",
-          );
-          await pauseAuto(ctx, pi);
-          return;
-        }
-
-        unitType = "research-slice";
-        unitId = `${mid}/${sid}`;
-        prompt = await buildResearchSlicePrompt(mid, midTitle, sid, sTitle, base);
-      } else {
-        unitType = "research-milestone";
-        unitId = mid;
-        prompt = await buildResearchMilestonePrompt(mid, midTitle, base);
-      }
-      break;
-    }
-
-    case "plan":
-    case "plan-milestone":
-    case "plan-slice": {
-      const isSlice = normalized === "plan-slice" || (normalized === "plan" && state.phase !== "pre-planning");
-      if (isSlice) {
-        const sid = state.activeSlice?.id;
-        const sTitle = state.activeSlice?.title ?? "";
-        if (!sid) {
-          ctx.ui.notify("Cannot dispatch plan-slice: no active slice.", "warning");
-          return;
-        }
-        unitType = "plan-slice";
-        unitId = `${mid}/${sid}`;
-        prompt = await buildPlanSlicePrompt(mid, midTitle, sid, sTitle, base);
-      } else {
-        unitType = "plan-milestone";
-        unitId = mid;
-        prompt = await buildPlanMilestonePrompt(mid, midTitle, base);
-      }
-      break;
-    }
-
-    case "execute":
-    case "execute-task": {
-      const sid = state.activeSlice?.id;
-      const sTitle = state.activeSlice?.title ?? "";
-      const tid = state.activeTask?.id;
-      const tTitle = state.activeTask?.title ?? "";
-      if (!sid) {
-        ctx.ui.notify("Cannot dispatch execute-task: no active slice.", "warning");
-        return;
-      }
-      if (!tid) {
-        ctx.ui.notify("Cannot dispatch execute-task: no active task.", "warning");
-        return;
-      }
-      unitType = "execute-task";
-      unitId = `${mid}/${sid}/${tid}`;
-      prompt = await buildExecuteTaskPrompt(mid, sid, sTitle, tid, tTitle, base);
-      break;
-    }
-
-    case "complete":
-    case "complete-slice":
-    case "complete-milestone": {
-      const isSlice = normalized === "complete-slice" || (normalized === "complete" && state.phase === "summarizing");
-      if (isSlice) {
-        const sid = state.activeSlice?.id;
-        const sTitle = state.activeSlice?.title ?? "";
-        if (!sid) {
-          ctx.ui.notify("Cannot dispatch complete-slice: no active slice.", "warning");
-          return;
-        }
-        unitType = "complete-slice";
-        unitId = `${mid}/${sid}`;
-        prompt = await buildCompleteSlicePrompt(mid, midTitle, sid, sTitle, base);
-      } else {
-        unitType = "complete-milestone";
-        unitId = mid;
-        prompt = await buildCompleteMilestonePrompt(mid, midTitle, base);
-      }
-      break;
-    }
-
-    case "reassess":
-    case "reassess-roadmap": {
-      const roadmapFile = resolveMilestoneFile(base, mid, "ROADMAP");
-      const roadmapContent = roadmapFile ? await loadFile(roadmapFile) : null;
-      if (!roadmapContent) {
-        ctx.ui.notify("Cannot dispatch reassess-roadmap: no roadmap found.", "warning");
-        return;
-      }
-      const roadmap = parseRoadmap(roadmapContent);
-      const completedSlices = roadmap.slices.filter(s => s.done);
-      if (completedSlices.length === 0) {
-        ctx.ui.notify("Cannot dispatch reassess-roadmap: no completed slices.", "warning");
-        return;
-      }
-      const completedSliceId = completedSlices[completedSlices.length - 1].id;
-      unitType = "reassess-roadmap";
-      unitId = `${mid}/${completedSliceId}`;
-      prompt = await buildReassessRoadmapPrompt(mid, midTitle, completedSliceId, base);
-      break;
-    }
-
-    case "uat":
-    case "run-uat": {
-      const sid = state.activeSlice?.id;
-      if (!sid) {
-        ctx.ui.notify("Cannot dispatch run-uat: no active slice.", "warning");
-        return;
-      }
-      const uatFile = resolveSliceFile(base, mid, sid, "UAT");
-      if (!uatFile) {
-        ctx.ui.notify("Cannot dispatch run-uat: no UAT file found.", "warning");
-        return;
-      }
-      const uatContent = await loadFile(uatFile);
-      if (!uatContent) {
-        ctx.ui.notify("Cannot dispatch run-uat: UAT file is empty.", "warning");
-        return;
-      }
-      const uatPath = relSliceFile(base, mid, sid, "UAT");
-      unitType = "run-uat";
-      unitId = `${mid}/${sid}`;
-      prompt = await buildRunUatPrompt(mid, sid, uatPath, uatContent, base);
-      break;
-    }
-
-    case "replan":
-    case "replan-slice": {
-      const sid = state.activeSlice?.id;
-      const sTitle = state.activeSlice?.title ?? "";
-      if (!sid) {
-        ctx.ui.notify("Cannot dispatch replan-slice: no active slice.", "warning");
-        return;
-      }
-      unitType = "replan-slice";
-      unitId = `${mid}/${sid}`;
-      prompt = await buildReplanSlicePrompt(mid, midTitle, sid, sTitle, base);
-      break;
-    }
-
-    default:
-      ctx.ui.notify(
-        `Unknown phase "${phase}". Valid phases: research, plan, execute, complete, reassess, uat, replan.`,
-        "warning",
-      );
-      return;
-  }
-
-  ctx.ui.notify(`Dispatching ${unitType} for ${unitId}...`, "info");
-  const result = await ctx.newSession();
-  if (result.cancelled) {
-    ctx.ui.notify("Session creation cancelled.", "warning");
-    return;
-  }
-  pi.sendMessage(
-    { customType: "gsd-dispatch", content: prompt, display: false },
-    { triggerTurn: true },
-  );
-}
+// Direct phase dispatch → auto-direct-dispatch.ts
+export { dispatchDirectPhase } from "./auto-direct-dispatch.js";
