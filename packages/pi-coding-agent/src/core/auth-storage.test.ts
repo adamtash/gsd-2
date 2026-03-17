@@ -174,6 +174,40 @@ describe("AuthStorage — login accumulation", () => {
 		assert.equal(creds[0].type === "oauth" ? creds[0].access : null, "oauth-2");
 	});
 
+	it("relogin with a different email appends instead of overriding even if account ids match", () => {
+		const storage = inMemory({});
+		storage.set("openai-codex", makeOAuthAccount("oauth-1", {
+			accountId: "acct-shared",
+			email: "first@example.com",
+		}));
+		storage.set("openai-codex", makeOAuthAccount("oauth-2", {
+			accountId: "acct-shared",
+			email: "second@example.com",
+			refresh: "refresh-oauth-2",
+		}));
+
+		const creds = storage.getCredentialsForProvider("openai-codex");
+		assert.equal(creds.length, 2);
+		assert.deepEqual(
+			creds.map((credential) => credential.label),
+			["first@example.com", "second@example.com"],
+		);
+	});
+
+	it("oauth credentials without email append as separate accounts", () => {
+		const storage = inMemory({});
+		storage.set("openai-codex", makeOAuthAccount("oauth-1", {
+			accountId: "acct-123",
+		}));
+		storage.set("openai-codex", makeOAuthAccount("oauth-2", {
+			accountId: "acct-123",
+			refresh: "refresh-oauth-2",
+		}));
+
+		const creds = storage.getCredentialsForProvider("openai-codex");
+		assert.equal(creds.length, 2);
+	});
+
 	it("normalizes generic oauth labels to email when identity metadata exists", () => {
 		const storage = inMemory({
 			anthropic: {
@@ -184,6 +218,18 @@ describe("AuthStorage — login accumulation", () => {
 
 		const creds = storage.getCredentialsForProvider("anthropic");
 		assert.equal(creds[0].label, "person@example.com");
+	});
+
+	it("upgrades generated account-id oauth labels to email when identity metadata exists", () => {
+		const storage = inMemory({
+			"openai-codex": {
+				...makeOAuthAccount("oauth-1", { accountId: "acct_1234567890", email: "codex@example.com" }),
+				label: "Account acct_123",
+			},
+		});
+
+		const creds = storage.getCredentialsForProvider("openai-codex");
+		assert.equal(creds[0].label, "codex@example.com");
 	});
 
 	it("extracts oauth identity metadata from jwt tokens for labels and override matching", () => {

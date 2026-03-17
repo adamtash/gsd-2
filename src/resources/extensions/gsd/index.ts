@@ -557,7 +557,7 @@ export default function (pi: ExtensionAPI) {
 
       await ctx.ui.custom<void>(
         (tui, theme, _kb, done) => {
-          return new GSDDashboardOverlay(tui, theme, () => done());
+          return new GSDDashboardOverlay(tui, theme, () => done(), ctx.modelRegistry.authStorage);
         },
         {
           overlay: true,

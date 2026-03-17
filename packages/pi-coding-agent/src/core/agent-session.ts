@@ -76,6 +76,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.j
 import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
+import type { UsageLimitErrorType } from "./auth-storage.js";
 import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import type { BashOperations } from "./tools/bash.js";
@@ -91,6 +92,26 @@ export interface ParsedSkillBlock {
 	location: string;
 	content: string;
 	userMessage: string | undefined;
+}
+
+export function selectCredentialExhaustionRecoveryMode(options: {
+	errorType: UsageLimitErrorType;
+	hasFallback: boolean;
+	hasRecoveryWindow: boolean;
+}): "fallback" | "give_up" | "wait" | "none" {
+	if (options.hasFallback) {
+		return "fallback";
+	}
+
+	if (options.errorType === "quota_exhausted") {
+		return "give_up";
+	}
+
+	if (options.hasRecoveryWindow) {
+		return "wait";
+	}
+
+	return "none";
 }
 
 /**
@@ -2532,6 +2553,70 @@ export class AgentSession {
 
 			// All credentials are backed off. Try cross-provider fallback before giving up.
 			if (isCredentialError) {
+				const fallbackResult = await this._fallbackResolver.findFallback(
+					this.model,
+					errorType,
+				);
+				const recoveryWindow = this._modelRegistry.authStorage.getEarliestCredentialRecovery(
+					this.model.provider,
+					this.sessionId,
+				);
+				const recoveryMode = selectCredentialExhaustionRecoveryMode({
+					errorType,
+					hasFallback: Boolean(fallbackResult),
+					hasRecoveryWindow: Boolean(recoveryWindow),
+				});
+
+				if (recoveryMode === "fallback" && fallbackResult) {
+					// Swap to fallback model — don't persist to settings
+					const previousProvider = this.model.provider;
+					const previousModelId = this.model.id;
+					this.agent.setModel(fallbackResult.model);
+					this.sessionManager.appendModelChange(fallbackResult.model.provider, fallbackResult.model.id);
+
+					this._sanitizeLastAssistantForRetry();
+
+					this._emit({
+						type: "fallback_provider_switch",
+						from: `${previousProvider}/${previousModelId}`,
+						to: `${fallbackResult.model.provider}/${fallbackResult.model.id}`,
+						reason: fallbackResult.reason,
+					});
+
+					this._emit({
+						type: "auto_retry_start",
+						attempt: this._retryAttempt + 1,
+						maxAttempts: settings.maxRetries,
+						delayMs: 0,
+						errorMessage: `${message.errorMessage} (${fallbackResult.reason})`,
+					});
+
+					// Retry immediately with fallback provider - don't increment _retryAttempt
+					setTimeout(() => {
+						this.agent.continue().catch(() => {
+							// Retry failed - will be caught by next agent_end
+						});
+					}, 0);
+
+					return true;
+				}
+
+				if (recoveryMode === "give_up") {
+					this._emit({
+						type: "fallback_chain_exhausted",
+						reason: `All providers exhausted for ${this.model.provider}/${this.model.id}`,
+					});
+					this._emit({
+						type: "auto_retry_end",
+						success: false,
+						attempt: this._retryAttempt,
+						finalError: message.errorMessage,
+					});
+					this._retryAttempt = 0;
+					this._resolveRetry();
+					return false;
+				}
+
 				let recoveryReason = `All configured accounts for ${this.model.provider} are temporarily backed off`;
 				try {
 					await this._modelRegistry.authStorage.refreshProviderRateLimitInfo(this.model.provider, this.sessionId);
@@ -2552,11 +2637,7 @@ export class AgentSession {
 					reason: recoveryReason,
 				});
 
-				const recoveryWindow = this._modelRegistry.authStorage.getEarliestCredentialRecovery(
-					this.model.provider,
-					this.sessionId,
-				);
-				if (recoveryWindow) {
+				if (recoveryMode === "wait" && recoveryWindow) {
 					this._emit({
 						type: "account_pool_wait",
 						provider: this.model.provider,
@@ -2598,62 +2679,6 @@ export class AgentSession {
 					}, 0);
 
 					return true;
-				}
-
-				const fallbackResult = await this._fallbackResolver.findFallback(
-					this.model,
-					errorType,
-				);
-
-				if (fallbackResult) {
-					// Swap to fallback model — don't persist to settings
-					const previousProvider = this.model.provider;
-					const previousModelId = this.model.id;
-					this.agent.setModel(fallbackResult.model);
-					this.sessionManager.appendModelChange(fallbackResult.model.provider, fallbackResult.model.id);
-
-					this._sanitizeLastAssistantForRetry();
-
-					this._emit({
-						type: "fallback_provider_switch",
-						from: `${previousProvider}/${previousModelId}`,
-						to: `${fallbackResult.model.provider}/${fallbackResult.model.id}`,
-						reason: fallbackResult.reason,
-					});
-
-					this._emit({
-						type: "auto_retry_start",
-						attempt: this._retryAttempt + 1,
-						maxAttempts: settings.maxRetries,
-						delayMs: 0,
-						errorMessage: `${message.errorMessage} (${fallbackResult.reason})`,
-					});
-
-					// Retry immediately with fallback provider - don't increment _retryAttempt
-					setTimeout(() => {
-						this.agent.continue().catch(() => {
-							// Retry failed - will be caught by next agent_end
-						});
-					}, 0);
-
-					return true;
-				}
-
-				// No fallback available either
-				if (errorType === "quota_exhausted") {
-					this._emit({
-						type: "fallback_chain_exhausted",
-						reason: `All providers exhausted for ${this.model.provider}/${this.model.id}`,
-					});
-					this._emit({
-						type: "auto_retry_end",
-						success: false,
-						attempt: this._retryAttempt,
-						finalError: message.errorMessage,
-					});
-					this._retryAttempt = 0;
-					this._resolveRetry();
-					return false;
 				}
 			}
 		}

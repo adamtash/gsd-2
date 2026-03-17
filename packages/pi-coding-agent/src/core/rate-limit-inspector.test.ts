@@ -93,7 +93,7 @@ describe("formatActiveRateLimitSummary", () => {
 		}));
 		assert.ok(result);
 		assert.ok(result.includes("user@example.com"));
-		assert.ok(result.includes("5h 42%"));
+		assert.ok(result.includes("5h 58% left"));
 	});
 
 	it("omits utilization when API returns null (no n/a shown)", () => {
@@ -134,8 +134,16 @@ describe("formatActiveRateLimitSummary", () => {
 			weekly: { utilization: 20, resetsAt: now + 3600_000 },
 		}));
 		assert.ok(result);
-		assert.ok(result.includes("5h 50%"));
-		assert.ok(result.includes("7d 20%"));
+		assert.ok(result.includes("5h 50% left"));
+		assert.ok(result.includes("7d 80% left"));
+	});
+
+	it("shows 0% left when a window is fully consumed", () => {
+		const result = formatActiveRateLimitSummary(makeInfo({
+			fiveHour: { utilization: 100, resetsAt: 1_700_000_000_000 },
+		}));
+		assert.ok(result);
+		assert.ok(result.includes("5h 0% left"));
 	});
 });
 

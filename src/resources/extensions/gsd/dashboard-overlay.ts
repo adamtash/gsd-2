@@ -95,6 +95,7 @@ export class GSDDashboardOverlay {
     tui: { requestRender: () => void },
     theme: Theme,
     onClose: () => void,
+    private authStorage?: AuthStorage,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -237,8 +238,7 @@ export class GSDDashboardOverlay {
   }
 
   private async loadAccountRows(): Promise<void> {
-    const authStorage = AuthStorage.create();
-    authStorage.reload();
+    const authStorage = this.authStorage ?? AuthStorage.create();
 
     const providers = authStorage.list().sort((left, right) => left.localeCompare(right));
     await Promise.all(providers.map(async (provider) => {

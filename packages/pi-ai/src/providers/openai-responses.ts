@@ -227,8 +227,11 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.temperature = options?.temperature;
 	}
 
-	if (options?.serviceTier !== undefined) {
-		params.service_tier = options.serviceTier;
+	const effectiveServiceTier =
+		options?.serviceTier ??
+		(model.id === "gpt-5.4" ? "priority" : undefined);
+	if (effectiveServiceTier !== undefined) {
+		params.service_tier = effectiveServiceTier;
 	}
 
 	if (context.tools) {

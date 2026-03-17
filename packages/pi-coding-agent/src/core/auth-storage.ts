@@ -440,6 +440,10 @@ export class AuthStorage {
 		const label = credential.label?.trim();
 		if (!label) return true;
 		if (credential.type === "oauth") {
+			const accountId = getStringField((credential as OAuthCredential & { accountId?: unknown }).accountId);
+			if (accountId && label === `Account ${accountId.slice(0, 8)}`) {
+				return true;
+			}
 			return /^subscription\s+\d+$/i.test(label);
 		}
 		return /^api key\s+\d+$/i.test(label);
@@ -459,10 +463,6 @@ export class AuthStorage {
 	}
 
 	private getOAuthCredentialIdentityKey(credential: OAuthCredential): string | undefined {
-		const accountId = getStringField((credential as OAuthCredential & { accountId?: unknown }).accountId);
-		if (accountId) {
-			return `account:${accountId.toLowerCase()}`;
-		}
 		const email = getStringField((credential as OAuthCredential & { email?: unknown }).email);
 		if (email) {
 			return `email:${email.toLowerCase()}`;

@@ -116,7 +116,9 @@ export function formatResetTime(resetAt: number | null | undefined): string {
 
 function formatUtilization(window: RateLimitWindow | null): string | null {
 	if (!window || window.utilization == null) return null;
-	return `${Math.round(window.utilization)}%`;
+	const used = Math.round(window.utilization);
+	const remaining = Math.max(0, 100 - used);
+	return `${remaining}% left`;
 }
 
 export function formatActiveRateLimitSummary(info: CredentialRateLimitInfo | undefined): string | undefined {
