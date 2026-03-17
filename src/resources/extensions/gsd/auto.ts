@@ -248,6 +248,10 @@ let autoModeStartModel: { provider: string; id: string } | null = null;
 let currentMilestoneId: string | null = null;
 let lastBudgetAlertLevel: BudgetAlertLevel = 0;
 
+/** Throttle STATE.md rebuilds — at most once per 30 seconds */
+let lastStateRebuildAt = 0;
+const STATE_REBUILD_MIN_INTERVAL_MS = 30_000;
+
 /** Model the user had selected before auto-mode started */
 let originalModelId: string | null = null;
 let originalModelProvider: string | null = null;
@@ -549,6 +553,7 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI, reason
   unitConsecutiveSkips.clear();
   clearInFlightTools();
   lastBudgetAlertLevel = 0;
+  lastStateRebuildAt = 0;
   unitLifetimeDispatches.clear();
   currentUnit = null;
   autoModeStartModel = null;
@@ -559,6 +564,7 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI, reason
   clearSliceProgressCache();
   clearActivityLogState();
   resetProactiveHealing();
+  recentlyEvictedKeys.clear();
   pendingCrashRecovery = null;
   pendingVerificationRetry = null;
   verificationRetryCount.clear();
@@ -1312,12 +1318,29 @@ export async function handleAgentEnd(
     } catch {
       // Non-fatal — doctor failure should never block dispatch
     }
+    // Throttle STATE.md rebuilds to reduce I/O spikes on long sessions.
+    // STATE.md is a derived diagnostic artifact — skipping a rebuild is safe;
+    // the next unit or stop/pause will rebuild it.
+    const now = Date.now();
+    if (now - lastStateRebuildAt >= STATE_REBUILD_MIN_INTERVAL_MS) {
+      try {
+        await rebuildState(basePath);
+        lastStateRebuildAt = now;
+        // State rebuild commit is bookkeeping — generic message is appropriate
+        autoCommitCurrentBranch(basePath, "state-rebuild", currentUnit.id);
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    // ── Prune dead bg-shell processes ──────────────────────────────────────
+    // Dead processes retain ~500KB-1MB of output buffers each. Without pruning,
+    // they accumulate during long auto-mode sessions causing memory pressure.
     try {
-      await rebuildState(basePath);
-      // State rebuild commit is bookkeeping — generic message is appropriate
-      autoCommitCurrentBranch(basePath, "state-rebuild", currentUnit.id);
+      const { pruneDeadProcesses } = await import("../bg-shell/process-manager.js");
+      pruneDeadProcesses();
     } catch {
-      // Non-fatal
+      // Non-fatal — bg-shell may not be available
     }
 
     // ── Sync worktree state back to project root ──────────────────────────
@@ -2011,6 +2034,9 @@ const MAX_SKIP_DEPTH = 20;
  *  allowed via _skipDepth > 0. */
 let _dispatching = false;
 
+/** Keys recently evicted by skip-loop breaker — prevents re-persistence in the fallback path (#912). */
+const recentlyEvictedKeys = new Set<string>();
+
 async function dispatchNextUnit(
   ctx: ExtensionContext,
   pi: ExtensionAPI,
@@ -2567,6 +2593,7 @@ async function dispatchNextUnit(
         }
         unitConsecutiveSkips.delete(idempotencyKey);
         completedKeySet.delete(idempotencyKey);
+        recentlyEvictedKeys.add(idempotencyKey);
         removePersistedKey(basePath, idempotencyKey);
         invalidateAllCaches();
         ctx.ui.notify(
@@ -2615,9 +2642,11 @@ async function dispatchNextUnit(
   // Fallback: if the idempotency key is missing but the expected artifact already
   // exists on disk, the task completed in a prior session without persisting the key.
   // Persist it now and skip re-dispatch. This prevents infinite loops where a task
-  // completes successfully but the completion key was never written (e.g., completed
-  // on the first attempt before hitting the retry-threshold persistence logic).
-  if (verifyExpectedArtifact(unitType, unitId, basePath)) {
+  // completes successfully but the completion key was never written.
+  //
+  // EXCEPTION: if the key was just evicted by the skip-loop breaker above, do NOT
+  // re-persist — that would recreate the exact loop the breaker was trying to break (#912).
+  if (verifyExpectedArtifact(unitType, unitId, basePath) && !recentlyEvictedKeys.has(idempotencyKey)) {
     persistCompletedKey(basePath, idempotencyKey);
     completedKeySet.add(idempotencyKey);
     invalidateAllCaches();
@@ -3054,6 +3083,7 @@ async function dispatchNextUnit(
   }, softTimeoutMs);
 
   idleWatchdogHandle = setInterval(async () => {
+    try {
     if (!active || !currentUnit) return;
     const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
     if (!runtime) return;
@@ -3111,9 +3141,20 @@ async function dispatchNextUnit(
       "warning",
     );
     await pauseAuto(ctx, pi);
+    } catch (err) {
+      // Guard against unhandled rejections in the async interval callback.
+      // Without this, a thrown error leaves the interval running forever
+      // while the auto-mode state becomes inconsistent.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[idle-watchdog] Unhandled error: ${message}`);
+      try {
+        ctx.ui.notify(`Idle watchdog error: ${message}`, "warning");
+      } catch { /* best effort */ }
+    }
   }, 15000);
 
   unitTimeoutHandle = setTimeout(async () => {
+    try {
     unitTimeoutHandle = null;
     if (!active) return;
     if (currentUnit) {
@@ -3134,6 +3175,13 @@ async function dispatchNextUnit(
       "warning",
     );
     await pauseAuto(ctx, pi);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[hard-timeout] Unhandled error: ${message}`);
+      try {
+        ctx.ui.notify(`Hard timeout error: ${message}`, "warning");
+      } catch { /* best effort */ }
+    }
   }, hardTimeoutMs);
 
   // ── Continue-here context-pressure monitor ────────────────────────────
