@@ -2463,7 +2463,7 @@ export class AgentSession {
 		// Quota-style wording must be included here so credential rotation and
 		// provider fallback can run for messages like "You have hit your ChatGPT
 		// usage limit (team plan)".
-		return /overloaded|rate.?limit|too many requests|429|quota|billing|(?:hit|exceed(?:ed|ing)?).*usage.?limit|usage.?limit|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay|network.?(?:is\s+)?unavailable|credentials.*expired|temporarily backed off/i.test(
+		return /overloaded|rate.?limit|too many requests|429|quota|billing|(?:hit|exceed(?:ed|ing)?).*usage.?limit|usage.?limit|500|502|503|504|service.?unavailable|server.?error|internal.?error|api.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay|network.?(?:is\s+)?unavailable|credentials.*expired|temporarily backed off/i.test(
 			err,
 		);
 	}
@@ -2552,6 +2552,10 @@ export class AgentSession {
 					delayMs: 0,
 					errorMessage: `${message.errorMessage} (continuing on ${toLabel})`,
 				});
+
+				// Resolve the retry promise so that prompt() → waitForRetry() doesn't
+				// deadlock when agent.continue() re-enters the prompt path.
+				this._resolveRetry();
 
 				// Retry immediately with the next credential - don't increment _retryAttempt
 				setTimeout(() => {
