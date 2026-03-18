@@ -29,6 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - uses: actions/setup-node@v6
         with:
           node-version: 22

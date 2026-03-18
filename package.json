@@ -13,7 +13,8 @@
   },
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "studio"
   ],
   "bin": {
     "gsd": "dist/loader.js",

@@ -2553,11 +2553,13 @@ export class AgentSession {
 					errorMessage: `${message.errorMessage} (continuing on ${toLabel})`,
 				});
 
-				// Resolve the retry promise so that prompt() → waitForRetry() doesn't
-				// deadlock when agent.continue() re-enters the prompt path.
-				this._resolveRetry();
-
-				// Retry immediately with the next credential - don't increment _retryAttempt
+				// Retry immediately with the next credential - don't increment _retryAttempt.
+				// Keep _retryPromise alive so prompt() → waitForRetry() continues to block
+				// until the retry chain fully resolves. Do NOT call _resolveRetry() here —
+				// agent.continue() calls the inner Agent directly (not the session prompt()
+				// path), so there is no deadlock. When the continued run succeeds, the
+				// message_end handler resolves _retryPromise; if it errors again, the next
+				// _handleRetryableError call takes over.
 				setTimeout(() => {
 					this.agent.continue().catch(() => {
 						// Retry failed - will be caught by next agent_end
