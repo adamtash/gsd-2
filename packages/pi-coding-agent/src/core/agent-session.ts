@@ -431,7 +431,20 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
+		// For agent_end with retryable errors, handle retry BEFORE emitting to
+		// extensions. If a retry is initiated the agent hasn't truly ended, so
+		// extensions (e.g. auto-mode pause) must not see the event yet.
+		if (event.type === "agent_end" && this._lastAssistantMessage) {
+			const msg = this._lastAssistantMessage;
+			if (this._isRetryableError(msg)) {
+				this._lastAssistantMessage = undefined;
+				const didRetry = await this._handleRetryableError(msg);
+				if (didRetry) return; // Retry initiated — suppress agent_end from extensions
+				// Retry declined (disabled / exhausted) — fall through to emit agent_end
+			}
+		}
+
+		// Emit to extensions
 		await this._emitExtensionEvent(event);
 
 		// Notify all listeners
@@ -481,16 +494,10 @@ export class AgentSession {
 			}
 		}
 
-		// Check auto-retry and auto-compaction after agent completes
+		// Check auto-compaction after agent completes
 		if (event.type === "agent_end" && this._lastAssistantMessage) {
 			const msg = this._lastAssistantMessage;
 			this._lastAssistantMessage = undefined;
-
-			// Check for retryable errors first (overloaded, rate limit, server errors)
-			if (this._isRetryableError(msg)) {
-				const didRetry = await this._handleRetryableError(msg);
-				if (didRetry) return; // Retry was initiated, don't proceed to compaction
-			}
 
 			await this._checkCompaction(msg);
 		}
