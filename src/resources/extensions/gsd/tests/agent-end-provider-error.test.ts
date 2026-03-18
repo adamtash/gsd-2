@@ -27,6 +27,11 @@ test("isRetryableProviderErrorDetail detects rate-limit/provider retry errors", 
   assert.equal(isRetryableProviderErrorDetail(": overloaded"), true);
   assert.equal(isRetryableProviderErrorDetail(": too many requests"), true);
 
+  // Quota / usage exhaustion should still flow through retry-or-fallback
+  assert.equal(isRetryableProviderErrorDetail(": You have hit your ChatGPT usage limit (team plan). Try again later."), true);
+  assert.equal(isRetryableProviderErrorDetail(": usage limit exceeded"), true);
+  assert.equal(isRetryableProviderErrorDetail(": billing quota exhausted"), true);
+
   // Backoff
   assert.equal(isRetryableProviderErrorDetail(": credentials temporarily backed off"), true);
 
@@ -47,6 +52,27 @@ test("maybePauseAutoForProviderError does not pause on retryable 429 errors", as
       },
     },
     ': 429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}',
+    async () => {
+      pauseCalls += 1;
+    },
+  );
+
+  assert.equal(paused, false);
+  assert.equal(pauseCalls, 0);
+  assert.deepEqual(notifications, []);
+});
+
+test("maybePauseAutoForProviderError does not pause on usage-limit errors", async () => {
+  const notifications: Array<{ message: string; level: string }> = [];
+  let pauseCalls = 0;
+
+  const paused = await maybePauseAutoForProviderError(
+    {
+      notify(message, level?) {
+        notifications.push({ message, level: level ?? "info" });
+      },
+    },
+    ": Error: You have hit your ChatGPT usage limit (team plan). Try again in ~2206 min.",
     async () => {
       pauseCalls += 1;
     },

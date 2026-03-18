@@ -4,7 +4,7 @@ export type ProviderErrorPauseUI = {
 
 export function isRetryableProviderErrorDetail(errorDetail: string): boolean {
   const normalized = errorDetail.replace(/^:\s*/, "");
-  return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay|network.?(?:is\s+)?unavailable|credentials.*expired|temporarily backed off/i.test(
+  return /overloaded|rate.?limit|too many requests|429|quota|billing|(?:hit|exceed(?:ed|ing)?).*usage.?limit|usage.?limit|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay|network.?(?:is\s+)?unavailable|credentials.*expired|temporarily backed off/i.test(
     normalized,
   );
 }

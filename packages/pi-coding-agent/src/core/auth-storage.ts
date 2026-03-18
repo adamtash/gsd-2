@@ -463,7 +463,11 @@ export class AuthStorage {
 	}
 
 	private getOAuthCredentialIdentityKey(credential: OAuthCredential): string | undefined {
+		const accountId = getStringField((credential as OAuthCredential & { accountId?: unknown }).accountId);
 		const email = getStringField((credential as OAuthCredential & { email?: unknown }).email);
+		if (email && accountId) {
+			return `email:${email.toLowerCase()}|account:${accountId}`;
+		}
 		if (email) {
 			return `email:${email.toLowerCase()}`;
 		}
@@ -1190,14 +1194,34 @@ export class AuthStorage {
 			}
 		}
 
-		// Set backoff for this credential
+		// For quota exhaustion, multiple OAuth credentials can be aliases for the
+		// same underlying ChatGPT/OpenAI account. Backing off only the exact
+		// credential causes futile rotation within the same exhausted account pool.
+		const usedCredential = credentials[usedIndex];
+		const usedAccountId = errorType === "quota_exhausted" && usedCredential?.type === "oauth"
+			? getStringField((usedCredential as OAuthCredential & { accountId?: unknown }).accountId)
+			: undefined;
+
+		const indexesToBackOff = usedAccountId
+			? credentials
+				.map((credential, index) => ({ credential, index }))
+				.filter(
+					({ credential }) => credential.type === "oauth"
+						&& getStringField((credential as OAuthCredential & { accountId?: unknown }).accountId) === usedAccountId,
+				)
+				.map(({ index }) => index)
+			: [usedIndex];
+
+		// Set backoff for this credential (or the whole underlying account group)
 		let providerBackoff = this.credentialBackoff.get(provider);
 		if (!providerBackoff) {
 			providerBackoff = new Map();
 			this.credentialBackoff.set(provider, providerBackoff);
 		}
-		providerBackoff.set(usedIndex, Date.now() + backoffMs);
-		const usedCredential = credentials[usedIndex];
+		const backoffUntil = Date.now() + backoffMs;
+		for (const index of indexesToBackOff) {
+			providerBackoff.set(index, backoffUntil);
+		}
 
 		// Check if any credential is still available
 		for (let i = 0; i < credentials.length; i++) {

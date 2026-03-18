@@ -194,6 +194,26 @@ describe("AuthStorage — login accumulation", () => {
 		);
 	});
 
+	it("relogin with the same email but a different account id appends as a separate account", () => {
+		const storage = inMemory({});
+		storage.set("openai-codex", makeOAuthAccount("oauth-1", {
+			accountId: "acct-team-1",
+			email: "work1@example.com",
+		}));
+		storage.set("openai-codex", makeOAuthAccount("oauth-2", {
+			accountId: "acct-team-2",
+			email: "work1@example.com",
+			refresh: "refresh-oauth-2",
+		}));
+
+		const creds = storage.getCredentialsForProvider("openai-codex");
+		assert.equal(creds.length, 2);
+		assert.deepEqual(
+			creds.map((credential) => credential.type === "oauth" ? credential.accountId : undefined),
+			["acct-team-1", "acct-team-2"],
+		);
+	});
+
 	it("oauth credentials without email append as separate accounts", () => {
 		const storage = inMemory({});
 		storage.set("openai-codex", makeOAuthAccount("oauth-1", {
@@ -461,6 +481,50 @@ describe("AuthStorage — rate-limit backoff", () => {
 		assert.ok(rotation.usedCredential);
 		assert.ok(rotation.nextCredential);
 		assert.notEqual(rotation.usedCredential?.id, rotation.nextCredential?.id);
+	});
+
+	it("quota exhaustion skips other credentials on the same underlying oauth account", async () => {
+		registerOAuthProvider({
+			id: "test-oauth-group",
+			name: "Test OAuth Group",
+			login: async () => {
+				throw new Error("not implemented");
+			},
+			refreshToken: async () => {
+				throw new Error("not implemented");
+			},
+			getApiKey(credentials) {
+				return credentials.access;
+			},
+		});
+
+		try {
+			const storage = inMemory({
+				"test-oauth-group": [
+					makeOAuthAccount("oauth-a1", { accountId: "acct-team-a", email: "work1@example.com", expires: Date.now() + 120_000 }),
+					makeOAuthAccount("oauth-a2", { accountId: "acct-team-a", email: "work2@example.com", expires: Date.now() + 120_000 }),
+					makeOAuthAccount("oauth-b1", { accountId: "acct-team-b", email: "work3@example.com", expires: Date.now() + 120_000 }),
+				],
+			});
+
+			const first = await storage.getApiKey("test-oauth-group");
+			assert.equal(first, "oauth-a1");
+
+			const rotation = storage.markUsageLimitReachedWithFallback("test-oauth-group", undefined, {
+				errorType: "quota_exhausted",
+			});
+
+			assert.equal(rotation.hasAlternate, true);
+			assert.equal(rotation.usedCredential?.type, "oauth");
+			assert.equal(rotation.nextCredential?.type, "oauth");
+			assert.equal(rotation.usedCredential?.type === "oauth" ? rotation.usedCredential.accountId : undefined, "acct-team-a");
+			assert.equal(rotation.nextCredential?.type === "oauth" ? rotation.nextCredential.accountId : undefined, "acct-team-b");
+
+			const next = await storage.getApiKey("test-oauth-group");
+			assert.equal(next, "oauth-b1");
+		} finally {
+			resetOAuthProviders();
+		}
 	});
 });
 
