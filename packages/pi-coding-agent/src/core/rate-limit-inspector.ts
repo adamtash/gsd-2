@@ -114,24 +114,25 @@ export function formatResetTime(resetAt: number | null | undefined): string {
 	});
 }
 
-function formatUtilization(window: RateLimitWindow | null): string | null {
-	if (!window || window.utilization == null) return null;
-	const used = Math.round(window.utilization);
-	const remaining = Math.max(0, 100 - used);
-	return `${remaining}% left`;
+function formatWindowSummary(label: string, window: RateLimitWindow | null): string | null {
+	if (!window) return null;
+	const parts: string[] = [label];
+	if (window.utilization != null) {
+		parts.push(`${Math.round(window.utilization)}%`);
+	}
+	if (window.resetsAt) {
+		parts.push(`resets ${formatRelativeTime(window.resetsAt)}`);
+	}
+	return parts.length > 1 ? parts.join(" ") : null;
 }
 
 export function formatActiveRateLimitSummary(info: CredentialRateLimitInfo | undefined): string | undefined {
 	if (!info) return undefined;
 	const windows: string[] = [];
-	if (info.fiveHour) {
-		const util = formatUtilization(info.fiveHour);
-		windows.push(`5h${util ? ` ${util}` : ""} reset ${formatResetTime(info.fiveHour.resetsAt)}`);
-	}
-	if (info.weekly) {
-		const util = formatUtilization(info.weekly);
-		windows.push(`7d${util ? ` ${util}` : ""} reset ${formatResetTime(info.weekly.resetsAt)}`);
-	}
+	const fiveHourPart = formatWindowSummary("5h", info.fiveHour);
+	if (fiveHourPart) windows.push(fiveHourPart);
+	const weeklyPart = formatWindowSummary("7d", info.weekly);
+	if (weeklyPart) windows.push(weeklyPart);
 	if (info.isRateLimited) {
 		const waitText = info.availableAt ? formatRelativeTime(info.availableAt) : "until reset";
 		return `${info.label} blocked ${waitText}${windows.length > 0 ? ` · ${windows.join(" · ")}` : ""}`;
@@ -149,7 +150,7 @@ export function formatProviderRecoverySummary(provider: string, infos: Credentia
 	if (infos.length === 0) return undefined;
 	const parts = infos.map((info) => {
 		if (info.availableAt) {
-			return `${info.label} ${formatRelativeTime(info.availableAt)} (${formatResetTime(info.availableAt)})`;
+			return `${info.label} ${formatRelativeTime(info.availableAt)}`;
 		}
 		if (info.isRateLimited) {
 			return `${info.label} waiting for reset`;

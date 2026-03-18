@@ -88,23 +88,26 @@ describe("formatActiveRateLimitSummary", () => {
 	});
 
 	it("returns label with window utilization when not rate-limited", () => {
+		const now = Date.now();
 		const result = formatActiveRateLimitSummary(makeInfo({
-			fiveHour: { utilization: 42, resetsAt: 1_700_000_000_000 },
+			fiveHour: { utilization: 42, resetsAt: now + 60 * 60_000 },
 		}));
 		assert.ok(result);
 		assert.ok(result.includes("user@example.com"));
-		assert.ok(result.includes("5h 58% left"));
+		assert.ok(result.includes("5h 42%"), `expected '5h 42%' in: ${result}`);
+		assert.ok(result.includes("resets in"), `expected 'resets in' in: ${result}`);
 	});
 
 	it("omits utilization when API returns null (no n/a shown)", () => {
+		const now = Date.now();
 		const result = formatActiveRateLimitSummary(makeInfo({
-			fiveHour: { utilization: null, resetsAt: 1_700_000_000_000 },
-			weekly: { utilization: null, resetsAt: 1_700_000_000_000 },
+			fiveHour: { utilization: null, resetsAt: now + 60 * 60_000 },
+			weekly: { utilization: null, resetsAt: now + 120 * 60_000 },
 		}));
 		assert.ok(result);
 		assert.ok(!result.includes("n/a"), "should not show n/a");
-		assert.ok(result.includes("5h reset"), "should show 5h reset without utilization");
-		assert.ok(result.includes("7d reset"), "should show 7d reset without utilization");
+		assert.ok(result.includes("5h resets"), "should show 5h resets without utilization");
+		assert.ok(result.includes("7d resets"), "should show 7d resets without utilization");
 	});
 
 	it("returns blocked message when rate-limited", () => {
@@ -134,16 +137,17 @@ describe("formatActiveRateLimitSummary", () => {
 			weekly: { utilization: 20, resetsAt: now + 3600_000 },
 		}));
 		assert.ok(result);
-		assert.ok(result.includes("5h 50% left"));
-		assert.ok(result.includes("7d 80% left"));
+		assert.ok(result.includes("5h 50%"), `expected '5h 50%' in: ${result}`);
+		assert.ok(result.includes("7d 20%"), `expected '7d 20%' in: ${result}`);
 	});
 
-	it("shows 0% left when a window is fully consumed", () => {
+	it("shows 100% when a window is fully consumed", () => {
+		const now = Date.now();
 		const result = formatActiveRateLimitSummary(makeInfo({
-			fiveHour: { utilization: 100, resetsAt: 1_700_000_000_000 },
+			fiveHour: { utilization: 100, resetsAt: now + 30 * 60_000 },
 		}));
 		assert.ok(result);
-		assert.ok(result.includes("5h 0% left"));
+		assert.ok(result.includes("5h 100%"), `expected '5h 100%' in: ${result}`);
 	});
 });
 
