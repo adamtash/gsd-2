@@ -16,7 +16,8 @@ import type {
 import { deriveState } from "./state.js";
 import { loadFile, getManifestStatus } from "./files.js";
 import { loadEffectiveGSDPreferences, resolveSkillDiscoveryMode, getIsolationMode } from "./preferences.js";
-import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
+import { sendDesktopNotification } from "./notifications.js";
+import { sendRemoteNotification } from "../remote-questions/notify.js";
 import {
   gsdRoot,
   resolveMilestoneFile,
@@ -25,6 +26,13 @@ import {
 import { invalidateAllCaches } from "./cache.js";
 import { synthesizeCrashRecovery } from "./session-forensics.js";
 import { writeLock, clearLock, readCrashLock, formatCrashInfo, isLockProcessAlive } from "./crash-recovery.js";
+import {
+  acquireSessionLock,
+  updateSessionLock,
+  releaseSessionLock,
+  readSessionLockData,
+  isSessionLockProcessAlive,
+} from "./session-lock.js";
 import { selfHealRuntimeRecords } from "./auto-recovery.js";
 import { ensureGitignore, untrackRuntimeFiles } from "./gitignore.js";
 import { nativeIsRepo, nativeInit, nativeAddAll, nativeCommit } from "./native-git-bridge.js";
@@ -80,6 +88,18 @@ export async function bootstrapAutoSession(
 ): Promise<boolean> {
   const { shouldUseWorktreeIsolation, registerSigtermHandler, lockBase } = deps;
 
+  // ── Session lock: acquire FIRST, before any state mutation ──────────────
+  // This is the primary guard against concurrent sessions on the same project.
+  // Uses OS-level file locking (proper-lockfile) to prevent TOCTOU races.
+  const lockResult = acquireSessionLock(base);
+  if (!lockResult.acquired) {
+    ctx.ui.notify(
+      `${lockResult.reason}\nStop it with \`kill ${lockResult.existingPid ?? "the other process"}\` before starting a new session.`,
+      "error",
+    );
+    return false;
+  }
+
   // Ensure git repo exists
   if (!nativeIsRepo(base)) {
     const mainBranch = loadEffectiveGSDPreferences()?.preferences?.git?.main_branch || "main";
@@ -108,16 +128,11 @@ export async function bootstrapAutoSession(
   // Initialize GitServiceImpl
   s.gitService = new GitServiceImpl(s.basePath, loadEffectiveGSDPreferences()?.preferences?.git ?? {});
 
-  // Check for crash from previous session
+  // Check for crash from previous session (use both old and new lock data)
   const crashLock = readCrashLock(base);
   if (crashLock) {
-    if (isLockProcessAlive(crashLock)) {
-      ctx.ui.notify(
-        `Another auto-mode session (PID ${crashLock.pid}) appears to be running.\nStop it with \`kill ${crashLock.pid}\` before starting a new session.`,
-        "error",
-      );
-      return false;
-    }
+    // We already hold the session lock, so no concurrent session is running.
+    // The crash lock is from a dead process — recover context from it.
     const recoveredMid = crashLock.unitId.split("/")[0];
     const milestoneAlreadyComplete = recoveredMid
       ? !!resolveMilestoneFile(base, recoveredMid, "SUMMARY")
@@ -406,27 +421,40 @@ export async function bootstrapAutoSession(
     : "Will loop until milestone complete.";
   ctx.ui.notify(`${modeLabel} started. ${scopeMsg}`, "info");
 
-  // Write initial lock file
+  // Update lock file with milestone info (OS lock already acquired at bootstrap start)
+  updateSessionLock(lockBase(), "starting", s.currentMilestoneId ?? "unknown", 0);
   writeLock(lockBase(), "starting", s.currentMilestoneId ?? "unknown", 0);
 
-  // Secrets collection gate
+  // Secrets collection gate — pause instead of blocking (#1146)
   const mid = state.activeMilestone!.id;
   try {
     const manifestStatus = await getManifestStatus(base, mid);
     if (manifestStatus && manifestStatus.pending.length > 0) {
-      const result = await collectSecretsFromManifest(base, mid, ctx);
-      if (result && result.applied && result.skipped && result.existingSkipped) {
-        ctx.ui.notify(
-          `Secrets collected: ${result.applied.length} applied, ${result.skipped.length} skipped, ${result.existingSkipped.length} already set.`,
-          "info",
-        );
-      } else {
-        ctx.ui.notify("Secrets collection skipped.", "info");
-      }
+      const pendingKeys = manifestStatus.pending;
+      const keyList = pendingKeys.map((k: string) => `  • ${k}`).join("\n");
+      s.paused = true;
+      s.pausedForSecrets = true;
+      ctx.ui.notify(
+        `Auto-mode paused: ${pendingKeys.length} env variable${pendingKeys.length > 1 ? "s" : ""} needed for ${mid}.\n${keyList}\n\nCollect them with /gsd secrets, then resume with /gsd auto.`,
+        "warning",
+      );
+      ctx.ui.setStatus("gsd-auto", "paused");
+      sendDesktopNotification(
+        "GSD — Secrets Required",
+        `${pendingKeys.length} env variable(s) needed for ${mid}. Run /gsd secrets to provide them.`,
+        "warning",
+        "attention",
+      );
+      // Notify remote channel if configured (one-way — never collect secrets via remote)
+      sendRemoteNotification(
+        "GSD — Secrets Required",
+        `Auto-mode paused: ${pendingKeys.length} env variable(s) needed for ${mid}.\n${keyList}\n\nReturn to the terminal and run /gsd secrets to provide them securely.`,
+      ).catch(() => {}); // fire-and-forget
+      return false;
     }
   } catch (err) {
     ctx.ui.notify(
-      `Secrets collection error: ${err instanceof Error ? err.message : String(err)}. Continuing with next task.`,
+      `Secrets check error: ${err instanceof Error ? err.message : String(err)}. Continuing without secrets.`,
       "warning",
     );
   }

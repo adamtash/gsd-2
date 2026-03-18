@@ -5,6 +5,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
+import type { GSDState } from "./types.js";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { enableDebug } from "./debug-logger.js";
@@ -42,6 +43,7 @@ import { handleConfig } from "./commands-config.js";
 import { handleInspect } from "./commands-inspect.js";
 import { handleCleanupBranches, handleCleanupSnapshots, handleSkip, handleDryRun } from "./commands-maintenance.js";
 import { handleDoctor, handleSteer, handleCapture, handleTriage, handleKnowledge, handleRunHook, handleUpdate, handleSkillHealth } from "./commands-handlers.js";
+import { handleLogs } from "./commands-logs.js";
 
 // ─── Re-exports (preserve public API surface) ───────────────────────────────
 export { handlePrefs, handlePrefsMode, handlePrefsWizard, ensurePreferencesFile, handleImportClaude, buildCategorySummaries, serializePreferencesToFrontmatter, yamlSafeString, configureMode } from "./commands-prefs-wizard.js";
@@ -106,6 +108,7 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         { cmd: "run-hook", desc: "Manually trigger a specific hook" },
         { cmd: "skill-health", desc: "Skill lifecycle dashboard" },
         { cmd: "doctor", desc: "Runtime health checks with auto-fix" },
+        { cmd: "logs", desc: "Browse activity logs, debug logs, and metrics" },
         { cmd: "forensics", desc: "Examine execution logs" },
         { cmd: "init", desc: "Project init wizard — detect, configure, bootstrap .gsd/" },
         { cmd: "setup", desc: "Global setup status and configuration" },
@@ -181,6 +184,18 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         return subs
           .filter((s) => s.cmd.startsWith(subPrefix))
           .map((s) => ({ value: `setup ${s.cmd}`, label: s.cmd, description: s.desc }));
+      }
+
+      if (parts[0] === "logs" && parts.length <= 2) {
+        const subPrefix = parts[1] ?? "";
+        const subs = [
+          { cmd: "debug", desc: "List or view debug log files" },
+          { cmd: "tail", desc: "Show last N activity log summaries" },
+          { cmd: "clear", desc: "Remove old activity and debug logs" },
+        ];
+        return subs
+          .filter((s) => s.cmd.startsWith(subPrefix))
+          .map((s) => ({ value: `logs ${s.cmd}`, label: s.cmd, description: s.desc }));
       }
 
       if (parts[0] === "keys" && parts.length <= 2) {
@@ -388,6 +403,11 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
 
       if (trimmed === "doctor" || trimmed.startsWith("doctor ")) {
         await handleDoctor(trimmed.replace(/^doctor\s*/, "").trim(), ctx, pi);
+        return;
+      }
+
+      if (trimmed === "logs" || trimmed.startsWith("logs ")) {
+        await handleLogs(trimmed.replace(/^logs\s*/, "").trim(), ctx);
         return;
       }
 
@@ -852,7 +872,7 @@ async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
     return;
   }
 
-  await ctx.ui.custom<void>(
+  const result = await ctx.ui.custom<void>(
     (tui, theme, _kb, done) => {
       return new GSDDashboardOverlay(tui, theme, () => done(), ctx.modelRegistry.authStorage);
     },
@@ -866,6 +886,12 @@ async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
       },
     },
   );
+
+  // Fallback for RPC mode where ctx.ui.custom() returns undefined.
+  // Produce a text-based status summary so the turn is not empty.
+  if (result === undefined) {
+    ctx.ui.notify(formatTextStatus(state), "info");
+  }
 }
 
 export async function fireStatusViaCommand(
@@ -880,7 +906,7 @@ async function handleVisualize(ctx: ExtensionCommandContext): Promise<void> {
     return;
   }
 
-  await ctx.ui.custom<void>(
+  const result = await ctx.ui.custom<void>(
     (tui, theme, _kb, done) => {
       return new GSDVisualizerOverlay(tui, theme, () => done());
     },
@@ -894,6 +920,11 @@ async function handleVisualize(ctx: ExtensionCommandContext): Promise<void> {
       },
     },
   );
+
+  // Fallback for RPC mode where ctx.ui.custom() returns undefined.
+  if (result === undefined) {
+    ctx.ui.notify("Visualizer requires an interactive terminal. Use /gsd status for a text-based overview.", "warning");
+  }
 }
 
 async function handleSetup(args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -948,4 +979,62 @@ async function handleSetup(args: string, ctx: ExtensionCommandContext): Promise<
     "  /gsd setup prefs   — Global preferences wizard",
     "info",
   );
+}
+
+// ─── Text-based status for RPC mode ────────────────────────────────────────
+
+/**
+ * Generate a text-based status summary for non-TUI environments (RPC mode).
+ * Used as a fallback when the interactive dashboard overlay is unavailable.
+ */
+function formatTextStatus(state: GSDState): string {
+  const lines: string[] = ["GSD Status\n"];
+
+  // Phase
+  lines.push(`Phase: ${state.phase}`);
+
+  // Active milestone
+  if (state.activeMilestone) {
+    lines.push(`Active milestone: ${state.activeMilestone.id} — ${state.activeMilestone.title}`);
+  }
+
+  // Active slice / task
+  if (state.activeSlice) {
+    lines.push(`Active slice: ${state.activeSlice.id} — ${state.activeSlice.title}`);
+  }
+  if (state.activeTask) {
+    lines.push(`Active task: ${state.activeTask.id} — ${state.activeTask.title}`);
+  }
+
+  // Progress
+  if (state.progress) {
+    const { milestones, slices, tasks } = state.progress;
+    const parts: string[] = [];
+    parts.push(`milestones ${milestones.done}/${milestones.total}`);
+    if (slices) parts.push(`slices ${slices.done}/${slices.total}`);
+    if (tasks) parts.push(`tasks ${tasks.done}/${tasks.total}`);
+    lines.push(`Progress: ${parts.join(", ")}`);
+  }
+
+  // Next action
+  if (state.nextAction) {
+    lines.push(`Next: ${state.nextAction}`);
+  }
+
+  // Blockers
+  if (state.blockers.length > 0) {
+    lines.push(`Blockers: ${state.blockers.join("; ")}`);
+  }
+
+  // Milestone registry summary
+  if (state.registry.length > 0) {
+    lines.push("");
+    lines.push("Milestones:");
+    for (const m of state.registry) {
+      const statusIcon = m.status === "complete" ? "✓" : m.status === "active" ? "▶" : m.status === "parked" ? "⏸" : "○";
+      lines.push(`  ${statusIcon} ${m.id}: ${m.title} (${m.status})`);
+    }
+  }
+
+  return lines.join("\n");
 }
