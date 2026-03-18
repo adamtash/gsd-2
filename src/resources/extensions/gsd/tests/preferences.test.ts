@@ -48,7 +48,7 @@ test("git.commit_docs accepts boolean, rejects string", () => {
   assert.ok(e2.length > 0);
 });
 
-test("getIsolationMode defaults to worktree when no prefs file", () => {
+test("getIsolationMode defaults to worktree when no prefs file", { skip: "requires no global ~/.gsd/preferences.md" }, () => {
   assert.equal(getIsolationMode(), "worktree");
 });
 

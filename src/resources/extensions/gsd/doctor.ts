@@ -345,7 +345,7 @@ export async function selectDoctorScope(basePath: string, requestedScope?: strin
   return state.registry[0]?.id;
 }
 
-export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; scope?: string; fixLevel?: "task" | "all" }): Promise<import("./doctor-types.js").DoctorReport> {
+export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; scope?: string; fixLevel?: "task" | "all"; isolationMode?: "none" | "worktree" | "branch" }): Promise<import("./doctor-types.js").DoctorReport> {
   const issues: DoctorIssue[] = [];
   const fixesApplied: string[] = [];
   const fix = options?.fix === true;
@@ -386,9 +386,9 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
   }
 
   // Git health checks (orphaned worktrees, stale branches, corrupt merge state, tracked runtime files)
-  const isolationMode: "none" | "worktree" | "branch" =
-    prefs?.preferences?.git?.isolation === "none" ? "none" :
-    prefs?.preferences?.git?.isolation === "branch" ? "branch" : "worktree";
+  const isolationMode: "none" | "worktree" | "branch" = options?.isolationMode ??
+    (prefs?.preferences?.git?.isolation === "none" ? "none" :
+    prefs?.preferences?.git?.isolation === "branch" ? "branch" : "worktree");
   await checkGitHealth(basePath, issues, fixesApplied, shouldFix, isolationMode);
 
   // Runtime health checks (crash locks, completed-units, hook state, activity logs, STATE.md, gitignore)

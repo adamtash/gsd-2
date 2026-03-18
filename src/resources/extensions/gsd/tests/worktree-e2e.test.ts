@@ -209,13 +209,13 @@ _None_
       run("git worktree add -b milestone/M001 .gsd/worktrees/M001", repo);
 
       // Detect
-      const detect = await runGSDDoctor(repo);
+      const detect = await runGSDDoctor(repo, { isolationMode: "worktree" });
       const orphanIssues = detect.issues.filter(i => i.code === "orphaned_auto_worktree");
       assertTrue(orphanIssues.length > 0, "doctor detects orphaned worktree");
       assertEq(orphanIssues[0]?.unitId, "M001", "orphaned worktree unitId is M001");
 
       // Fix
-      const fixed = await runGSDDoctor(repo, { fix: true });
+      const fixed = await runGSDDoctor(repo, { fix: true, isolationMode: "worktree" });
       assertTrue(
         fixed.fixesApplied.some(f => f.includes("removed orphaned worktree")),
         "doctor fix removes orphaned worktree",
