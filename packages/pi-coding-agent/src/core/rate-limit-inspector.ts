@@ -56,15 +56,22 @@ function normalizeTimestamp(value: unknown): number | null {
 
 function normalizeRateLimitWindow(input: {
 	utilization?: number | null;
+	usedPercent?: number | string | null;
 	resets_at?: number | string | null;
 	resetsAt?: number | string | null;
 	windowDurationMins?: number | null;
 } | null | undefined): RateLimitWindow | null {
 	if (!input) return null;
-	const utilization = typeof input.utilization === "number" && Number.isFinite(input.utilization)
-		? Math.max(0, Math.min(100, input.utilization))
+	// Codex returns `usedPercent`, Anthropic returns `utilization`
+	const rawUtil = input.utilization ?? (input.usedPercent != null ? Number(input.usedPercent) : null);
+	const utilization = typeof rawUtil === "number" && Number.isFinite(rawUtil)
+		? Math.max(0, Math.min(100, rawUtil))
 		: null;
-	const resetsAt = normalizeTimestamp(input.resetsAt ?? input.resets_at);
+	let resetsAt = normalizeTimestamp(input.resetsAt ?? input.resets_at);
+	// Codex returns epoch seconds; if the value looks like seconds (< 1e12), convert to ms
+	if (resetsAt !== null && resetsAt > 0 && resetsAt < 1e12) {
+		resetsAt = resetsAt * 1000;
+	}
 	const windowMinutes = typeof input.windowDurationMins === "number" && Number.isFinite(input.windowDurationMins)
 		? input.windowDurationMins
 		: null;
@@ -98,10 +105,15 @@ export function formatRelativeTime(targetMs: number, nowMs: number = Date.now())
 	const totalMinutes = Math.ceil(diffMs / 60_000);
 	if (totalMinutes < 1) return "now";
 	if (totalMinutes < 60) return `in ${totalMinutes}m`;
-	const hours = Math.floor(totalMinutes / 60);
+	const totalHours = Math.floor(totalMinutes / 60);
 	const minutes = totalMinutes % 60;
-	if (minutes === 0) return `in ${hours}h`;
-	return `in ${hours}h ${minutes}m`;
+	if (totalHours < 24) {
+		return minutes === 0 ? `in ${totalHours}h` : `in ${totalHours}h ${minutes}m`;
+	}
+	const days = Math.floor(totalHours / 24);
+	const hours = totalHours % 24;
+	if (hours === 0) return `in ${days}d`;
+	return `in ${days}d ${hours}h`;
 }
 
 export function formatResetTime(resetAt: number | null | undefined): string {

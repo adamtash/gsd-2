@@ -54,6 +54,12 @@ describe("formatRelativeTime", () => {
 		// 1 ms past 5 minutes → should be "in 6m" because Math.ceil
 		assert.equal(formatRelativeTime(now + 5 * 60_000 + 1, now), "in 6m");
 	});
+
+	it("returns days and hours for >= 24 hours", () => {
+		assert.equal(formatRelativeTime(now + 25 * 60 * 60_000, now), "in 1d 1h");
+		assert.equal(formatRelativeTime(now + 48 * 60 * 60_000, now), "in 2d");
+		assert.equal(formatRelativeTime(now + 167 * 60 * 60_000, now), "in 6d 23h");
+	});
 });
 
 // ─── formatResetTime ──────────────────────────────────────────────────────────
