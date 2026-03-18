@@ -18,7 +18,22 @@ One command. Walk away. Come back to a built project with clean git history.
 
 <pre><code>npm install -g gsd-pi</code></pre>
 
+> **📋 NOTICE: New to Node on Mac?** If you installed Node.js via Homebrew, you may be running a development release instead of LTS. **[Read this guide](./docs/node-lts-macos.md)** to pin Node 24 LTS and avoid compatibility issues.
+
 </div>
+
+---
+
+## What's New in v2.28
+
+- **`gsd headless query`** — instant JSON snapshot of project state (~50ms, no LLM session)
+- **`/gsd update`** — update GSD to the latest version without leaving your session
+- **`/gsd export --html --all`** — generate retrospective HTML reports for all milestones at once
+- **Reliability hardening** — atomic file writes, OAuth fetch timeouts, RPC exit detection, blob GC, LSP init retry with backoff
+- **RPC utilities** now part of the public API for headless/scripted integrations
+- **npm** established as the canonical package manager
+
+See the full [Changelog](./CHANGELOG.md) for details.
 
 ---
 

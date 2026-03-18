@@ -34,7 +34,7 @@ import { getActiveAutoWorktreeContext } from "./auto-worktree.js";
 import { saveFile, formatContinue, loadFile, parseContinue, parseSummary, loadActiveOverrides, formatOverridesSection } from "./files.js";
 import { loadPrompt } from "./prompt-loader.js";
 import { deriveState } from "./state.js";
-import { isAutoActive, isAutoPaused, handleAgentEnd, pauseAuto, getAutoDashboardData, markToolStart, markToolEnd } from "./auto.js";
+import { isAutoActive, isAutoPaused, handleAgentEnd, pauseAuto, getAutoDashboardData, getAutoModeStartModel, markToolStart, markToolEnd } from "./auto.js";
 import { saveActivityLog } from "./activity-log.js";
 import { checkAutoStartAfterDiscuss, getDiscussionMilestoneId, findMilestoneIds, nextMilestoneId } from "./guided-flow.js";
 import { GSDDashboardOverlay } from "./dashboard-overlay.js";
@@ -57,12 +57,13 @@ import { Key } from "@gsd/pi-tui";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { shortcutDesc } from "../shared/terminal.js";
+import { shortcutDesc } from "../shared/mod.js";
 import { Text } from "@gsd/pi-tui";
 import { maybePauseAutoForProviderError } from "./provider-error-pause.js";
 import { pauseAutoForProviderError, classifyProviderError } from "./provider-error-pause.js";
-import { toPosixPath } from "../shared/path-display.js";
+import { toPosixPath } from "../shared/mod.js";
 import { isParallelActive, shutdownParallel } from "./parallel-orchestrator.js";
+import { DEFAULT_BASH_TIMEOUT_SECS } from "./constants.js";
 
 // ── Agent Instructions ────────────────────────────────────────────────────
 // Lightweight "always follow" files injected into every GSD agent session.
@@ -172,7 +173,6 @@ export default function (pi: ExtensionAPI) {
   // the timeout parameter, commands run indefinitely, causing hangs on
   // Windows where process killing is unreliable (see #40). We wrap execute
   // to inject a 120-second default when no timeout is provided.
-  const DEFAULT_BASH_TIMEOUT_SECS = 120;
   const baseBash = createBashTool(process.cwd(), {
     spawnHook: (ctx) => ({ ...ctx, cwd: process.cwd() }),
   });
@@ -828,6 +828,40 @@ export default function (pi: ExtensionAPI) {
                 );
                 return;
               }
+            }
+          }
+        }
+      }
+
+      // ── Session model recovery (#1065) ──────────────────────────────────
+      // Before pausing, attempt to restore the model captured at auto-mode
+      // start. This prevents cross-session model leakage: when fallback
+      // chains are exhausted (or absent), the session retries with the model
+      // the user originally chose instead of reading (possibly stale) global
+      // preferences that another concurrent session may have modified.
+      const sessionModel = getAutoModeStartModel();
+      if (sessionModel) {
+        const currentModelId = ctx.model?.id;
+        const currentProvider = ctx.model?.provider;
+        // Only attempt recovery if the current model diverged from the session model
+        if (currentModelId !== sessionModel.id || currentProvider !== sessionModel.provider) {
+          const availableModels = ctx.modelRegistry.getAvailable();
+          const startModel = availableModels.find(
+            m => m.provider === sessionModel.provider && m.id === sessionModel.id,
+          );
+          if (startModel) {
+            const ok = await pi.setModel(startModel, { persist: false });
+            if (ok) {
+              networkRetryCounters.clear();
+              ctx.ui.notify(
+                `Model error${errorDetail}. Restored session model: ${sessionModel.provider}/${sessionModel.id} and resuming.`,
+                "warning",
+              );
+              pi.sendMessage(
+                { customType: "gsd-auto-timeout-recovery", content: "Continue execution.", display: false },
+                { triggerTurn: true },
+              );
+              return;
             }
           }
         }

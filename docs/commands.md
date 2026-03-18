@@ -19,6 +19,8 @@
 | `/gsd cleanup` | Clean up GSD state files and stale worktrees |
 | `/gsd visualize` | Open workflow visualizer (progress, deps, metrics, timeline) |
 | `/gsd export --html` | Generate self-contained HTML report for current or completed milestone |
+| `/gsd export --html --all` | Generate retrospective reports for all milestones at once |
+| `/gsd update` | Update GSD to the latest version in-session |
 | `/gsd knowledge` | Add persistent project knowledge (rule, pattern, or lesson) |
 | `/gsd help` | Categorized command reference with descriptions for all GSD subcommands |
 
@@ -96,7 +98,7 @@ See [Parallel Orchestration](./parallel-orchestration.md) for full documentation
 | `gsd --list-models [search]` | List available models and exit |
 | `gsd sessions` | Interactive session picker — list all saved sessions for the current directory and choose one to resume |
 | `gsd --debug` | Enable structured JSONL diagnostic logging for troubleshooting dispatch and state issues |
-| `gsd config` | Re-run the setup wizard (LLM provider + tool keys) |
+| `gsd config` | Set up global API keys for search and docs tools (saved to `~/.gsd/agent/auth.json`, applies to all projects). See [Global API Keys](./configuration.md#global-api-keys-gsd-config). |
 | `gsd update` | Update GSD to the latest version |
 | `gsd headless new-milestone` | Create a new milestone from a context file (headless — no TUI required) |
 
@@ -194,3 +196,30 @@ gsd --mode mcp
 ```
 
 The server registers all tools from the agent session and maps MCP `tools/list` and `tools/call` requests to GSD tool definitions. It runs until the transport closes.
+
+## In-Session Update
+
+`/gsd update` checks npm for a newer version of GSD and installs it without leaving the session.
+
+```bash
+/gsd update
+# Current version: v2.28.0
+# Checking npm registry...
+# Updated to v2.29.0. Restart GSD to use the new version.
+```
+
+If already up to date, it reports so and takes no action.
+
+## Export
+
+`/gsd export` generates reports of milestone work.
+
+```bash
+# Generate HTML report for the active milestone
+/gsd export --html
+
+# Generate retrospective reports for ALL milestones at once
+/gsd export --html --all
+```
+
+Reports are saved to `.gsd/reports/` with a browseable `index.html` that links to all generated snapshots.

@@ -17,6 +17,7 @@ A three-stage promotion pipeline for GSD 2 that moves merged PRs through Dev →
 
 - Replacing the existing PR gate workflow (`ci.yml`)
 - Replacing the native binary cross-compilation workflow (`build-native.yml`)
+- Cross-platform native binary builds (macOS/Windows remain on `build-native.yml`)
 - Hosting GSD as a web service
 - Automated prompt regression testing (future work)
 
@@ -25,18 +26,17 @@ A three-stage promotion pipeline for GSD 2 that moves merged PRs through Dev →
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    PR Merged to main                        │
+│              ci.yml runs (build, test, typecheck)           │
 └──────────────────────────┬──────────────────────────────────┘
-                           ▼
+                           ▼ (workflow_run: ci.yml success)
 ┌──────────────────────────────────────────────────────────────┐
 │  STAGE: DEV                          Environment: dev        │
 │                                                              │
-│  1. Build all packages (TS + Rust native)                    │
-│  2. Run existing unit + integration tests                    │
-│  3. Typecheck extensions                                     │
-│  4. Package validation (validate-pack)                       │
-│  5. npm publish gsd-pi@<version>-dev.<sha> --tag dev         │
-│  6. Smoke test: npx gsd-pi@dev --version                    │
+│  1. Version stamp: <current>-dev.<short-sha>                 │
+│  2. npm publish gsd-pi@<version>-dev.<sha> --tag dev         │
+│  3. Smoke test: npx gsd-pi@dev --version                    │
 │                                                              │
+│  Note: Build/test/typecheck already ran in ci.yml            │
 │  Docker: Build CI builder image (only if Dockerfile changed) │
 └──────────────────────────┬──────────────────────────────────┘
                            ▼ (auto-promote if all green)
@@ -72,17 +72,56 @@ A three-stage promotion pipeline for GSD 2 that moves merged PRs through Dev →
 
 | Dist-tag | When published | Version format | Risk level |
 |----------|---------------|----------------|------------|
-| `@dev` | Every merged PR | `1.5.0-dev.a3f2c1b` | Bleeding edge |
+| `@dev` | Every merged PR | `2.27.0-dev.a3f2c1b` | Bleeding edge |
 | `@next` | Auto-promoted from Dev | Same version, new tag | Candidate |
 | `@latest` | Manually approved from Test | Same version, new tag | Production |
+
+The `-dev.` prerelease identifier is distinct from the existing `-next.` convention used in `build-native.yml`. The two pipelines do not overlap — `build-native.yml` only triggers on `v*` tags and checks for `-next.` to determine npm dist-tag. The `-dev.` versions are published exclusively by `pipeline.yml`.
+
+### Native Binary Strategy for Dev Publishes
+
+Dev versions (`@dev` tag) use the native binaries from the most recent stable `build-native.yml` release. The `optionalDependencies` in `package.json` use `>=` ranges, so a `-dev.` version of `gsd-pi` resolves the latest stable `@gsd-build/engine-*` packages from the registry.
+
+If a PR modifies Rust native crate code (`native/` directory), the dev publish will bundle stale native binaries. This is acceptable because:
+- Native crate changes are infrequent and always accompanied by a `v*` tag release
+- The Test stage validates the installed package works end-to-end
+- Full native binary validation happens via `build-native.yml` on the version tag
+
+### Concurrency Control
+
+```yaml
+concurrency:
+  group: pipeline-${{ github.sha }}
+  cancel-in-progress: false
+```
+
+Policy:
+- Each pipeline run is keyed to its commit SHA — no two runs for the same commit race
+- Newer merges do NOT cancel in-progress promotions — a version already in the Test stage completes its promotion
+- If Run A is promoting version X to `@next` while Run B publishes version Y to `@dev`, they operate independently — `@next` and `@dev` point to different versions, which is correct
+- The Prod stage always promotes whatever version is currently at `@next`, so approving promotion after a newer version has already moved to `@next` promotes the newer one (last-writer-wins, which is the desired behavior)
+
+### Failure Modes & Recovery
+
+| Failure | Impact | Recovery |
+|---------|--------|----------|
+| Dev publish succeeds, smoke test fails | Broken version on `@dev` tag | Next successful merge overwrites `@dev`. Manual fix: `npm dist-tag add gsd-pi@<last-good> dev` |
+| Test stage fails after promoting to `@next` | Broken version on `@next` tag | Manual: `npm dist-tag add gsd-pi@<last-good> next`. `@latest` is never affected. |
+| Prod promotion publishes `@latest` then found broken | Broken production release | Manual: `npm dist-tag add gsd-pi@<previous-stable> latest` and `docker tag ghcr.io/gsd-build/gsd-pi:<previous> latest && docker push`. Post-mortem required. |
+| Docker push succeeds, npm dist-tag fails | Images and npm out of sync | Re-run the failed job (GitHub Actions retry). Images are tagged by version so stale tags are harmless. |
+| GHCR push fails | No Docker image for this version | Non-blocking — npm publish is the primary distribution. Docker image can be rebuilt manually. |
+
+Rollback responsibility: any maintainer with npm publish rights and GHCR push access. The Prod environment's required-reviewers list doubles as the rollback-authorized list.
 
 ### Relationship to Existing Workflows
 
 | File | Trigger | Purpose | Status |
 |------|---------|---------|--------|
-| `ci.yml` | PR opened/updated | Pre-merge gate: build, test, typecheck | **Unchanged** |
+| `ci.yml` | PR opened/updated, push to main | Pre-merge gate: build, test, typecheck | **Unchanged** |
 | `build-native.yml` | `v*` tag or manual dispatch | Cross-compile native binaries for 5 platforms | **Unchanged** |
-| `pipeline.yml` | Push to `main` | Post-merge promotion: Dev → Test → Prod | **New** |
+| `pipeline.yml` | `workflow_run` (after ci.yml succeeds on main) | Post-merge promotion: Dev → Test → Prod | **New** |
+
+The pipeline triggers via `workflow_run` after `ci.yml` completes successfully on `main`, avoiding duplicate build/test work. The Dev stage only performs version stamping, publishing, and smoke testing.
 
 ## Docker Images
 
@@ -94,10 +133,18 @@ Two images from a single `Dockerfile` at the repo root.
 
 - **Name:** `ghcr.io/gsd-build/gsd-ci-builder`
 - **Base:** `node:22-bookworm`
-- **Contains:** Node 22, Rust stable toolchain, `aarch64-linux-gnu` cross-compiler, Playwright system deps
-- **Size:** ~2.5 GB
+- **Contains:** Node 22, Rust stable toolchain, `aarch64-linux-gnu` cross-compiler
+- **Size:** ~2 GB
+- **Tags:** `:latest`, `:<YYYY-MM-DD>` (date-stamped for rollback)
 - **Rebuilt:** Only when `Dockerfile` changes
+- **Used by:** `pipeline.yml` Dev stage, optionally `ci.yml`
 - **Purpose:** Eliminates 3-5 min toolchain install on every CI run
+
+The builder image does NOT include Playwright system deps (not needed for current CI jobs). If browser-based E2E tests are added later, Playwright deps can be added at that point.
+
+#### Builder Image Versioning
+
+Builder images are tagged with both `:latest` and a date stamp (e.g., `:2026-03-17`). The `pipeline.yml` workflow pins to a specific date-stamped tag. When the Dockerfile is updated, the PR that changes it also updates the tag reference in `pipeline.yml`. This prevents a broken Dockerfile change from silently breaking all subsequent runs.
 
 #### Runtime Image
 
@@ -105,7 +152,7 @@ Two images from a single `Dockerfile` at the repo root.
 - **Base:** `node:22-slim`
 - **Contains:** Node 22, git, `gsd-pi` installed globally
 - **Size:** ~250 MB
-- **Tags:** `:latest`, `:next`, `:v1.2.3`
+- **Tags:** `:latest`, `:next`, `:v2.27.0`
 - **Published:** On every Prod promotion
 - **Purpose:** `docker run ghcr.io/gsd-build/gsd-pi` as alternative to `npx`
 
@@ -134,13 +181,47 @@ FixtureProvider (intercept layer)
     └── replay mode → Load fixture JSON (no API call)
 ```
 
+### Integration Design
+
+The `FixtureProvider` implements the `Provider` interface from `@gsd/pi-ai` (the same interface all 20+ built-in providers implement). It registers itself via environment variable detection at provider initialization:
+
+```typescript
+// Pseudocode — actual implementation will follow pi-ai patterns
+import type { Provider, StreamingResponse } from "@gsd/pi-ai";
+
+class FixtureProvider implements Provider {
+  // In record mode: wraps the real provider, saves responses
+  // In replay mode: returns saved responses directly
+
+  async *stream(request: ProviderRequest): AsyncGenerator<StreamingResponse> {
+    if (this.mode === "replay") {
+      // Yield fixture response chunks (simulated streaming)
+      yield* this.replayTurn(this.turnIndex++);
+    } else {
+      // Proxy to real provider, capture response
+      const chunks = [];
+      for await (const chunk of this.realProvider.stream(request)) {
+        chunks.push(chunk);
+        yield chunk;
+      }
+      this.saveTurn(request, chunks);
+    }
+  }
+}
+```
+
+Key integration details:
+- **Streaming:** Fixture replay simulates streaming by yielding saved response chunks with minimal delay. This exercises the same consumer code paths as real streaming.
+- **Registration:** When `GSD_FIXTURE_MODE` is set, the fixture provider wraps the configured real provider. No changes to provider selection logic needed.
+- **Provider-agnostic:** Fixtures are captured at the `Provider` interface level (above HTTP transport), so they work regardless of which underlying provider was used during recording.
+
 ### Modes
 
 | Mode | Trigger | Behavior |
 |------|---------|----------|
-| **Record** | `GSD_FIXTURE_MODE=record GSD_FIXTURE_DIR=./fixtures` | Proxies to real API, saves request/response pairs |
-| **Replay** | `GSD_FIXTURE_MODE=replay GSD_FIXTURE_DIR=./fixtures` | Matches by turn index, returns saved response |
-| **Off** | Default (no env vars) | Normal operation |
+| **Record** | `GSD_FIXTURE_MODE=record GSD_FIXTURE_DIR=./fixtures` | Wraps real provider, saves request/response pairs |
+| **Replay** | `GSD_FIXTURE_MODE=replay GSD_FIXTURE_DIR=./fixtures` | Returns saved responses, zero API calls |
+| **Off** | Default (no env vars) | Normal operation, no interception |
 
 ### Fixture Format
 
@@ -174,7 +255,7 @@ One JSON file per recorded session:
 
 ### Matching Strategy
 
-Turn-index based. Response N is served for request N in sequence. If the conversation diverges from the fixture, the test fails explicitly.
+Turn-index based. Response N is served for request N in sequence. If the conversation diverges from the fixture (e.g., unexpected turn count), the test fails explicitly with a descriptive error rather than silently producing wrong results.
 
 Why not request-body hashing: request bodies contain timestamps, random IDs, and system prompt variations that cause brittle mismatches.
 
@@ -198,6 +279,10 @@ Why not a generic HTTP VCR: The `pi-ai` layer abstracts 20+ providers with diffe
 
 Committed to repo under `tests/fixtures/recordings/`. Each fixture is 5-50KB of JSON. Recording is a manual developer action, not automated in CI.
 
+### Dev Version Cleanup
+
+Old `-dev.` versions accumulate on npm with every merged PR. A scheduled workflow (`cleanup-dev-versions.yml`) runs weekly and unpublishes dev versions older than 30 days via `npm unpublish gsd-pi@<old-dev-version>`. This prevents registry bloat while keeping recent dev versions available.
+
 ## New Files & Scripts
 
 ### Directory Structure
@@ -205,10 +290,10 @@ Committed to repo under `tests/fixtures/recordings/`. Each fixture is 5-50KB of 
 ```
 tests/
 ├── smoke/                     # CLI smoke tests (Stage: Test)
-│   ├── run.mjs
-│   ├── test-version.mjs
-│   ├── test-help.mjs
-│   └── test-init.mjs
+│   ├── run.ts
+│   ├── test-version.ts
+│   ├── test-help.ts
+│   └── test-init.ts
 │
 ├── fixtures/                  # Recorded LLM replay tests (Stage: Test)
 │   ├── run.ts                 # Test runner
@@ -230,13 +315,16 @@ scripts/
 
 Dockerfile                     # Multi-stage: builder + runtime
 .github/workflows/pipeline.yml # Promotion pipeline
+.github/workflows/cleanup-dev-versions.yml # Weekly dev version pruning
 ```
+
+All test files use `.ts` with `--experimental-strip-types` for consistency with the existing test convention in the project.
 
 ### New npm Scripts
 
 ```json
 {
-  "test:smoke": "node tests/smoke/run.mjs",
+  "test:smoke": "node --experimental-strip-types tests/smoke/run.ts",
   "test:fixtures": "node --experimental-strip-types tests/fixtures/run.ts",
   "test:fixtures:record": "GSD_FIXTURE_MODE=record node --experimental-strip-types tests/fixtures/record.ts",
   "test:live": "GSD_LIVE_TESTS=1 node --experimental-strip-types tests/live/run.ts",
@@ -260,7 +348,7 @@ Dockerfile                     # Multi-stage: builder + runtime
 
 ## Success Criteria
 
-1. A merged PR is installable via `npx gsd-pi@dev` within 10 minutes
+1. A merged PR is installable via `npx gsd-pi@dev` within 15 minutes (assumes warm CI builder image cache)
 2. Fixture replay tests complete in under 60 seconds with zero API calls
 3. The full Dev → Test promotion completes without human intervention
 4. Prod promotion is blocked until a maintainer explicitly approves

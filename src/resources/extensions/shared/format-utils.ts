@@ -70,6 +70,14 @@ export function fitColumns(parts: string[], width: number, separator = "  "): st
   return truncateToWidth(result, width);
 }
 
+// ─── Text Truncation ─────────────────────────────────────────────────────────
+
+/** Truncate a string to `maxLength` characters, replacing the last character with an ellipsis if needed. */
+export function truncateWithEllipsis(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text
+  return text.slice(0, maxLength - 1) + "…"
+}
+
 // ─── Data Visualization ───────────────────────────────────────────────────────
 
 /**
@@ -85,6 +93,16 @@ export function sparkline(values: number[]): string {
   }
   if (max === 0) return chars[0].repeat(values.length);
   return values.map(v => chars[Math.min(7, Math.floor((v / max) * 7))]).join("");
+}
+
+// ─── Date Formatting ─────────────────────────────────────────────────────────
+
+/** Format an ISO date string as a compact locale string (e.g. "Mar 17, 2025, 02:30 PM"). */
+export function formatDateShort(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  } catch { return iso; }
 }
 
 // ─── ANSI Stripping ───────────────────────────────────────────────────────────

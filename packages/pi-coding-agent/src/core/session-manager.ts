@@ -27,6 +27,25 @@ import {
 } from "./messages.js";
 import { BlobStore, externalizeImageData, isBlobRef, resolveImageData } from "./blob-store.js";
 
+/** Inline concurrency limiter to cap parallel async operations. */
+function pLimit(concurrency: number) {
+	const queue: (() => void)[] = [];
+	let active = 0;
+	return <T>(fn: () => Promise<T>): Promise<T> => {
+		return new Promise<T>((resolve, reject) => {
+			const run = () => {
+				active++;
+				fn().then(resolve, reject).finally(() => {
+					active--;
+					if (queue.length > 0) queue.shift()!();
+				});
+			};
+			if (active < concurrency) run();
+			else queue.push(run);
+		});
+	};
+}
+
 const BLOB_EXTERNALIZE_THRESHOLD = 1024; // 1KB minimum to externalize
 const MAX_PERSIST_CHARS = 500_000;
 const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
@@ -1624,13 +1643,17 @@ export class SessionManager {
 			const sessions: SessionInfo[] = [];
 			const allFiles = dirFiles.flat();
 
+			// Limit concurrency to avoid memory spikes with many session files
+			const limit = pLimit(10);
 			const results = await Promise.all(
-				allFiles.map(async (file) => {
-					const info = await buildSessionInfo(file);
-					loaded++;
-					onProgress?.(loaded, totalFiles);
-					return info;
-				}),
+				allFiles.map((file) =>
+					limit(async () => {
+						const info = await buildSessionInfo(file);
+						loaded++;
+						onProgress?.(loaded, totalFiles);
+						return info;
+					}),
+				),
 			);
 
 			for (const info of results) {

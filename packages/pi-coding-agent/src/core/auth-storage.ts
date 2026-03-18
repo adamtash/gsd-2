@@ -27,6 +27,7 @@ import {
 	inspectOpenAICodexRateLimit,
 	type CredentialRateLimitInfo,
 } from "./rate-limit-inspector.js";
+import { AUTH_LOCK_STALE_MS } from "./constants.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 
 type AuthCredentialMetadata = {
@@ -167,8 +168,8 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 					maxTimeout: 10000,
 					randomize: true,
 				},
-				stale: 30000,
-				onCompromised: (err: Error) => {
+				stale: AUTH_LOCK_STALE_MS,
+				onCompromised: (err) => {
 					lockCompromised = true;
 					lockCompromisedError = err;
 				},

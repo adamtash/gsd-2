@@ -15,7 +15,7 @@ import {
   type ProgressFilter,
 } from "./visualizer-views.js";
 import { writeExportFile } from "./export.js";
-import { stripAnsi } from "../shared/format-utils.js";
+import { stripAnsi } from "../shared/mod.js";
 
 const TAB_COUNT = 10;
 const TAB_LABELS = [
@@ -86,6 +86,9 @@ export class GSDVisualizerOverlay {
       this.data = d;
       this.loading = false;
       this.tui.requestRender();
+    }).catch(() => {
+      this.loading = false;
+      this.tui.requestRender();
     });
 
     this.refreshTimer = setInterval(() => {
@@ -94,7 +97,7 @@ export class GSDVisualizerOverlay {
         this.data = d;
         this.invalidate();
         this.tui.requestRender();
-      });
+      }).catch(() => {}); // retry on next interval
     }, 5000);
   }
 

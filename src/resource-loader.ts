@@ -38,11 +38,15 @@ function getManagedResourceManifestPath(agentDir: string): string {
 }
 
 function getBundledGsdVersion(): string {
+  // Prefer GSD_VERSION env var (set once by loader.ts) to avoid re-reading package.json
+  if (process.env.GSD_VERSION && process.env.GSD_VERSION !== '0.0.0') {
+    return process.env.GSD_VERSION
+  }
   try {
     const pkg = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf-8'))
     return typeof pkg?.version === 'string' ? pkg.version : '0.0.0'
   } catch {
-    return process.env.GSD_VERSION || '0.0.0'
+    return '0.0.0'
   }
 }
 
@@ -106,6 +110,29 @@ function makeTreeWritable(dirPath: string): void {
 }
 
 /**
+ * Syncs a single bundled resource directory into the agent directory.
+ *
+ * 1. Makes the destination writable (handles Nix store read-only copies).
+ * 2. Removes destination subdirs that exist in source to clear stale files,
+ *    while preserving user-created directories.
+ * 3. Copies source into destination.
+ * 4. Makes the result writable for the next upgrade cycle.
+ */
+function syncResourceDir(srcDir: string, destDir: string): void {
+  makeTreeWritable(destDir)
+  if (existsSync(srcDir)) {
+    for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        const target = join(destDir, entry.name)
+        if (existsSync(target)) rmSync(target, { recursive: true, force: true })
+      }
+    }
+    cpSync(srcDir, destDir, { recursive: true, force: true })
+    makeTreeWritable(destDir)
+  }
+}
+
+/**
  * Syncs all bundled resources to agentDir (~/.gsd/agent/) on every launch.
  *
  * - extensions/ → ~/.gsd/agent/extensions/   (overwrite when version changes)
@@ -123,49 +150,21 @@ function makeTreeWritable(dirPath: string): void {
 export function initResources(agentDir: string): void {
   mkdirSync(agentDir, { recursive: true })
 
-  // Sync extensions — clean bundled subdirs first to remove stale leftover files,
-  // then overwrite so updates land on next launch. Only bundled subdirs are removed;
-  // user-created extension directories are preserved.
-  const destExtensions = join(agentDir, 'extensions')
-  makeTreeWritable(destExtensions)
-  for (const entry of readdirSync(bundledExtensionsDir, { withFileTypes: true })) {
-    if (entry.isDirectory()) {
-      const target = join(destExtensions, entry.name)
-      if (existsSync(target)) rmSync(target, { recursive: true, force: true })
-    }
-  }
-  cpSync(bundledExtensionsDir, destExtensions, { recursive: true, force: true })
-  makeTreeWritable(destExtensions)
-
-  // Sync agents
-  const destAgents = join(agentDir, 'agents')
-  const srcAgents = join(resourcesDir, 'agents')
-  if (existsSync(srcAgents)) {
-    makeTreeWritable(destAgents)
-    for (const entry of readdirSync(srcAgents, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        const target = join(destAgents, entry.name)
-        if (existsSync(target)) rmSync(target, { recursive: true, force: true })
-      }
-    }
-    cpSync(srcAgents, destAgents, { recursive: true, force: true })
-    makeTreeWritable(destAgents)
+  // Skip the full copy when the synced version already matches the running version.
+  // This avoids ~800ms of synchronous rmSync + cpSync on every startup.
+  const currentVersion = getBundledGsdVersion()
+  const managedVersion = readManagedResourceVersion(agentDir)
+  if (managedVersion && managedVersion === currentVersion) {
+    return
   }
 
-  // Sync skills
-  const destSkills = join(agentDir, 'skills')
-  const srcSkills = join(resourcesDir, 'skills')
-  if (existsSync(srcSkills)) {
-    makeTreeWritable(destSkills)
-    for (const entry of readdirSync(srcSkills, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        const target = join(destSkills, entry.name)
-        if (existsSync(target)) rmSync(target, { recursive: true, force: true })
-      }
-    }
-    cpSync(srcSkills, destSkills, { recursive: true, force: true })
-    makeTreeWritable(destSkills)
-  }
+  syncResourceDir(bundledExtensionsDir, join(agentDir, 'extensions'))
+  syncResourceDir(join(resourcesDir, 'agents'), join(agentDir, 'agents'))
+  syncResourceDir(join(resourcesDir, 'skills'), join(agentDir, 'skills'))
+
+  // Ensure all newly copied files are owner-writable so the next run can
+  // overwrite them (covers extensions, agents, and skills in one walk).
+  makeTreeWritable(agentDir)
 
   writeManagedResourceManifest(agentDir)
 }
@@ -175,12 +174,22 @@ export function initResources(agentDir: string): void {
  * ~/.gsd/agent/extensions/ (GSD's default) and ~/.pi/agent/extensions/ (pi's default).
  * This allows users to use extensions from either location.
  */
+// Cache bundled extension keys at module load — avoids re-scanning the extensions
+// directory in buildResourceLoader() (already scanned by loader.ts for env var).
+let _bundledExtensionKeys: Set<string> | null = null
+function getBundledExtensionKeys(): Set<string> {
+  if (!_bundledExtensionKeys) {
+    _bundledExtensionKeys = new Set(
+      discoverExtensionEntryPaths(bundledExtensionsDir).map((entryPath) => getExtensionKey(entryPath, bundledExtensionsDir)),
+    )
+  }
+  return _bundledExtensionKeys
+}
+
 export function buildResourceLoader(agentDir: string): DefaultResourceLoader {
   const piAgentDir = join(homedir(), '.pi', 'agent')
   const piExtensionsDir = join(piAgentDir, 'extensions')
-  const bundledKeys = new Set(
-    discoverExtensionEntryPaths(bundledExtensionsDir).map((entryPath) => getExtensionKey(entryPath, bundledExtensionsDir)),
-  )
+  const bundledKeys = getBundledExtensionKeys()
   const piExtensionPaths = discoverExtensionEntryPaths(piExtensionsDir).filter(
     (entryPath) => !bundledKeys.has(getExtensionKey(entryPath, piExtensionsDir)),
   )

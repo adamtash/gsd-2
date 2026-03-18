@@ -8,6 +8,12 @@
  * - toJSON() provides diagnostic snapshots
  * - grep `s.` shows every state access
  * - Constructable for testing
+ *
+ * MAINTENANCE RULE: All new mutable auto-mode state MUST be added here as a
+ * class property, not as a module-level variable in auto.ts. If the state
+ * needs clearing on stop, add it to reset(). Tests in
+ * auto-session-encapsulation.test.ts enforce that auto.ts has no module-level
+ * `let` or `var` declarations.
  */
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
@@ -54,6 +60,8 @@ export const MAX_LIFETIME_DISPATCHES = 6;
 export const MAX_CONSECUTIVE_SKIPS = 3;
 export const DISPATCH_GAP_TIMEOUT_MS = 5_000;
 export const MAX_SKIP_DEPTH = 20;
+export const NEW_SESSION_TIMEOUT_MS = 30_000;
+export const DISPATCH_HANG_TIMEOUT_MS = 60_000;
 
 // ─── AutoSession ─────────────────────────────────────────────────────────────
 
@@ -106,6 +114,7 @@ export class AutoSession {
 
   // ── Guards ───────────────────────────────────────────────────────────────
   handlingAgentEnd = false;
+  pendingAgentEndRetry = false;
   dispatching = false;
   skipDepth = 0;
   readonly recentlyEvictedKeys = new Set<string>();
@@ -192,6 +201,7 @@ export class AutoSession {
 
     // Guards
     this.handlingAgentEnd = false;
+    this.pendingAgentEndRetry = false;
     this.dispatching = false;
     this.skipDepth = 0;
     this.recentlyEvictedKeys.clear();

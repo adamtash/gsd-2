@@ -12,7 +12,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { gsdRoot } from "./paths.js";
-import { milestoneIdSort } from "./guided-flow.js";
+import { milestoneIdSort } from "./milestone-ids.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
