@@ -59,7 +59,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { shortcutDesc } from "../shared/terminal.js";
 import { Text } from "@gsd/pi-tui";
-import { maybePauseAutoForProviderError, pauseAutoForProviderError } from "./provider-error-pause.js";
+import { maybePauseAutoForProviderError } from "./provider-error-pause.js";
+import { pauseAutoForProviderError, classifyProviderError } from "./provider-error-pause.js";
 import { toPosixPath } from "../shared/path-display.js";
 import { isParallelActive, shutdownParallel } from "./parallel-orchestrator.js";
 
@@ -479,6 +480,11 @@ export default function (pi: ExtensionAPI) {
   // The LLM cannot generate random suffixes for unique_milestone_ids on its
   // own. This tool calls back into the TS code that owns ID generation,
   // ensuring the preference is always respected and IDs are always valid.
+  //
+  // Reservation set: tracks IDs returned by this tool but not yet persisted
+  // to disk, preventing duplicate M001 when called multiple times (#961).
+  const reservedMilestoneIds = new Set<string>();
+
   pi.registerTool({
     name: "gsd_generate_milestone_id",
     label: "Generate Milestone ID",
@@ -499,10 +505,13 @@ export default function (pi: ExtensionAPI) {
         const basePath = process.cwd();
         const existingIds = findMilestoneIds(basePath);
         const uniqueEnabled = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
-        const newId = nextMilestoneId(existingIds, uniqueEnabled);
+        // Combine on-disk IDs with previously reserved (but not yet persisted) IDs
+        const allIds = [...new Set([...existingIds, ...reservedMilestoneIds])];
+        const newId = nextMilestoneId(allIds, uniqueEnabled);
+        reservedMilestoneIds.add(newId);
         return {
           content: [{ type: "text" as const, text: newId }],
-          details: { operation: "generate_milestone_id", id: newId, existingCount: existingIds.length, uniqueEnabled },
+          details: { operation: "generate_milestone_id", id: newId, existingCount: existingIds.length, reservedCount: reservedMilestoneIds.size, uniqueEnabled },
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -824,18 +833,22 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      // Detect rate-limit errors and extract retry delay for auto-resume
-      const isRateLimit = /rate.?limit|too many requests|429/i.test(errorMsg);
-      const retryAfterMs = ("retryAfterMs" in lastMsg && typeof lastMsg.retryAfterMs === "number")
+      // Classify the error: transient (auto-resume) vs permanent (manual resume)
+      const classification = classifyProviderError(errorMsg);
+
+      // Extract explicit retry-after from the message or response metadata
+      const explicitRetryAfterMs = ("retryAfterMs" in lastMsg && typeof lastMsg.retryAfterMs === "number")
         ? lastMsg.retryAfterMs
-        : (() => { const m = errorMsg.match(/reset in (\d+)s/i); return m ? Number(m[1]) * 1000 : undefined; })();
+        : undefined;
+      const retryAfterMs = explicitRetryAfterMs ?? classification.suggestedDelayMs;
 
       await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi), {
-        isRateLimit,
+        isRateLimit: classification.isRateLimit,
+        isTransient: classification.isTransient,
         retryAfterMs,
         resume: () => {
           pi.sendMessage(
-            { customType: "gsd-auto-timeout-recovery", content: "Continue execution \u2014 rate limit window elapsed.", display: false },
+            { customType: "gsd-auto-timeout-recovery", content: "Continue execution \u2014 provider error recovery delay elapsed.", display: false },
             { triggerTurn: true },
           );
         },

@@ -8,6 +8,7 @@ import type { PostUnitHookConfig, PreDispatchHookConfig, BudgetEnforcementMode, 
 import type { DynamicRoutingConfig } from "./model-router.js";
 import { defaultRoutingConfig } from "./model-router.js";
 import { VALID_BRANCH_NAME } from "./git-service.js";
+import { normalizeStringArray } from "../shared/format-utils.js";
 
 const GLOBAL_PREFERENCES_PATH = join(homedir(), ".gsd", "preferences.md");
 const LEGACY_GLOBAL_PREFERENCES_PATH = join(homedir(), ".pi", "agent", "gsd-preferences.md");
@@ -80,6 +81,7 @@ const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "verification_commands",
   "verification_auto_fix",
   "verification_max_retries",
+  "search_provider",
 ]);
 
 export interface GSDSkillRule {
@@ -182,6 +184,8 @@ export interface GSDPreferences {
   verification_commands?: string[];
   verification_auto_fix?: boolean;
   verification_max_retries?: number;
+  /** Search provider preference. "brave"/"tavily"/"ollama" force that backend and disable native Anthropic search. "native" forces native only. "auto" = current default behavior. */
+  search_provider?: "brave" | "tavily" | "ollama" | "native" | "auto";
 }
 
 export interface LoadedGSDPreferences {
@@ -759,6 +763,15 @@ export function resolveInlineLevel(): InlineLevel {
   }
 }
 
+/**
+ * Resolve the search provider preference from preferences.md.
+ * Returns undefined if not configured (caller falls back to existing behavior).
+ */
+export function resolveSearchProviderFromPreferences(): GSDPreferences["search_provider"] | undefined {
+  const prefs = loadEffectiveGSDPreferences();
+  return prefs?.preferences.search_provider;
+}
+
 function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPreferences {
   return {
     version: override.version ?? base.version,
@@ -801,6 +814,7 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
     verification_commands: mergeStringLists(base.verification_commands, override.verification_commands),
     verification_auto_fix: override.verification_auto_fix ?? base.verification_auto_fix,
     verification_max_retries: override.verification_max_retries ?? base.verification_max_retries,
+    search_provider: override.search_provider ?? base.search_provider,
   };
 }
 
@@ -856,10 +870,10 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
-  validated.always_use_skills = normalizeStringList(preferences.always_use_skills);
-  validated.prefer_skills = normalizeStringList(preferences.prefer_skills);
-  validated.avoid_skills = normalizeStringList(preferences.avoid_skills);
-  validated.custom_instructions = normalizeStringList(preferences.custom_instructions);
+  validated.always_use_skills = normalizeStringArray(preferences.always_use_skills);
+  validated.prefer_skills = normalizeStringArray(preferences.prefer_skills);
+  validated.avoid_skills = normalizeStringArray(preferences.avoid_skills);
+  validated.custom_instructions = normalizeStringArray(preferences.custom_instructions);
 
   if (preferences.skill_rules) {
     const validRules: GSDSkillRule[] = [];
@@ -875,7 +889,7 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
       const validatedRule: GSDSkillRule = { when };
       for (const action of SKILL_ACTIONS) {
-        const values = normalizeStringList((rule as unknown as Record<string, unknown>)[action]);
+        const values = normalizeStringArray((rule as unknown as Record<string, unknown>)[action]);
         if (values.length > 0) {
           validatedRule[action as keyof GSDSkillRule] = values as never;
         }
@@ -932,6 +946,16 @@ export function validatePreferences(preferences: GSDPreferences): {
       validated.token_profile = preferences.token_profile as TokenProfile;
     } else {
       errors.push(`token_profile must be one of: budget, balanced, quality`);
+    }
+  }
+
+  // ─── Search Provider ─────────────────────────────────────────────
+  if (preferences.search_provider !== undefined) {
+    const validSearchProviders = new Set(["brave", "tavily", "ollama", "native", "auto"]);
+    if (typeof preferences.search_provider === "string" && validSearchProviders.has(preferences.search_provider)) {
+      validated.search_provider = preferences.search_provider as GSDPreferences["search_provider"];
+    } else {
+      errors.push(`search_provider must be one of: brave, tavily, ollama, native, auto`);
     }
   }
 
@@ -1029,7 +1053,7 @@ export function validatePreferences(preferences: GSDPreferences): {
         errors.push(`duplicate post_unit_hooks name: ${name}`);
         continue;
       }
-      const after = normalizeStringList(hook.after);
+      const after = normalizeStringArray(hook.after);
       if (after.length === 0) {
         errors.push(`post_unit_hooks "${name}" missing after`);
         continue;
@@ -1096,7 +1120,7 @@ export function validatePreferences(preferences: GSDPreferences): {
         errors.push(`duplicate pre_dispatch_hooks name: ${name}`);
         continue;
       }
-      const before = normalizeStringList(hook.before);
+      const before = normalizeStringArray(hook.before);
       if (before.length === 0) {
         errors.push(`pre_dispatch_hooks "${name}" missing before`);
         continue;
@@ -1359,21 +1383,14 @@ export function validatePreferences(preferences: GSDPreferences): {
 
 function mergeStringLists(base?: unknown, override?: unknown): string[] | undefined {
   const merged = [
-    ...normalizeStringList(base),
-    ...normalizeStringList(override),
+    ...normalizeStringArray(base),
+    ...normalizeStringArray(override),
   ]
     .map((item) => item.trim())
     .filter(Boolean);
   return merged.length > 0 ? Array.from(new Set(merged)) : undefined;
 }
 
-function normalizeStringList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
 
 function mergePostUnitHooks(
   base?: PostUnitHookConfig[],

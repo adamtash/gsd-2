@@ -352,6 +352,7 @@ export class InteractiveMode {
 		this.autocompleteProvider = new CombinedAutocompleteProvider(
 			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
 			process.cwd(),
+			{ respectGitignore: this.settingsManager.getRespectGitignoreInPicker() },
 		);
 		this.defaultEditor.setAutocompleteProvider(this.autocompleteProvider);
 		if (this.editor !== this.defaultEditor) {
@@ -3376,6 +3377,7 @@ export class InteractiveMode {
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
 					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
+					respectGitignoreInPicker: this.settingsManager.getRespectGitignoreInPicker(),
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 				},
@@ -3476,6 +3478,10 @@ export class InteractiveMode {
 					onClearOnShrinkChange: (enabled) => {
 						this.settingsManager.setClearOnShrink(enabled);
 						this.ui.setClearOnShrink(enabled);
+					},
+					onRespectGitignoreInPickerChange: (enabled) => {
+						this.settingsManager.setRespectGitignoreInPicker(enabled);
+						this.autocompleteProvider?.setRespectGitignore(enabled);
 					},
 					onCancel: () => {
 						done();

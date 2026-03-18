@@ -74,11 +74,6 @@ export interface DoctorSummary {
   byCode: Array<{ code: DoctorIssueCode; count: number }>;
 }
 
-function normalizeStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const items = value.filter((item): item is string => typeof item === "string").map(item => item.trim()).filter(Boolean);
-  return items.length > 0 ? Array.from(new Set(items)) : undefined;
-}
 
 function validatePreferenceShape(preferences: GSDPreferences): string[] {
   const issues: string[] = [];

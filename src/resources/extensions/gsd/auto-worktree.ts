@@ -6,8 +6,8 @@
  * manages create, enter, detect, and teardown for auto-mode worktrees.
  */
 
-import { existsSync, cpSync, readFileSync, writeFileSync, readdirSync, mkdirSync, realpathSync, utimesSync, unlinkSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, cpSync, readFileSync, writeFileSync, readdirSync, mkdirSync, realpathSync, unlinkSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { GSDError, GSD_IO_ERROR, GSD_GIT_ERROR } from "./errors.js";
 import { copyWorktreeDb, reconcileWorktreeDb, isDbAvailable } from "./gsd-db.js";
 import { execSync, execFileSync } from "node:child_process";
@@ -16,7 +16,7 @@ import {
   removeWorktree,
   worktreePath,
 } from "./worktree-manager.js";
-import { detectWorktreeName } from "./worktree.js";
+import { detectWorktreeName, resolveGitHeadPath, nudgeGitBranchCache } from "./worktree.js";
 import {
   MergeConflictError,
   readIntegrationBranch,
@@ -42,41 +42,6 @@ import {
 
 /** Original project root before chdir into auto-worktree. */
 let originalBase: string | null = null;
-
-// ─── Git Helpers (local, mirrors worktree-command.ts pattern) ──────────────
-
-function resolveGitHeadPath(dir: string): string | null {
-  const gitPath = join(dir, ".git");
-  if (!existsSync(gitPath)) return null;
-  try {
-    const content = readFileSync(gitPath, "utf8").trim();
-    if (content.startsWith("gitdir: ")) {
-      const gitDir = resolve(dir, content.slice(8));
-      const headPath = join(gitDir, "HEAD");
-      return existsSync(headPath) ? headPath : null;
-    }
-    const headPath = join(dir, ".git", "HEAD");
-    return existsSync(headPath) ? headPath : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Nudge pi's FooterDataProvider to re-read the git branch after chdir.
- * Touches HEAD in both old and new cwd to fire the fs watcher.
- */
-function nudgeGitBranchCache(previousCwd: string): void {
-  const now = new Date();
-  for (const dir of [previousCwd, process.cwd()]) {
-    try {
-      const headPath = resolveGitHeadPath(dir);
-      if (headPath) utimesSync(headPath, now, now);
-    } catch {
-      // Best-effort
-    }
-  }
-}
 
 // ─── Worktree Post-Create Hook (#597) ────────────────────────────────────────
 

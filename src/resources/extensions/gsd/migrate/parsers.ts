@@ -3,6 +3,7 @@
 // Zero Pi dependencies — uses only exported helpers from files.ts.
 
 import { splitFrontmatter, parseFrontmatterMap, extractBoldField } from '../files.js';
+import { normalizeStringArray } from '../../shared/format-utils.js';
 
 import type {
   PlanningRoadmap,
@@ -366,11 +367,6 @@ function parseRequiresArray(raw: unknown): PlanningSummaryRequires[] {
   });
 }
 
-function toStringArray(val: unknown): string[] {
-  if (Array.isArray(val)) return val.map(String);
-  return [];
-}
-
 /**
  * Parse YAML-like frontmatter lines into a flat key-value map.
  * Like parseFrontmatterMap but supports hyphenated keys (e.g. `tech-stack:`).
@@ -459,14 +455,14 @@ function parseSummaryFrontmatter(fm: Record<string, unknown>): PlanningSummaryFr
     phase: unquote(fm.phase),
     plan: unquote(fm.plan),
     subsystem: unquote(fm.subsystem),
-    tags: toStringArray(fm.tags),
+    tags: normalizeStringArray(fm.tags),
     requires: parseRequiresArray(fm.requires),
-    provides: toStringArray(fm.provides),
-    affects: toStringArray(fm.affects),
-    'tech-stack': toStringArray(fm['tech-stack']),
-    'key-files': toStringArray(fm['key-files']),
-    'key-decisions': toStringArray(fm['key-decisions']),
-    'patterns-established': toStringArray(fm['patterns-established']),
+    provides: normalizeStringArray(fm.provides),
+    affects: normalizeStringArray(fm.affects),
+    'tech-stack': normalizeStringArray(fm['tech-stack']),
+    'key-files': normalizeStringArray(fm['key-files']),
+    'key-decisions': normalizeStringArray(fm['key-decisions']),
+    'patterns-established': normalizeStringArray(fm['patterns-established']),
     duration: unquote(fm.duration),
     completed: unquote(fm.completed),
   };

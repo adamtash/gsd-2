@@ -93,3 +93,19 @@ export function sparkline(values: number[]): string {
 export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
+
+// ─── String Array Normalization ─────────────────────────────────────────────
+
+/**
+ * Normalize an unknown value to a string array.
+ * Filters to string items, trims whitespace, removes empty strings.
+ * Optionally deduplicates.
+ */
+export function normalizeStringArray(value: unknown, options?: { dedupe?: boolean }): string[] {
+  if (!Array.isArray(value)) return [];
+  const items = value
+    .filter((item): item is string => typeof item === "string")
+    .map(item => item.trim())
+    .filter(Boolean);
+  return options?.dedupe ? [...new Set(items)] : items;
+}
