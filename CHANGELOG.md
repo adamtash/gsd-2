@@ -6,6 +6,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.32.0] - 2026-03-19
+
+### Added
+- always-on health widget and visualizer health tab expansion (#1286)
+- environment health checks, progress score, and status integration (#1263)
+
+### Fixed
+- skip crash recovery when auto.lock was written by current process (#1289)
+- load worktree-cli extension modules via jiti instead of static ESM imports (#1285)
+- **gsd**: prevent concurrent dispatch during skip chains (#1272) (#1283)
+- skip non-artifact UAT dispatch in auto-mode (#1277)
+
+### Changed
+- deduplicate knownUnitTypes and STATE_REBUILD_MIN_INTERVAL_MS constants (#1281)
+- extract prompt builder helpers for inlined context and source file lists (#1279)
+- extract createGitService() factory, remove debug logs (#1278)
+- extract dispatchUnit helper, inline dead buildDocsCommitInstruction (#1275)
+- unify unit-type switch statements into lookup map (#1273)
+
 ## [2.31.2] - 2026-03-18
 
 ### Fixed
@@ -1270,7 +1289,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.31.2...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.32.0...HEAD
+[2.32.0]: https://github.com/gsd-build/gsd-2/compare/v2.31.2...v2.32.0
 [2.31.2]: https://github.com/gsd-build/gsd-2/compare/v2.31.1...v2.31.2
 [2.31.1]: https://github.com/gsd-build/gsd-2/compare/v2.31.0...v2.31.1
 [2.31.0]: https://github.com/gsd-build/gsd-2/compare/v2.30.0...v2.31.0
