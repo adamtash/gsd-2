@@ -119,6 +119,91 @@ describe("AuthStorage — multiple credentials", () => {
 		assert.equal(keyWithoutSession, "sk-3");
 		assert.equal(keyWithSession, "sk-3");
 	});
+
+	it("prefers the credential whose available quota resets sooner", async () => {
+		const storage = inMemory({
+			anthropic: [makeKey("sk-1"), makeKey("sk-2")],
+		});
+		const credentials = storage.getCredentialsForProvider("anthropic");
+		(storage as any).providerRoundRobinIndex.set("anthropic", 1);
+		(storage as any).credentialRateLimitInfo.set(
+			"anthropic",
+			new Map([
+				[
+					credentials[0].id,
+					{
+						credentialId: credentials[0].id,
+						provider: "anthropic",
+						label: credentials[0].label,
+						fetchedAt: Date.now(),
+						fiveHour: { utilization: 25, resetsAt: Date.now() + 30 * 60_000 },
+						weekly: null,
+						isRateLimited: false,
+						availableAt: null,
+					},
+				],
+				[
+					credentials[1].id,
+					{
+						credentialId: credentials[1].id,
+						provider: "anthropic",
+						label: credentials[1].label,
+						fetchedAt: Date.now(),
+						fiveHour: { utilization: 25, resetsAt: Date.now() + 2 * 60 * 60_000 },
+						weekly: null,
+						isRateLimited: false,
+						availableAt: null,
+					},
+				],
+			]),
+		);
+
+		const key = await storage.getApiKey("anthropic");
+		assert.equal(key, "sk-1");
+	});
+
+	it("prefers more remaining capacity when reset times are tied", async () => {
+		const storage = inMemory({
+			anthropic: [makeKey("sk-1"), makeKey("sk-2")],
+		});
+		const credentials = storage.getCredentialsForProvider("anthropic");
+		(storage as any).providerRoundRobinIndex.set("anthropic", 1);
+		const sharedResetAt = Date.now() + 45 * 60_000;
+		(storage as any).credentialRateLimitInfo.set(
+			"anthropic",
+			new Map([
+				[
+					credentials[0].id,
+					{
+						credentialId: credentials[0].id,
+						provider: "anthropic",
+						label: credentials[0].label,
+						fetchedAt: Date.now(),
+						fiveHour: { utilization: 80, resetsAt: sharedResetAt },
+						weekly: null,
+						isRateLimited: false,
+						availableAt: null,
+					},
+				],
+				[
+					credentials[1].id,
+					{
+						credentialId: credentials[1].id,
+						provider: "anthropic",
+						label: credentials[1].label,
+						fetchedAt: Date.now(),
+						fiveHour: { utilization: 20, resetsAt: sharedResetAt },
+						weekly: null,
+						isRateLimited: false,
+						availableAt: null,
+					},
+				],
+			]),
+		);
+
+		const key = await storage.getApiKey("anthropic");
+		assert.equal(key, "sk-2");
+	});
 });
 
 // ─── login accumulation ───────────────────────────────────────────────────────

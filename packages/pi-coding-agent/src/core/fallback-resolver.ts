@@ -29,8 +29,9 @@ export class FallbackResolver {
 
 	/**
 	 * Find the next available fallback for a model that just failed.
-	 * Searches all chains for entries matching the current model's provider+id,
-	 * then returns the next available entry with lower priority (higher number).
+	 * First searches explicit chains (when fallback.enabled = true in settings).
+	 * If no chain match is found, auto-discovers any other provider that has
+	 * non-exhausted credentials in auth storage (zero-config fallback).
 	 *
 	 * @returns FallbackResult if a fallback is available, null otherwise
 	 */
@@ -39,27 +40,29 @@ export class FallbackResolver {
 		errorType: UsageLimitErrorType,
 	): Promise<FallbackResult | null> {
 		const { enabled, chains } = this.settingsManager.getFallbackSettings();
-		if (!enabled) return null;
 
 		// Mark the current provider as exhausted at the provider level
 		this.authStorage.markProviderExhausted(currentModel.provider, errorType);
 
-		// Search all chains for one containing the current model
-		for (const [chainName, entries] of Object.entries(chains)) {
-			const currentIndex = this._findChainIndex(entries, currentModel);
+		// If explicit chains are configured and enabled, search them first
+		if (enabled) {
+			for (const [chainName, entries] of Object.entries(chains)) {
+				const currentIndex = this._findChainIndex(entries, currentModel);
 
-			if (currentIndex === -1) continue;
+				if (currentIndex === -1) continue;
 
-			// Try entries after the current one (already sorted by priority)
-			const result = await this._findAvailableInChain(chainName, entries, currentIndex + 1);
-			if (result) return result;
+				// Try entries after the current one (already sorted by priority)
+				const result = await this._findAvailableInChain(chainName, entries, currentIndex + 1);
+				if (result) return result;
 
-			// Wrap around: try entries before the current one
-			const wrapResult = await this._findAvailableInChain(chainName, entries, 0, currentIndex);
-			if (wrapResult) return wrapResult;
+				// Wrap around: try entries before the current one
+				const wrapResult = await this._findAvailableInChain(chainName, entries, 0, currentIndex);
+				if (wrapResult) return wrapResult;
+			}
 		}
 
-		return null;
+		// Auto-discover: try any other provider with available credentials
+		return this._autoDiscoverFallback(currentModel);
 	}
 
 	/**
@@ -120,6 +123,32 @@ export class FallbackResolver {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Auto-discover a fallback provider by scanning all providers in auth storage.
+	 * Returns the first provider (other than the current one) that has available
+	 * credentials and a resolvable model in the model registry.
+	 * This enables zero-config cross-provider fallback when no explicit chains
+	 * are configured.
+	 */
+	private async _autoDiscoverFallback(currentModel: Model<Api>): Promise<FallbackResult | null> {
+		const allProviders = Object.keys(this.authStorage.getAll());
+		for (const provider of allProviders) {
+			if (provider === currentModel.provider) continue;
+			if (!this.authStorage.isProviderAvailable(provider)) continue;
+			if (!this.authStorage.hasAuth(provider)) continue;
+
+			const model = this.modelRegistry.getPreferredModelForProvider(provider);
+			if (!model) continue;
+
+			return {
+				model,
+				chainName: "auto",
+				reason: `auto-fallback to ${provider}/${model.id}`,
+			};
+		}
+		return null;
 	}
 
 	private _findChainIndex(entries: FallbackChainEntry[], currentModel: Model<Api>): number {

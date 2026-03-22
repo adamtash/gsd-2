@@ -1027,8 +1027,10 @@ export class AgentSession {
 		const restoration = await this._fallbackResolver.checkForRestoration(this.model);
 		if (restoration) {
 			const previousProvider = `${this.model.provider}/${this.model.id}`;
+			const restorationThinkingLevel = this._getThinkingLevelForModelSwitch();
 			this.agent.setModel(restoration.model);
 			this.sessionManager.appendModelChange(restoration.model.provider, restoration.model.id);
+			this.setThinkingLevel(restorationThinkingLevel);
 			this._emit({
 				type: "fallback_provider_restored",
 				provider: `${restoration.model.provider}/${restoration.model.id}`,
@@ -2518,12 +2520,15 @@ export class AgentSession {
 		// Try credential fallback before counting against retry budget.
 		// If another credential is available, switch to it and retry immediately.
 		// Only attempt credential rotation for errors that indicate a credential-level
-		// problem (rate limit, quota exhaustion, server error). Transport failures
-		// ("unknown") like connection resets are not credential-specific — rotating
-		// won't help and backing off the only credential causes "Authentication failed".
+		// problem (rate limit, quota exhaustion). Transport failures ("unknown") and
+		// transient server errors ("server_error" / 5xx) are NOT credential-specific —
+		// rotating accounts won't resolve an OpenAI infrastructure outage, and backing
+		// off all credentials one-by-one creates an infinite rapid-fire retry loop once
+		// the earliest backoff expires to 0ms. server_error falls through to regular
+		// exponential backoff on the same credential.
 		if (this.model && message.errorMessage) {
 			const errorType = this._classifyErrorType(message.errorMessage);
-			const isCredentialError = errorType !== "unknown";
+			const isCredentialError = errorType === "quota_exhausted" || errorType === "rate_limit";
 			const rotation = isCredentialError
 				? this._modelRegistry.authStorage.markUsageLimitReachedWithFallback(
 				this.model.provider,
@@ -2589,8 +2594,10 @@ export class AgentSession {
 					// Swap to fallback model — don't persist to settings
 					const previousProvider = this.model.provider;
 					const previousModelId = this.model.id;
+					const thinkingLevel = this._getThinkingLevelForModelSwitch();
 					this.agent.setModel(fallbackResult.model);
 					this.sessionManager.appendModelChange(fallbackResult.model.provider, fallbackResult.model.id);
+					this.setThinkingLevel(thinkingLevel);
 
 					this._sanitizeLastAssistantForRetry();
 

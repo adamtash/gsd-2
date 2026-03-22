@@ -570,6 +570,41 @@ export class AuthStorage {
 		return remaining;
 	}
 
+	private getCredentialSelectionUrgency(
+		provider: string,
+		credential: AuthCredential,
+	): { earliestResetAt: number; utilization: number } | undefined {
+		if (!credential.id) return undefined;
+		const snapshot = this.credentialRateLimitInfo.get(provider)?.get(credential.id);
+		if (!snapshot || snapshot.error || snapshot.isRateLimited) return undefined;
+
+		const now = Date.now();
+		const candidateWindows = [snapshot.fiveHour, snapshot.weekly]
+			.flatMap((window) => {
+				if (!window || typeof window.resetsAt !== "number" || window.resetsAt <= now) {
+					return [];
+				}
+				if (window.utilization != null && window.utilization >= 100) {
+					return [];
+				}
+				return [{
+					resetsAt: window.resetsAt,
+					utilization: window.utilization ?? null,
+				}];
+			})
+			.sort((left, right) => {
+				if (left.resetsAt !== right.resetsAt) return left.resetsAt - right.resetsAt;
+				return (left.utilization ?? Number.POSITIVE_INFINITY) - (right.utilization ?? Number.POSITIVE_INFINITY);
+			});
+
+		const earliest = candidateWindows[0];
+		if (!earliest) return undefined;
+		return {
+			earliestResetAt: earliest.resetsAt,
+			utilization: earliest.utilization ?? Number.POSITIVE_INFINITY,
+		};
+	}
+
 	private getPreferredCredentialIndex(provider: string, sessionId?: string): number {
 		const credentials = this.getCredentialsForProvider(provider);
 		if (credentials.length === 0) return -1;
@@ -1122,16 +1157,50 @@ export class AuthStorage {
 			}
 		}
 
-		// Try starting from the preferred index, wrapping around
+		// Collect candidates in the legacy wrap order first so round-robin/session
+		// stickiness still acts as the tie-breaker when urgency is equal.
+		const candidateIndexes: number[] = [];
 		for (let offset = 0; offset < credentials.length; offset++) {
 			const index = (startIndex + offset) % credentials.length;
 			if (!this.isCredentialBackedOff(provider, index)) {
-				return index;
+				candidateIndexes.push(index);
 			}
 		}
 
-		// All credentials are backed off
-		return -1;
+		if (candidateIndexes.length === 0) {
+			return -1;
+		}
+
+		let bestIndex = candidateIndexes[0];
+		let bestUrgency = this.getCredentialSelectionUrgency(provider, credentials[bestIndex]);
+		for (let i = 1; i < candidateIndexes.length; i++) {
+			const candidateIndex = candidateIndexes[i];
+			const candidateUrgency = this.getCredentialSelectionUrgency(provider, credentials[candidateIndex]);
+
+			if (!bestUrgency && candidateUrgency) {
+				bestIndex = candidateIndex;
+				bestUrgency = candidateUrgency;
+				continue;
+			}
+			if (!bestUrgency || !candidateUrgency) {
+				continue;
+			}
+			if (candidateUrgency.earliestResetAt < bestUrgency.earliestResetAt) {
+				bestIndex = candidateIndex;
+				bestUrgency = candidateUrgency;
+				continue;
+			}
+			if (
+				candidateUrgency.earliestResetAt === bestUrgency.earliestResetAt
+				&& candidateUrgency.utilization < bestUrgency.utilization
+			) {
+				bestIndex = candidateIndex;
+				bestUrgency = candidateUrgency;
+			}
+		}
+
+		return bestIndex;
+
 	}
 
 	/**
