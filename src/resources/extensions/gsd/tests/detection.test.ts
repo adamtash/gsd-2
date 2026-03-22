@@ -808,6 +808,32 @@ test("detectProjectSignals: pyproject metadata mention does not trigger dep:fast
   }
 });
 
+test("detectProjectSignals: pyproject optional-dependency group name does not trigger dep:fastapi", () => {
+  const dir = makeTempDir("signals-fastapi-pyproject-extra-name");
+  try {
+    writeFileSync(
+      join(dir, "pyproject.toml"),
+      '[project]\ndependencies = ["flask>=3.0"]\n\n[project.optional-dependencies]\nfastapi = ["orjson>=3"]\n',
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(!signals.detectedFiles.includes("dep:fastapi"), "optional-dependency extra names should not trigger FastAPI detection");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: FastAPI direct reference with @ emits dep:fastapi", () => {
+  const dir = makeTempDir("signals-fastapi-direct-reference");
+  try {
+    writeFileSync(join(dir, "requirements.txt"), "fastapi @ https://example.com/fastapi.whl\n", "utf-8");
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("dep:fastapi"), "direct-reference dependencies should trigger FastAPI detection");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("detectProjectSignals: FastAPI comments do not trigger dep:fastapi", () => {
   const dir = makeTempDir("signals-fastapi-comment");
   try {
@@ -907,6 +933,23 @@ test("detectProjectSignals: nested Spring Boot Gradle service emits dep:spring-b
   }
 });
 
+test("detectProjectSignals: nested Spring Boot Kotlin DSL service still uses neutral java/kotlin language hint", () => {
+  const dir = makeTempDir("signals-spring-gradle-kts-nested");
+  try {
+    mkdirSync(join(dir, "services", "api"), { recursive: true });
+    writeFileSync(
+      join(dir, "services", "api", "build.gradle.kts"),
+      "plugins { id(\"org.springframework.boot\") version \"3.2.0\" }",
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("dep:spring-boot"));
+    assert.equal(signals.primaryLanguage, "java/kotlin");
+  } finally {
+    cleanup(dir);
+  }
+});
+
 test("detectProjectSignals: Android Gradle project does not emit dep:spring-boot", () => {
   const dir = makeTempDir("signals-android-no-spring");
   try {
@@ -996,6 +1039,23 @@ test("detectProjectSignals: spring-like alias name without Spring Boot id does n
     );
     const signals = detectProjectSignals(dir);
     assert.ok(!signals.detectedFiles.includes("dep:spring-boot"), "spring-looking alias names should not imply Spring Boot without matching id");
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("detectProjectSignals: Spring Boot version-catalog library alias emits dep:spring-boot", () => {
+  const dir = makeTempDir("signals-spring-version-catalog-library");
+  try {
+    mkdirSync(join(dir, "gradle"), { recursive: true });
+    writeFileSync(join(dir, "build.gradle.kts"), "dependencies { implementation(libs.backend.web) }", "utf-8");
+    writeFileSync(
+      join(dir, "gradle", "libs.versions.toml"),
+      "[libraries]\nbackend-web = { module = 'org.springframework.boot:spring-boot-starter-web', version = '3.2.0' }\n",
+      "utf-8",
+    );
+    const signals = detectProjectSignals(dir);
+    assert.ok(signals.detectedFiles.includes("dep:spring-boot"), "Spring Boot library aliases should trigger detection");
   } finally {
     cleanup(dir);
   }

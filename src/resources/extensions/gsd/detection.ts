@@ -441,7 +441,7 @@ export function detectProjectSignals(basePath: string): ProjectSignals {
   if (containsSpringBootMarker(basePath, springBootBuildFiles, springBootVersionCatalogs)) {
     pushUnique(detectedFiles, "dep:spring-boot");
     if (!primaryLanguage) {
-      primaryLanguage = springBootBuildFiles.some((file) => file.endsWith("build.gradle.kts")) ? "kotlin" : "java/kotlin";
+      primaryLanguage = "java/kotlin";
     }
   }
 
@@ -774,7 +774,7 @@ function containsDependencyMarker(basePath: string, relativePaths: string[], mar
     try {
       const raw = readBounded(join(basePath, relativePath), 64 * 1024);
       const content = extractDependencyContent(relativePath, raw).toLowerCase();
-      if (marker === "fastapi" && /\bfastapi(?=$|[\s<=>!~\[\],;"'])/.test(content)) {
+      if (marker === "fastapi" && /\bfastapi(?=$|[\s<=>!~@\[\],;"'])/.test(content)) {
         return true;
       }
     } catch {
@@ -791,6 +791,7 @@ function containsSpringBootMarker(
   versionCatalogFiles: string[],
 ): boolean {
   const usedPluginAliases = new Set<string>();
+  const usedLibraryAliases = new Set<string>();
 
   for (const relativePath of buildFiles) {
     try {
@@ -805,16 +806,25 @@ function containsSpringBootMarker(
       while ((match = aliasRe.exec(content)) !== null) {
         usedPluginAliases.add(normalizePluginAlias(match[1]));
       }
+
+      const libraryAliasRe = /\blibs\.((?!plugins\b)[a-z0-9_.-]+)/gi;
+      while ((match = libraryAliasRe.exec(content)) !== null) {
+        usedLibraryAliases.add(normalizePluginAlias(match[1]));
+      }
     } catch {
       // unreadable build file — continue scanning others
     }
   }
 
-  if (usedPluginAliases.size === 0 || versionCatalogFiles.length === 0) {
+  if (usedPluginAliases.size === 0 && usedLibraryAliases.size === 0) {
+    return false;
+  }
+  if (versionCatalogFiles.length === 0) {
     return false;
   }
 
   const springBootAliases = new Set<string>();
+  const springBootLibraries = new Set<string>();
   for (const relativePath of versionCatalogFiles) {
     try {
       const raw = readBounded(join(basePath, relativePath), 64 * 1024);
@@ -824,6 +834,11 @@ function containsSpringBootMarker(
       while ((match = aliasRe.exec(content)) !== null) {
         springBootAliases.add(normalizePluginAlias(match[1]));
       }
+
+      const libraryRe = /^\s*([A-Za-z0-9_.-]+)\s*=\s*\{[^\n}]*\b(module\s*=\s*["']org\.springframework\.boot:[^"']+["']|group\s*=\s*["']org\.springframework\.boot["'][^\n}]*\bname\s*=\s*["']spring-boot[^"']*["'])[^\n}]*\}/gm;
+      while ((match = libraryRe.exec(content)) !== null) {
+        springBootLibraries.add(normalizePluginAlias(match[1]));
+      }
     } catch {
       // unreadable version catalog — continue scanning others
     }
@@ -831,6 +846,9 @@ function containsSpringBootMarker(
 
   for (const alias of usedPluginAliases) {
     if (springBootAliases.has(alias)) return true;
+  }
+  for (const alias of usedLibraryAliases) {
+    if (springBootLibraries.has(alias)) return true;
   }
 
   return false;
@@ -902,7 +920,14 @@ function extractPyprojectDependencySections(content: string): string {
       section === "tool.poetry.dependencies" ||
       /^tool\.poetry\.group\.[^.]+\.dependencies$/.test(section)
     ) {
-      collected.push(line);
+      if (section === "project.optional-dependencies") {
+        const equalsIndex = line.indexOf("=");
+        if (equalsIndex !== -1) {
+          collected.push(line.slice(equalsIndex + 1));
+        }
+      } else {
+        collected.push(line);
+      }
     }
   }
 
