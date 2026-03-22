@@ -11,7 +11,10 @@
 import { execFileSync, execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { gsdRoot } from "./paths.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
+import { loadEffectiveGSDPreferences } from "./preferences.js";
+
 
 import {
   detectWorktreeName,
@@ -22,7 +25,7 @@ import {
   nativeDetectMainBranch,
   nativeBranchExists,
   nativeHasChanges,
-  nativeAddAll,
+  nativeAddAllWithExclusions,
   nativeResetPaths,
   nativeHasStagedChanges,
   nativeCommit,
@@ -31,6 +34,7 @@ import {
   nativeAddPaths,
 } from "./native-git-bridge.js";
 import { GSDError, GSD_MERGE_CONFLICT, GSD_GIT_ERROR } from "./errors.js";
+import { getErrorMessage } from "./error-utils.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -39,6 +43,8 @@ export interface GitPreferences {
   push_branches?: boolean;
   remote?: string;
   snapshots?: boolean;
+  /** Deprecated. .gsd/ is managed externally; retained for compatibility. */
+  commit_docs?: boolean;
   pre_merge_check?: boolean | string;
   commit_type?: string;
   main_branch?: string;
@@ -49,11 +55,6 @@ export interface GitPreferences {
    *  - "none": no git isolation — commits land on the user's current branch directly
    */
   isolation?: "worktree" | "branch" | "none";
-  /** When false, prevents GSD from committing .gsd/ planning artifacts to git.
-   *  The .gsd/ folder is added to .gitignore and kept local-only.
-   *  Default: true (planning docs are tracked in git).
-   */
-  commit_docs?: boolean;
   /** When false, GSD will not modify .gitignore at all — no baseline patterns
    *  are added and no self-healing occurs. Use this if you manage your own
    *  .gitignore and don't want GSD touching it.
@@ -95,6 +96,8 @@ export interface TaskCommitContext {
   oneLiner?: string;
   /** Files modified by this task (from task summary frontmatter) */
   keyFiles?: string[];
+  /** GitHub issue number — appends "Resolves #N" trailer when set. */
+  issueNumber?: number;
 }
 
 /**
@@ -118,12 +121,22 @@ export function buildTaskCommitMessage(ctx: TaskCommitContext): string {
   const subject = `${type}(${scope}): ${truncated}`;
 
   // Build body with key files if available
+  const bodyParts: string[] = [];
+
   if (ctx.keyFiles && ctx.keyFiles.length > 0) {
     const fileLines = ctx.keyFiles
       .slice(0, 8) // cap at 8 files to keep commit concise
       .map(f => `- ${f}`)
       .join("\n");
-    return `${subject}\n\n${fileLines}`;
+    bodyParts.push(fileLines);
+  }
+
+  if (ctx.issueNumber) {
+    bodyParts.push(`Resolves #${ctx.issueNumber}`);
+  }
+
+  if (bodyParts.length > 0) {
+    return `${subject}\n\n${bodyParts.join("\n\n")}`;
   }
 
   return subject;
@@ -193,7 +206,7 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
  * Format: .gsd/milestones/<MID>/<MID>-META.json
  */
 function milestoneMetaPath(basePath: string, milestoneId: string): string {
-  return join(basePath, ".gsd", "milestones", milestoneId, `${milestoneId}-META.json`);
+  return join(gsdRoot(basePath), "milestones", milestoneId, `${milestoneId}-META.json`);
 }
 
 /**
@@ -225,9 +238,21 @@ export function readIntegrationBranch(basePath: string, milestoneId: string): st
  *
  * The file is committed immediately so the metadata is persisted in git.
  */
-export function writeIntegrationBranch(basePath: string, milestoneId: string, branch: string, options?: { commitDocs?: boolean }): void {
+/** Regex matching GSD quick-task branches: gsd/quick/<num>-<slug> */
+export const QUICK_BRANCH_RE = /^gsd\/quick\//;
+
+export function writeIntegrationBranch(
+  basePath: string,
+  milestoneId: string,
+  branch: string,
+  _options?: { commitDocs?: boolean },
+): void {
   // Don't record slice branches as the integration target
   if (SLICE_BRANCH_RE.test(branch)) return;
+  // Don't record quick-task branches — they are ephemeral and merge back
+  // to their origin branch on completion. Recording one as the integration
+  // target causes milestone merges to land on the wrong branch (#1293).
+  if (QUICK_BRANCH_RE.test(branch)) return;
   // Validate
   if (!VALID_BRANCH_NAME.test(branch)) return;
   // Skip if already recorded with the same branch (idempotent across restarts).
@@ -237,7 +262,7 @@ export function writeIntegrationBranch(basePath: string, milestoneId: string, br
   if (existingBranch === branch) return;
 
   const metaFile = milestoneMetaPath(basePath, milestoneId);
-  mkdirSync(join(basePath, ".gsd", "milestones", milestoneId), { recursive: true });
+  mkdirSync(join(gsdRoot(basePath), "milestones", milestoneId), { recursive: true });
 
   // Merge with existing metadata if present
   let existing: Record<string, unknown> = {};
@@ -249,18 +274,92 @@ export function writeIntegrationBranch(basePath: string, milestoneId: string, br
 
   existing.integrationBranch = branch;
   writeFileSync(metaFile, JSON.stringify(existing, null, 2) + "\n", "utf-8");
+  // .gsd/ is managed externally (symlinked) — metadata is not committed to git.
+}
 
-  // Commit immediately so the metadata is persisted in git.
-  // Skip when commit_docs is explicitly false — .gsd/ is local-only.
-  if (options?.commitDocs !== false) {
-    try {
-      nativeAddPaths(basePath, [metaFile]);
-      nativeCommit(basePath, `chore(${milestoneId}): record integration branch`, { allowEmpty: false });
-    } catch {
-      // Non-fatal — file is on disk even if commit fails (e.g. nothing to commit
-      // because the file was already tracked with identical content)
-    }
+export type IntegrationBranchResolutionStatus = "recorded" | "fallback" | "missing";
+
+export interface IntegrationBranchResolution {
+  recordedBranch: string | null;
+  effectiveBranch: string | null;
+  status: IntegrationBranchResolutionStatus;
+  reason: string;
+}
+
+/**
+ * Resolve a milestone's recorded integration branch into an actionable status.
+ *
+ * This helper is intentionally scoped to milestones that already have recorded
+ * metadata. If no integration branch is recorded, it returns `missing` with no
+ * effective branch so callers can continue with their existing non-milestone
+ * fallback logic (for example worktree/current-branch detection in getMainBranch).
+ */
+export function resolveMilestoneIntegrationBranch(
+  basePath: string,
+  milestoneId: string,
+  prefs: GitPreferences = {},
+): IntegrationBranchResolution {
+  const recordedBranch = readIntegrationBranch(basePath, milestoneId);
+  if (!recordedBranch) {
+    return {
+      recordedBranch: null,
+      effectiveBranch: null,
+      status: "missing",
+      reason: `Milestone ${milestoneId} has no recorded integration branch metadata.`,
+    };
   }
+
+  if (nativeBranchExists(basePath, recordedBranch)) {
+    return {
+      recordedBranch,
+      effectiveBranch: recordedBranch,
+      status: "recorded",
+      reason: `Using recorded integration branch "${recordedBranch}" for milestone ${milestoneId}.`,
+    };
+  }
+
+  const configuredBranch = prefs.main_branch && VALID_BRANCH_NAME.test(prefs.main_branch)
+    ? prefs.main_branch
+    : null;
+
+  if (configuredBranch) {
+    if (nativeBranchExists(basePath, configuredBranch)) {
+      return {
+        recordedBranch,
+        effectiveBranch: configuredBranch,
+        status: "fallback",
+        reason: `Recorded integration branch "${recordedBranch}" for milestone ${milestoneId} no longer exists; using configured git.main_branch "${configuredBranch}" instead.`,
+      };
+    }
+
+    return {
+      recordedBranch,
+      effectiveBranch: null,
+      status: "missing",
+      reason: `Recorded integration branch "${recordedBranch}" for milestone ${milestoneId} no longer exists, and configured git.main_branch "${configuredBranch}" is unavailable.`,
+    };
+  }
+
+  try {
+    const detectedBranch = nativeDetectMainBranch(basePath);
+    if (detectedBranch && VALID_BRANCH_NAME.test(detectedBranch) && nativeBranchExists(basePath, detectedBranch)) {
+      return {
+        recordedBranch,
+        effectiveBranch: detectedBranch,
+        status: "fallback",
+        reason: `Recorded integration branch "${recordedBranch}" for milestone ${milestoneId} no longer exists; using detected fallback branch "${detectedBranch}" instead.`,
+      };
+    }
+  } catch {
+    // Fall through to the explicit missing result below.
+  }
+
+  return {
+    recordedBranch,
+    effectiveBranch: null,
+    status: "missing",
+    reason: `Recorded integration branch "${recordedBranch}" for milestone ${milestoneId} no longer exists, and no safe fallback branch could be determined.`,
+  };
 }
 
 // ─── Git Helper ────────────────────────────────────────────────────────────
@@ -295,7 +394,7 @@ export function runGit(basePath: string, args: string[], options: { allowFailure
     }).trim();
   } catch (error) {
     if (options.allowFailure) return "";
-    const message = error instanceof Error ? error.message : String(error);
+    const message = getErrorMessage(error);
     throw new GSDError(GSD_GIT_ERROR, `git ${args.join(" ")} failed in ${basePath}: ${filterGitSvnNoise(message)}`);
   }
 }
@@ -349,15 +448,17 @@ export class GitServiceImpl {
    * @param extraExclusions Additional pathspec exclusions beyond RUNTIME_EXCLUSION_PATHS.
    */
   private smartStage(extraExclusions: readonly string[] = []): void {
-    // When commit_docs is false, exclude the entire .gsd/ directory from staging
-    const commitDocsDisabled = this.prefs.commit_docs === false;
-    const gsdExclusion = commitDocsDisabled ? [".gsd/"] : [];
-    const allExclusions = [...RUNTIME_EXCLUSION_PATHS, ...gsdExclusion, ...extraExclusions];
-
     // One-time cleanup: if runtime files are already tracked in the index
     // (from older versions where the fallback bug staged them), untrack them
     // in a dedicated commit. This must happen as a separate commit because
     // the git reset HEAD step below would otherwise undo the rm --cached.
+    //
+    // SAFETY: Only untrack the specific RUNTIME paths (activity/, runtime/,
+    // auto.lock, etc.) — NOT all of .gsd/. If .gsd/milestones/ files were
+    // previously tracked, they stay tracked until the milestone completes
+    // and the worktree is torn down. This prevents a mid-execution behavioral
+    // discontinuity where the first half of a milestone has .gsd/ artifacts
+    // committed but the second half doesn't (#1326).
     if (!this._runtimeFilesCleanedUp) {
       let cleaned = false;
       for (const exclusion of RUNTIME_EXCLUSION_PATHS) {
@@ -370,21 +471,21 @@ export class GitServiceImpl {
       this._runtimeFilesCleanedUp = true;
     }
 
-    // Stage everything, then unstage excluded paths.
+    // Stage everything using pathspec exclusions so excluded paths are never
+    // hashed by git. The old approach of `git add -A` followed by unstaging
+    // hangs indefinitely on repos with large untracked artifact trees (#1605).
     //
-    // Previous approach used pathspec excludes (:(exclude)...) with git add -A,
-    // but that fails when .gsd/ is in .gitignore — git exits non-zero before
-    // evaluating the excludes. The catch fallback ran plain `git add -A`,
-    // staging all tracked runtime files unconditionally and defeating the
-    // exclusion list entirely.
+    // Exclude only RUNTIME paths from staging — not the entire .gsd/ directory.
+    // When .gsd/milestones/ files are already tracked in the index (projects
+    // where .gsd/ is not gitignored, or Windows junctions that git sees as
+    // real directories), they should continue to be committed. Excluding the
+    // entire .gsd/ directory mid-milestone causes silent commit failure where
+    // the second half of a milestone's artifacts are never committed (#1326).
     //
-    // git reset HEAD silently succeeds when the path isn't staged, so no
-    // error handling is needed per-path.
-    nativeAddAll(this.basePath);
-
-    for (const exclusion of allExclusions) {
-      try { nativeResetPaths(this.basePath, [exclusion]); } catch { /* path not staged — ignore */ }
-    }
+    // If .gsd/ IS in .gitignore (the default for external state projects),
+    // git add -A already skips it and the exclusions are harmless no-ops.
+    const allExclusions = [...RUNTIME_EXCLUSION_PATHS, ...extraExclusions];
+    nativeAddAllWithExclusions(this.basePath, allExclusions);
   }
 
   /** Tracks whether runtime file cleanup has run this session. */
@@ -465,18 +566,28 @@ export class GitServiceImpl {
 
     // Check milestone integration branch — recorded when auto-mode starts
     if (this._milestoneId) {
-      const integrationBranch = readIntegrationBranch(this.basePath, this._milestoneId);
-      if (integrationBranch) {
-        // Verify the branch still exists locally (could have been deleted)
-        if (nativeBranchExists(this.basePath, integrationBranch)) return integrationBranch;
+      const resolved = resolveMilestoneIntegrationBranch(this.basePath, this._milestoneId);
+      if (resolved.effectiveBranch) {
+        return resolved.effectiveBranch;
       }
     }
 
     const wtName = detectWorktreeName(this.basePath);
     if (wtName) {
+      // Auto-mode worktrees use milestone/<MID> branches (wtName = milestone ID)
+      const milestoneBranch = `milestone/${wtName}`;
+      const currentBranch = nativeGetCurrentBranch(this.basePath);
+
+      // If we're on a milestone/<MID> branch, use it (auto-mode case)
+      if (currentBranch.startsWith("milestone/")) {
+        return currentBranch;
+      }
+
+      // Otherwise check for manual worktree branch (worktree/<name>)
       const wtBranch = `worktree/${wtName}`;
       if (nativeBranchExists(this.basePath, wtBranch)) return wtBranch;
-      return nativeGetCurrentBranch(this.basePath);
+
+      return currentBranch;
     }
 
     // Repo-level default detection: origin/HEAD → main → master → current branch.
@@ -549,13 +660,46 @@ export class GitServiceImpl {
       execSync(command, { cwd: this.basePath, stdio: "pipe", encoding: "utf-8" });
       return { passed: true, skipped: false, command };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = getErrorMessage(err);
       return { passed: false, skipped: false, command, error: msg };
     }
   }
 
   // ─── Merge ─────────────────────────────────────────────────────────────
 
+}
+
+// ─── Draft PR Creation ─────────────────────────────────────────────────────
+
+/**
+ * Create a draft pull request for a completed milestone using `gh pr create`.
+ * Returns the PR URL on success, or null on failure.
+ * Non-fatal: callers should treat failure as best-effort.
+ */
+export function createDraftPR(
+  basePath: string,
+  milestoneId: string,
+  title: string,
+  body: string,
+): string | null {
+  try {
+    const result = execFileSync("gh", [
+      "pr", "create", "--draft",
+      "--title", title,
+      "--body", body,
+    ], { cwd: basePath, encoding: "utf8", timeout: 30000, env: GIT_NO_PROMPT_ENV });
+    return result.trim();
+  } catch {
+    return null;
+  }
+}
+
+// ─── Factory ───────────────────────────────────────────────────────────────
+
+/** Create a GitServiceImpl with the current effective git preferences. */
+export function createGitService(basePath: string): GitServiceImpl {
+  const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git ?? {};
+  return new GitServiceImpl(basePath, gitPrefs);
 }
 
 // ─── Commit Type Inference ─────────────────────────────────────────────────

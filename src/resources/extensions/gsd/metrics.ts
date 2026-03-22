@@ -13,14 +13,17 @@
  *   4. On crash recovery or fresh start, the ledger is loaded from disk
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionContext } from "@gsd/pi-coding-agent";
 import { gsdRoot } from "./paths.js";
 import { getAndClearSkills } from "./skill-telemetry.js";
+import { loadJsonFile, loadJsonFileOrNull, saveJsonFile } from "./json-persistence.js";
+import { parseUnitId } from "./unit-id.js";
 
-// Re-export from shared — canonical implementation lives in format-utils.
-export { formatTokenCount } from "../shared/mod.js";
+// Re-export from shared — import directly from format-utils to avoid pulling
+// in the full barrel (mod.js → ui.js → @gsd/pi-tui) which breaks when loaded
+// outside jiti's alias resolution (e.g. dynamic import in auto-loop reports).
+export { formatTokenCount } from "../shared/format-utils.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -161,7 +164,7 @@ export function snapshotUnitMetrics(
       // Count tool calls in this message
       if (msg.content && Array.isArray(msg.content)) {
         for (const block of msg.content) {
-          if (block.type === "tool_call") toolCalls++;
+          if (block.type === "toolCall") toolCalls++;
         }
       }
     } else if (msg.role === "user") {
@@ -202,7 +205,20 @@ export function snapshotUnitMetrics(
     unit.cacheHitRate = totalInput > 0 ? Math.round((tokens.cacheRead / totalInput) * 100) : 0;
   }
 
-  ledger.units.push(unit);
+  // ── Idempotency guard ──────────────────────────────────────────────────
+  // Prevent duplicate metrics entries when multiple callers snapshot the
+  // same unit (e.g. idle-watchdog closeoutUnit + normal loop closeoutUnit).
+  // A unit is considered a duplicate when type, id, AND startedAt all match
+  // an existing entry. On duplicate, the existing entry is updated in-place
+  // with the latest finishedAt and token counts instead of appending.
+  const dupeIdx = ledger.units.findIndex(
+    (u) => u.type === unit.type && u.id === unit.id && u.startedAt === unit.startedAt,
+  );
+  if (dupeIdx >= 0) {
+    ledger.units[dupeIdx] = unit;
+  } else {
+    ledger.units.push(unit);
+  }
   saveLedger(basePath, ledger);
 
   return unit;
@@ -290,9 +306,8 @@ export function aggregateByPhase(units: UnitMetrics[]): PhaseAggregate[] {
 export function aggregateBySlice(units: UnitMetrics[]): SliceAggregate[] {
   const map = new Map<string, SliceAggregate>();
   for (const u of units) {
-    const parts = u.id.split("/");
-    // Slice ID is parts[0]/parts[1] if it exists, else parts[0]
-    const sliceId = parts.length >= 2 ? `${parts[0]}/${parts[1]}` : parts[0];
+    const { milestone, slice } = parseUnitId(u.id);
+    const sliceId = slice ? `${milestone}/${slice}` : milestone;
     let agg = map.get(sliceId);
     if (!agg) {
       agg = { sliceId, units: 0, tokens: emptyTokens(), cost: 0, duration: 0 };
@@ -502,45 +517,56 @@ function metricsPath(base: string): string {
   return join(gsdRoot(base), "metrics.json");
 }
 
+function isMetricsLedger(data: unknown): data is MetricsLedger {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as MetricsLedger).version === 1 &&
+    Array.isArray((data as MetricsLedger).units)
+  );
+}
+
+function defaultLedger(): MetricsLedger {
+  return { version: 1, projectStartedAt: Date.now(), units: [] };
+}
+
+/**
+ * Prune the metrics ledger to at most `keepCount` most-recent unit entries.
+ *
+ * Called by the doctor when the ledger exceeds the bloat threshold.
+ * Keeps the newest entries (highest index = most recent) and discards
+ * the oldest from the head of the array. Preserves `projectStartedAt`.
+ *
+ * Updates both the on-disk file and the in-memory ledger if it is loaded,
+ * so the current session sees the pruned state immediately.
+ *
+ * @returns the number of entries removed, or 0 if no pruning was needed.
+ */
+export function pruneMetricsLedger(base: string, keepCount: number): number {
+  const disk = loadLedgerFromDisk(base);
+  if (!disk || disk.units.length <= keepCount) return 0;
+  const removed = disk.units.length - keepCount;
+  disk.units = disk.units.slice(-keepCount);
+  saveJsonFile(metricsPath(base), disk);
+  // Keep the in-memory ledger in sync if it is loaded for this session.
+  if (ledger) {
+    ledger.units = ledger.units.slice(-keepCount);
+  }
+  return removed;
+}
+
 /**
  * Load ledger from disk without initializing in-memory state.
  * Used by history/export commands outside of auto-mode.
  */
 export function loadLedgerFromDisk(base: string): MetricsLedger | null {
-  try {
-    const raw = readFileSync(metricsPath(base), "utf-8");
-    const parsed = JSON.parse(raw);
-    if (parsed.version === 1 && Array.isArray(parsed.units)) {
-      return parsed as MetricsLedger;
-    }
-  } catch {
-    // File doesn't exist or is corrupt
-  }
-  return null;
+  return loadJsonFileOrNull(metricsPath(base), isMetricsLedger);
 }
 
 function loadLedger(base: string): MetricsLedger {
-  try {
-    const raw = readFileSync(metricsPath(base), "utf-8");
-    const parsed = JSON.parse(raw);
-    if (parsed.version === 1 && Array.isArray(parsed.units)) {
-      return parsed as MetricsLedger;
-    }
-  } catch {
-    // File doesn't exist or is corrupt — start fresh
-  }
-  return {
-    version: 1,
-    projectStartedAt: Date.now(),
-    units: [],
-  };
+  return loadJsonFile(metricsPath(base), isMetricsLedger, defaultLedger);
 }
 
 function saveLedger(base: string, data: MetricsLedger): void {
-  try {
-    mkdirSync(gsdRoot(base), { recursive: true });
-    writeFileSync(metricsPath(base), JSON.stringify(data, null, 2) + "\n", "utf-8");
-  } catch {
-    // Don't let metrics failures break auto-mode
-  }
+  saveJsonFile(metricsPath(base), data);
 }

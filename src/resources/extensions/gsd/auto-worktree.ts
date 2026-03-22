@@ -6,29 +6,48 @@
  * manages create, enter, detect, and teardown for auto-mode worktrees.
  */
 
-import { existsSync, cpSync, readFileSync, readdirSync, mkdirSync, realpathSync, unlinkSync, statSync } from "node:fs";
-import { isAbsolute, join, sep } from "node:path";
+import {
+  existsSync,
+  cpSync,
+  readFileSync,
+  readdirSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  lstatSync as lstatSyncFn,
+} from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { GSDError, GSD_IO_ERROR, GSD_GIT_ERROR } from "./errors.js";
-import { copyWorktreeDb, reconcileWorktreeDb, isDbAvailable } from "./gsd-db.js";
+import {
+  copyWorktreeDb,
+  reconcileWorktreeDb,
+  isDbAvailable,
+} from "./gsd-db.js";
 import { atomicWriteSync } from "./atomic-write.js";
-import { execSync, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { safeCopy, safeCopyRecursive } from "./safe-fs.js";
+import { gsdRoot } from "./paths.js";
 import {
   createWorktree,
   removeWorktree,
+  resolveGitDir,
   worktreePath,
 } from "./worktree-manager.js";
-import { detectWorktreeName, resolveGitHeadPath, nudgeGitBranchCache } from "./worktree.js";
 import {
-  MergeConflictError,
-  readIntegrationBranch,
-} from "./git-service.js";
+  detectWorktreeName,
+  resolveGitHeadPath,
+  nudgeGitBranchCache,
+} from "./worktree.js";
+import { MergeConflictError, readIntegrationBranch, RUNTIME_EXCLUSION_PATHS } from "./git-service.js";
+import { debugLog } from "./debug-logger.js";
 import { parseRoadmap } from "./files.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   nativeGetCurrentBranch,
+  nativeDetectMainBranch,
   nativeWorkingTreeStatus,
-  nativeAddAll,
+  nativeAddAllWithExclusions,
   nativeCommit,
   nativeCheckoutBranch,
   nativeMergeSquash,
@@ -38,6 +57,9 @@ import {
   nativeRmForce,
   nativeBranchDelete,
   nativeBranchExists,
+  nativeDiffNumstat,
+  nativeUpdateRef,
+  nativeIsAncestor,
 } from "./native-git-bridge.js";
 
 // ─── Module State ──────────────────────────────────────────────────────────
@@ -45,6 +67,389 @@ import {
 /** Original project root before chdir into auto-worktree. */
 let originalBase: string | null = null;
 
+function clearProjectRootStateFiles(basePath: string, milestoneId: string): void {
+  const gsdDir = gsdRoot(basePath);
+  const transientFiles = [
+    join(gsdDir, "STATE.md"),
+    join(gsdDir, "auto.lock"),
+    join(gsdDir, "milestones", milestoneId, `${milestoneId}-META.json`),
+  ];
+
+  for (const file of transientFiles) {
+    try {
+      unlinkSync(file);
+    } catch {
+      /* non-fatal — file may not exist */
+    }
+  }
+
+  // Clean up entire synced milestone directory and runtime/units.
+  // syncStateToProjectRoot() copies these into the project root during
+  // execution.  If they remain as untracked files when we attempt
+  // `git merge --squash`, git rejects the merge with "local changes would
+  // be overwritten", causing silent data loss (#1738).
+  const syncedDirs = [
+    join(gsdDir, "milestones", milestoneId),
+    join(gsdDir, "runtime", "units"),
+  ];
+
+  for (const dir of syncedDirs) {
+    try {
+      if (existsSync(dir)) {
+        // Only remove files that are untracked by git — tracked files are
+        // managed by the branch checkout and should not be deleted.
+        const untrackedOutput = execFileSync(
+          "git",
+          ["ls-files", "--others", "--exclude-standard", dir],
+          { cwd: basePath, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" },
+        ).trim();
+        if (untrackedOutput) {
+          for (const f of untrackedOutput.split("\n").filter(Boolean)) {
+            try {
+              unlinkSync(join(basePath, f));
+            } catch {
+              /* non-fatal */
+            }
+          }
+        }
+      }
+    } catch {
+      /* non-fatal — git command may fail if not in repo */
+    }
+  }
+}
+// ─── Worktree ↔ Main Repo Sync (#1311) ──────────────────────────────────────
+
+/**
+ * Sync .gsd/ state from the main repo into the worktree.
+ *
+ * When .gsd/ is a symlink to the external state directory, both the main
+ * repo and worktree share the same directory — no sync needed.
+ *
+ * When .gsd/ is a real directory (e.g., git-tracked or manage_gitignore:false),
+ * the worktree has its own copy that may be stale. This function copies
+ * missing milestones, CONTEXT, ROADMAP, DECISIONS, REQUIREMENTS, and
+ * PROJECT files from the main repo's .gsd/ into the worktree's .gsd/.
+ *
+ * Only adds missing content — never overwrites existing files in the worktree
+ * (the worktree's execution state is authoritative for in-progress work).
+ */
+export function syncGsdStateToWorktree(
+  mainBasePath: string,
+  worktreePath_: string,
+): { synced: string[] } {
+  const mainGsd = gsdRoot(mainBasePath);
+  const wtGsd = gsdRoot(worktreePath_);
+  const synced: string[] = [];
+
+  // If both resolve to the same directory (symlink), no sync needed
+  try {
+    const mainResolved = realpathSync(mainGsd);
+    const wtResolved = realpathSync(wtGsd);
+    if (mainResolved === wtResolved) return { synced };
+  } catch {
+    // Can't resolve — proceed with sync as a safety measure
+  }
+
+  if (!existsSync(mainGsd) || !existsSync(wtGsd)) return { synced };
+
+  // Sync root-level .gsd/ files (DECISIONS, REQUIREMENTS, PROJECT, KNOWLEDGE, etc.)
+  const rootFiles = [
+    "DECISIONS.md",
+    "REQUIREMENTS.md",
+    "PROJECT.md",
+    "KNOWLEDGE.md",
+    "OVERRIDES.md",
+    "QUEUE.md",
+    "completed-units.json",
+  ];
+  for (const f of rootFiles) {
+    const src = join(mainGsd, f);
+    const dst = join(wtGsd, f);
+    if (existsSync(src) && !existsSync(dst)) {
+      try {
+        cpSync(src, dst);
+        synced.push(f);
+      } catch {
+        /* non-fatal */
+      }
+    }
+  }
+
+  // Sync milestones: copy entire milestone directories that are missing
+  const mainMilestonesDir = join(mainGsd, "milestones");
+  const wtMilestonesDir = join(wtGsd, "milestones");
+  if (existsSync(mainMilestonesDir)) {
+    try {
+      mkdirSync(wtMilestonesDir, { recursive: true });
+      const mainMilestones = readdirSync(mainMilestonesDir, {
+        withFileTypes: true,
+      })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+
+      for (const mid of mainMilestones) {
+        const srcDir = join(mainMilestonesDir, mid);
+        const dstDir = join(wtMilestonesDir, mid);
+
+        if (!existsSync(dstDir)) {
+          // Entire milestone missing from worktree — copy it
+          try {
+            cpSync(srcDir, dstDir, { recursive: true });
+            synced.push(`milestones/${mid}/`);
+          } catch {
+            /* non-fatal */
+          }
+        } else {
+          // Milestone directory exists but may be missing files (stale snapshot).
+          // Sync individual top-level milestone files (CONTEXT, ROADMAP, RESEARCH, etc.)
+          try {
+            const srcFiles = readdirSync(srcDir).filter(
+              (f) => f.endsWith(".md") || f.endsWith(".json"),
+            );
+            for (const f of srcFiles) {
+              const srcFile = join(srcDir, f);
+              const dstFile = join(dstDir, f);
+              if (!existsSync(dstFile)) {
+                try {
+                  const srcStat = lstatSyncFn(srcFile);
+                  if (srcStat.isFile()) {
+                    cpSync(srcFile, dstFile);
+                    synced.push(`milestones/${mid}/${f}`);
+                  }
+                } catch {
+                  /* non-fatal */
+                }
+              }
+            }
+
+            // Sync slices directory if it exists in main but not in worktree
+            const srcSlicesDir = join(srcDir, "slices");
+            const dstSlicesDir = join(dstDir, "slices");
+            if (existsSync(srcSlicesDir) && !existsSync(dstSlicesDir)) {
+              try {
+                cpSync(srcSlicesDir, dstSlicesDir, { recursive: true });
+                synced.push(`milestones/${mid}/slices/`);
+              } catch {
+                /* non-fatal */
+              }
+            } else if (existsSync(srcSlicesDir) && existsSync(dstSlicesDir)) {
+              // Both exist — sync missing slice directories
+              const srcSlices = readdirSync(srcSlicesDir, {
+                withFileTypes: true,
+              })
+                .filter((d) => d.isDirectory())
+                .map((d) => d.name);
+              for (const sid of srcSlices) {
+                const srcSlice = join(srcSlicesDir, sid);
+                const dstSlice = join(dstSlicesDir, sid);
+                if (!existsSync(dstSlice)) {
+                  try {
+                    cpSync(srcSlice, dstSlice, { recursive: true });
+                    synced.push(`milestones/${mid}/slices/${sid}/`);
+                  } catch {
+                    /* non-fatal */
+                  }
+                }
+              }
+            }
+          } catch {
+            /* non-fatal */
+          }
+        }
+      }
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  return { synced };
+}
+
+/**
+ * Sync milestone artifacts from worktree back to the main external state directory.
+ * Called before milestone merge to ensure completion artifacts (SUMMARY, VALIDATION,
+ * updated ROADMAP) are visible from the project root (#1412).
+ *
+ * Syncs:
+ *   1. Root-level .gsd/ files (REQUIREMENTS, PROJECT, DECISIONS, KNOWLEDGE,
+ *      OVERRIDES) — the worktree's versions overwrite main's because the
+ *      worktree is the authoritative execution context.
+ *   2. ALL milestone directories found in the worktree — not just the
+ *      current milestoneId. The complete-milestone unit may create artifacts
+ *      for the *next* milestone (CONTEXT, ROADMAP, new requirements) which
+ *      must survive worktree teardown.
+ *
+ * History: Originally only synced milestones/<milestoneId>/ and assumed
+ * root-level files would be carried by the squash merge. In practice,
+ * .gsd/ files are often untracked (gitignored or never committed), so the
+ * squash merge carries nothing. This caused next-milestone artifacts and
+ * updated REQUIREMENTS/PROJECT to be silently lost on teardown.
+ */
+export function syncWorktreeStateBack(
+  mainBasePath: string,
+  worktreePath: string,
+  milestoneId: string,
+): { synced: string[] } {
+  const mainGsd = gsdRoot(mainBasePath);
+  const wtGsd = gsdRoot(worktreePath);
+  const synced: string[] = [];
+
+  // If both resolve to the same directory (symlink), no sync needed
+  try {
+    const mainResolved = realpathSync(mainGsd);
+    const wtResolved = realpathSync(wtGsd);
+    if (mainResolved === wtResolved) return { synced };
+  } catch {
+    // Can't resolve — proceed with sync
+  }
+
+  if (!existsSync(wtGsd) || !existsSync(mainGsd)) return { synced };
+
+  // ── 1. Sync root-level .gsd/ files back ──────────────────────────────
+  // The worktree is authoritative — complete-milestone updates REQUIREMENTS,
+  // PROJECT, etc. These must overwrite main's copies so they survive teardown.
+  // Also includes QUEUE.md and completed-units.json which are written during
+  // milestone closeout and lost on teardown without explicit sync (#1787).
+  const rootFiles = [
+    "DECISIONS.md",
+    "REQUIREMENTS.md",
+    "PROJECT.md",
+    "KNOWLEDGE.md",
+    "OVERRIDES.md",
+    "QUEUE.md",
+    "completed-units.json",
+  ];
+  for (const f of rootFiles) {
+    const src = join(wtGsd, f);
+    const dst = join(mainGsd, f);
+    if (existsSync(src)) {
+      try {
+        cpSync(src, dst, { force: true });
+        synced.push(f);
+      } catch {
+        /* non-fatal */
+      }
+    }
+  }
+
+  // ── 2. Sync ALL milestone directories ────────────────────────────────
+  // The complete-milestone unit may create next-milestone artifacts (e.g.
+  // M007 setup while closing M006). We must sync every milestone directory
+  // in the worktree, not just the current one.
+  const wtMilestonesDir = join(wtGsd, "milestones");
+  if (!existsSync(wtMilestonesDir)) return { synced };
+
+  try {
+    const wtMilestones = readdirSync(wtMilestonesDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+
+    for (const mid of wtMilestones) {
+      syncMilestoneDir(wtGsd, mainGsd, mid, synced);
+    }
+  } catch {
+    /* non-fatal */
+  }
+
+  return { synced };
+}
+
+/**
+ * Sync a single milestone directory from worktree to main.
+ * Copies milestone-level .md files, slice-level files, and task summaries.
+ */
+function syncMilestoneDir(
+  wtGsd: string,
+  mainGsd: string,
+  mid: string,
+  synced: string[],
+): void {
+  const wtMilestoneDir = join(wtGsd, "milestones", mid);
+  const mainMilestoneDir = join(mainGsd, "milestones", mid);
+
+  if (!existsSync(wtMilestoneDir)) return;
+  mkdirSync(mainMilestoneDir, { recursive: true });
+
+  // Sync milestone-level files (SUMMARY, VALIDATION, ROADMAP, CONTEXT)
+  try {
+    for (const entry of readdirSync(wtMilestoneDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        const src = join(wtMilestoneDir, entry.name);
+        const dst = join(mainMilestoneDir, entry.name);
+        try {
+          cpSync(src, dst, { force: true });
+          synced.push(`milestones/${mid}/${entry.name}`);
+        } catch {
+          /* non-fatal */
+        }
+      }
+    }
+  } catch {
+    /* non-fatal */
+  }
+
+  // Sync slice-level files (summaries, UATs)
+  const wtSlicesDir = join(wtMilestoneDir, "slices");
+  const mainSlicesDir = join(mainMilestoneDir, "slices");
+  if (existsSync(wtSlicesDir)) {
+    try {
+      for (const sliceEntry of readdirSync(wtSlicesDir, {
+        withFileTypes: true,
+      })) {
+        if (!sliceEntry.isDirectory()) continue;
+        const sid = sliceEntry.name;
+        const wtSliceDir = join(wtSlicesDir, sid);
+        const mainSliceDir = join(mainSlicesDir, sid);
+        mkdirSync(mainSliceDir, { recursive: true });
+
+        for (const fileEntry of readdirSync(wtSliceDir, {
+          withFileTypes: true,
+        })) {
+          if (fileEntry.isFile() && fileEntry.name.endsWith(".md")) {
+            const src = join(wtSliceDir, fileEntry.name);
+            const dst = join(mainSliceDir, fileEntry.name);
+            try {
+              cpSync(src, dst, { force: true });
+              synced.push(
+                `milestones/${mid}/slices/${sid}/${fileEntry.name}`,
+              );
+            } catch {
+              /* non-fatal */
+            }
+          } else if (fileEntry.isDirectory() && fileEntry.name === "tasks") {
+            // Recurse into tasks/ subdirectory to sync task summaries (#1678).
+            // Without this, T01-SUMMARY.md etc. are silently dropped on
+            // worktree teardown because the loop only processes isFile() entries.
+            const wtTasksDir = join(wtSliceDir, "tasks");
+            const mainTasksDir = join(mainSliceDir, "tasks");
+            mkdirSync(mainTasksDir, { recursive: true });
+            try {
+              for (const taskEntry of readdirSync(wtTasksDir, { withFileTypes: true })) {
+                if (taskEntry.isFile() && taskEntry.name.endsWith(".md")) {
+                  const taskSrc = join(wtTasksDir, taskEntry.name);
+                  const taskDst = join(mainTasksDir, taskEntry.name);
+                  try {
+                    cpSync(taskSrc, taskDst, { force: true });
+                    synced.push(
+                      `milestones/${mid}/slices/${sid}/tasks/${taskEntry.name}`,
+                    );
+                  } catch {
+                    /* non-fatal */
+                  }
+                }
+              }
+            } catch {
+              /* non-fatal: tasks dir read failure */
+            }
+          }
+        }
+      }
+    } catch {
+      /* non-fatal */
+    }
+  }
+}
 // ─── Worktree Post-Create Hook (#597) ────────────────────────────────────────
 
 /**
@@ -55,21 +460,33 @@ let originalBase: string | null = null;
  * Reads the hook path from git.worktree_post_create in preferences.
  * Pass hookPath directly to bypass preference loading (useful for testing).
  */
-export function runWorktreePostCreateHook(sourceDir: string, worktreeDir: string, hookPath?: string): string | null {
+export function runWorktreePostCreateHook(
+  sourceDir: string,
+  worktreeDir: string,
+  hookPath?: string,
+): string | null {
   if (hookPath === undefined) {
     const prefs = loadEffectiveGSDPreferences()?.preferences?.git;
     hookPath = prefs?.worktree_post_create;
   }
   if (!hookPath) return null;
 
-  // Resolve relative paths against the source project root
-  const resolved = isAbsolute(hookPath) ? hookPath : join(sourceDir, hookPath);
+  // Resolve relative paths against the source project root.
+  // On Windows, convert 8.3 short paths (e.g. RUNNER~1) to long paths
+  // so execFileSync can locate the file correctly.
+  let resolved = isAbsolute(hookPath) ? hookPath : join(sourceDir, hookPath);
   if (!existsSync(resolved)) {
     return `Worktree post-create hook not found: ${resolved}`;
   }
+  if (process.platform === "win32") {
+    try { resolved = realpathSync.native(resolved); } catch { /* keep original */ }
+  }
 
   try {
-    execSync(resolved, {
+    // .bat/.cmd files on Windows require shell mode — execFileSync cannot
+    // spawn them directly (EINVAL).
+    const needsShell = process.platform === "win32" && /\.(bat|cmd)$/i.test(resolved);
+    execFileSync(resolved, [], {
       cwd: worktreeDir,
       env: {
         ...process.env,
@@ -79,6 +496,7 @@ export function runWorktreePostCreateHook(sourceDir: string, worktreeDir: string
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "utf-8",
       timeout: 30_000, // 30 second timeout
+      shell: needsShell,
     });
     return null;
   } catch (err) {
@@ -124,7 +542,11 @@ export function autoWorktreeBranch(milestoneId: string): string {
  * produced, then the auto-commit follows. If the commit never happened, the
  * filesystem copy is still valid and correct.
  */
-function reconcilePlanCheckboxes(projectRoot: string, wtPath: string, milestoneId: string): void {
+function reconcilePlanCheckboxes(
+  projectRoot: string,
+  wtPath: string,
+  milestoneId: string,
+): void {
   const srcMilestone = join(projectRoot, ".gsd", "milestones", milestoneId);
   const dstMilestone = join(wtPath, ".gsd", "milestones", milestoneId);
   if (!existsSync(srcMilestone) || !existsSync(dstMilestone)) return;
@@ -141,7 +563,9 @@ function reconcilePlanCheckboxes(projectRoot: string, wtPath: string, milestoneI
           results.push(full);
         }
       }
-    } catch { /* non-fatal */ }
+    } catch {
+      /* non-fatal */
+    }
     return results;
   }
 
@@ -155,7 +579,9 @@ function reconcilePlanCheckboxes(projectRoot: string, wtPath: string, milestoneI
     try {
       srcContent = readFileSync(srcFile, "utf-8");
       dstContent = readFileSync(dstFile, "utf-8");
-    } catch { continue; }
+    } catch {
+      continue;
+    }
 
     if (srcContent === dstContent) continue;
 
@@ -172,7 +598,10 @@ function reconcilePlanCheckboxes(projectRoot: string, wtPath: string, milestoneI
     let changed = false;
     for (const id of srcChecked) {
       const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const uncheckedRe = new RegExp(`^(- )\\[ \\]( \\*\\*${escapedId}:)`, "gm");
+      const uncheckedRe = new RegExp(
+        `^(- )\\[ \\]( \\*\\*${escapedId}:)`,
+        "gm",
+      );
       if (uncheckedRe.test(updated)) {
         updated = updated.replace(
           new RegExp(`^(- )\\[ \\]( \\*\\*${escapedId}:)`, "gm"),
@@ -185,30 +614,17 @@ function reconcilePlanCheckboxes(projectRoot: string, wtPath: string, milestoneI
     if (changed) {
       try {
         atomicWriteSync(dstFile, updated, "utf-8");
-      } catch { /* non-fatal */ }
+      } catch {
+        /* non-fatal */
+      }
     }
-  }
-
-  // Also forward-merge completed-units.json (set-union)
-  const srcKeys = join(projectRoot, ".gsd", "completed-units.json");
-  const dstKeys = join(wtPath, ".gsd", "completed-units.json");
-  if (existsSync(srcKeys)) {
-    try {
-      const src: string[] = JSON.parse(readFileSync(srcKeys, "utf-8"));
-      let dst: string[] = [];
-      if (existsSync(dstKeys)) {
-        try { dst = JSON.parse(readFileSync(dstKeys, "utf-8")); } catch { /* ignore corrupt */ }
-      }
-      const merged = [...new Set([...dst, ...src])];
-      if (merged.length > dst.length) {
-        mkdirSync(join(wtPath, ".gsd"), { recursive: true });
-        atomicWriteSync(dstKeys, JSON.stringify(merged), "utf-8");
-      }
-    } catch { /* non-fatal */ }
   }
 }
 
-export function createAutoWorktree(basePath: string, milestoneId: string): string {
+export function createAutoWorktree(
+  basePath: string,
+  milestoneId: string,
+): string {
   const branch = autoWorktreeBranch(milestoneId);
 
   // Check if the milestone branch already exists — it survives auto-mode
@@ -220,11 +636,18 @@ export function createAutoWorktree(basePath: string, milestoneId: string): strin
   let info: { name: string; path: string; branch: string; exists: boolean };
   if (branchExists) {
     // Re-attach worktree to the existing milestone branch (preserving commits)
-    info = createWorktree(basePath, milestoneId, { branch, reuseExistingBranch: true });
+    info = createWorktree(basePath, milestoneId, {
+      branch,
+      reuseExistingBranch: true,
+    });
   } else {
     // Fresh start — create branch from integration branch
-    const integrationBranch = readIntegrationBranch(basePath, milestoneId) ?? undefined;
-    info = createWorktree(basePath, milestoneId, { branch, startPoint: integrationBranch });
+    const integrationBranch =
+      readIntegrationBranch(basePath, milestoneId) ?? undefined;
+    info = createWorktree(basePath, milestoneId, {
+      branch,
+      startPoint: integrationBranch,
+    });
   }
 
   // Copy .gsd/ planning artifacts from the source repo into the new worktree.
@@ -292,10 +715,21 @@ function copyPlanningArtifacts(srcBase: string, wtPath: string): void {
   if (!existsSync(srcGsd)) return;
 
   // Copy milestones/ directory (planning files, roadmaps, plans, research)
-  safeCopyRecursive(join(srcGsd, "milestones"), join(dstGsd, "milestones"), { force: true });
+  safeCopyRecursive(join(srcGsd, "milestones"), join(dstGsd, "milestones"), {
+    force: true,
+    filter: (src) => !src.endsWith("-META.json"),
+  });
 
   // Copy top-level planning files
-  for (const file of ["DECISIONS.md", "REQUIREMENTS.md", "PROJECT.md", "QUEUE.md", "STATE.md", "KNOWLEDGE.md", "OVERRIDES.md"]) {
+  for (const file of [
+    "DECISIONS.md",
+    "REQUIREMENTS.md",
+    "PROJECT.md",
+    "QUEUE.md",
+    "STATE.md",
+    "KNOWLEDGE.md",
+    "OVERRIDES.md",
+  ]) {
     safeCopy(join(srcGsd, file), join(dstGsd, file), { force: true });
   }
 
@@ -305,7 +739,9 @@ function copyPlanningArtifacts(srcBase: string, wtPath: string): void {
   if (existsSync(srcDb)) {
     try {
       copyWorktreeDb(srcDb, destDb);
-    } catch { /* non-fatal */ }
+    } catch {
+      /* non-fatal */
+    }
   }
 }
 
@@ -333,7 +769,28 @@ export function teardownAutoWorktree(
   }
 
   nudgeGitBranchCache(previousCwd);
-  removeWorktree(originalBasePath, milestoneId, { branch, deleteBranch: !preserveBranch });
+  removeWorktree(originalBasePath, milestoneId, {
+    branch,
+    deleteBranch: !preserveBranch,
+  });
+
+  // Verify cleanup succeeded — warn if the worktree directory is still on disk.
+  // On Windows, bash-based cleanup can silently fail when paths contain
+  // backslashes (#1436), leaving ~1 GB+ orphaned directories.
+  const wtDir = worktreePath(originalBasePath, milestoneId);
+  if (existsSync(wtDir)) {
+    console.error(
+      `[GSD] WARNING: Worktree directory still exists after teardown: ${wtDir}\n` +
+        `  This is likely an orphaned directory consuming disk space.\n` +
+        `  Remove it manually with: rm -rf "${wtDir.replaceAll("\\", "/")}"`,
+    );
+    // Attempt a direct filesystem removal as a fallback
+    try {
+      rmSync(wtDir, { recursive: true, force: true });
+    } catch {
+      // Non-fatal — the warning above tells the user how to clean up
+    }
+  }
 }
 
 /**
@@ -341,36 +798,13 @@ export function teardownAutoWorktree(
  * Checks both module state and git branch prefix.
  */
 export function isInAutoWorktree(basePath: string): boolean {
+  if (!originalBase) return false;
   const cwd = process.cwd();
-
-  // Primary check: use originalBase if available (fast path)
-  if (originalBase) {
-    const resolvedBase = existsSync(basePath) ? realpathSync(basePath) : basePath;
-    const wtDir = join(resolvedBase, ".gsd", "worktrees");
-    if (!cwd.startsWith(wtDir)) return false;
-    const branch = nativeGetCurrentBranch(cwd);
-    return branch.startsWith("milestone/");
-  }
-
-  // Fallback: infer worktree status structurally when originalBase is null
-  // (happens after session restart where module-level state is lost, #1120).
-  // Check if cwd is inside a .gsd/worktrees/ directory and has a .git file
-  // (worktree marker) pointing to the main repo.
-  const worktreeMarker = join(cwd, ".git");
-  if (!existsSync(worktreeMarker)) return false;
-  try {
-    const stat = statSync(worktreeMarker);
-    if (stat.isDirectory()) return false; // Main repo has .git dir, not file
-    // Worktrees have a .git file with "gitdir: ..." pointing to the main repo
-    const gitContent = readFileSync(worktreeMarker, "utf-8").trim();
-    if (!gitContent.startsWith("gitdir:")) return false;
-    // Verify cwd path contains .gsd/worktrees/
-    if (!cwd.includes(`${sep}.gsd${sep}worktrees${sep}`) && !cwd.includes("/.gsd/worktrees/")) return false;
-    const branch = nativeGetCurrentBranch(cwd);
-    return branch.startsWith("milestone/");
-  } catch {
-    return false;
-  }
+  const resolvedBase = existsSync(basePath) ? realpathSync(basePath) : basePath;
+  const wtDir = join(resolvedBase, ".gsd", "worktrees");
+  if (!cwd.startsWith(wtDir)) return false;
+  const branch = nativeGetCurrentBranch(cwd);
+  return branch.startsWith("milestone/");
 }
 
 /**
@@ -381,7 +815,10 @@ export function isInAutoWorktree(basePath: string): boolean {
  * gitdir: pointer) rather than just a stray directory. This prevents
  * mis-detection of leftover directories as active worktrees (#695).
  */
-export function getAutoWorktreePath(basePath: string, milestoneId: string): string | null {
+export function getAutoWorktreePath(
+  basePath: string,
+  milestoneId: string,
+): string | null {
   const p = worktreePath(basePath, milestoneId);
   if (!existsSync(p)) return null;
 
@@ -405,25 +842,40 @@ export function getAutoWorktreePath(basePath: string, milestoneId: string): stri
  *
  * Atomic: chdir + originalBase update in same try block.
  */
-export function enterAutoWorktree(basePath: string, milestoneId: string): string {
+export function enterAutoWorktree(
+  basePath: string,
+  milestoneId: string,
+): string {
   const p = worktreePath(basePath, milestoneId);
   if (!existsSync(p)) {
-    throw new GSDError(GSD_IO_ERROR, `Auto-worktree for ${milestoneId} does not exist at ${p}`);
+    throw new GSDError(
+      GSD_IO_ERROR,
+      `Auto-worktree for ${milestoneId} does not exist at ${p}`,
+    );
   }
 
   // Validate this is a real git worktree, not a stray directory (#695)
   const gitPath = join(p, ".git");
   if (!existsSync(gitPath)) {
-    throw new GSDError(GSD_GIT_ERROR, `Auto-worktree path ${p} exists but is not a git worktree (no .git)`);
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Auto-worktree path ${p} exists but is not a git worktree (no .git)`,
+    );
   }
   try {
     const content = readFileSync(gitPath, "utf8").trim();
     if (!content.startsWith("gitdir: ")) {
-      throw new GSDError(GSD_GIT_ERROR, `Auto-worktree path ${p} has a .git but it is not a worktree gitdir pointer`);
+      throw new GSDError(
+        GSD_GIT_ERROR,
+        `Auto-worktree path ${p} has a .git but it is not a worktree gitdir pointer`,
+      );
     }
   } catch (err) {
     if (err instanceof Error && err.message.includes("worktree")) throw err;
-    throw new GSDError(GSD_IO_ERROR, `Auto-worktree path ${p} exists but .git is unreadable`);
+    throw new GSDError(
+      GSD_IO_ERROR,
+      `Auto-worktree path ${p} exists but .git is unreadable`,
+    );
   }
 
   const previousCwd = process.cwd();
@@ -457,7 +909,9 @@ export function getActiveAutoWorktreeContext(): {
 } | null {
   if (!originalBase) return null;
   const cwd = process.cwd();
-  const resolvedBase = existsSync(originalBase) ? realpathSync(originalBase) : originalBase;
+  const resolvedBase = existsSync(originalBase)
+    ? realpathSync(originalBase)
+    : originalBase;
   const wtDir = join(resolvedBase, ".gsd", "worktrees");
   if (!cwd.startsWith(wtDir)) return null;
   const worktreeName = detectWorktreeName(cwd);
@@ -481,10 +935,14 @@ function autoCommitDirtyState(cwd: string): boolean {
   try {
     const status = nativeWorkingTreeStatus(cwd);
     if (!status) return false;
-    nativeAddAll(cwd);
-    const result = nativeCommit(cwd, "chore: auto-commit before milestone merge");
+    nativeAddAllWithExclusions(cwd, RUNTIME_EXCLUSION_PATHS);
+    const result = nativeCommit(
+      cwd,
+      "chore: auto-commit before milestone merge",
+    );
     return result !== null;
-  } catch {
+  } catch (e) {
+    debugLog("autoCommitDirtyState", { error: String(e) });
     return false;
   }
 }
@@ -505,13 +963,14 @@ function autoCommitDirtyState(cwd: string): boolean {
  *  9. Clear originalBase
  *
  * On merge conflict: throws MergeConflictError.
- * On "nothing to commit" after squash: handles gracefully (no error).
+ * On "nothing to commit" after squash: safe only if milestone work is already
+ * on the integration branch.  Throws if unanchored code changes would be lost.
  */
 export function mergeMilestoneToMain(
   originalBasePath_: string,
   milestoneId: string,
   roadmapContent: string,
-): { commitMessage: string; pushed: boolean; prCreated: boolean } {
+): { commitMessage: string; pushed: boolean; prCreated: boolean; codeFilesChanged: boolean } {
   const worktreeCwd = process.cwd();
   const milestoneBranch = autoWorktreeBranch(milestoneId);
 
@@ -524,70 +983,143 @@ export function mergeMilestoneToMain(
       const worktreeDbPath = join(worktreeCwd, ".gsd", "gsd.db");
       const mainDbPath = join(originalBasePath_, ".gsd", "gsd.db");
       reconcileWorktreeDb(mainDbPath, worktreeDbPath);
-    } catch { /* non-fatal */ }
+    } catch {
+      /* non-fatal */
+    }
   }
 
   // 2. Parse roadmap for slice listing
   const roadmap = parseRoadmap(roadmapContent);
-  const completedSlices = roadmap.slices.filter(s => s.done);
+  const completedSlices = roadmap.slices.filter((s) => s.done);
 
   // 3. chdir to original base
   const previousCwd = process.cwd();
   process.chdir(originalBasePath_);
 
-  // 3a. Auto-commit any dirty state in the project root that syncStateToProjectRoot
-  // wrote during execution. Without this, the squash merge can fail with
-  // "Your local changes to the following files would be overwritten by merge" (#1127).
-  autoCommitDirtyState(originalBasePath_);
-
-  // 4. Resolve integration branch — prefer milestone metadata, fall back to preferences / "main"
+  // 4. Resolve integration branch — prefer milestone metadata, then preferences,
+  //    then auto-detect (origin/HEAD → main → master → current). Never hardcode
+  //    "main": repos using "master" or a custom default branch would fail at
+  //    checkout and leave the user with a broken merge state (#1668).
   const prefs = loadEffectiveGSDPreferences()?.preferences?.git ?? {};
-  const integrationBranch = readIntegrationBranch(originalBasePath_, milestoneId);
-  const mainBranch = integrationBranch ?? prefs.main_branch ?? "main";
+  const integrationBranch = readIntegrationBranch(
+    originalBasePath_,
+    milestoneId,
+  );
+  const mainBranch =
+    integrationBranch ?? prefs.main_branch ?? nativeDetectMainBranch(originalBasePath_);
+
+  // Remove transient project-root state files before any branch or merge
+  // operation. Untracked milestone metadata can otherwise block squash merges.
+  clearProjectRootStateFiles(originalBasePath_, milestoneId);
 
   // 5. Checkout integration branch (skip if already current — avoids git error
   //    when main is already checked out in the project-root worktree, #757)
   const currentBranchAtBase = nativeGetCurrentBranch(originalBasePath_);
   if (currentBranchAtBase !== mainBranch) {
-    // Remove untracked .gsd/ state files that may conflict with the branch
-    // being checked out. These are regenerated by doctor/rebuildState and
-    // are not meaningful in the main working tree — the worktree had the
-    // real state. Without this, `git checkout main` fails with
-    // "Your local changes would be overwritten" (#827).
-    const gsdStateFiles = ["STATE.md", "completed-units.json", "auto.lock"];
-    for (const f of gsdStateFiles) {
-      const p = join(originalBasePath_, ".gsd", f);
-      try { unlinkSync(p); } catch { /* non-fatal — file may not exist */ }
-    }
     nativeCheckoutBranch(originalBasePath_, mainBranch);
   }
 
   // 6. Build rich commit message
-  const milestoneTitle = roadmap.title.replace(/^M\d+:\s*/, "").trim() || milestoneId;
+  const milestoneTitle =
+    roadmap.title.replace(/^M\d+:\s*/, "").trim() || milestoneId;
   const subject = `feat(${milestoneId}): ${milestoneTitle}`;
   let body = "";
   if (completedSlices.length > 0) {
-    const sliceLines = completedSlices.map(s => `- ${s.id}: ${s.title}`).join("\n");
+    const sliceLines = completedSlices
+      .map((s) => `- ${s.id}: ${s.title}`)
+      .join("\n");
     body = `\n\nCompleted slices:\n${sliceLines}\n\nBranch: ${milestoneBranch}`;
   }
   const commitMessage = subject + body;
+
+  // 6b. Reconcile worktree HEAD with milestone branch ref (#1846).
+  //     When the worktree HEAD detaches and advances past the named branch,
+  //     the branch ref becomes stale. Squash-merging the stale ref silently
+  //     orphans all commits between the branch ref and the actual worktree HEAD.
+  //     Fix: fast-forward the branch ref to the worktree HEAD before merging.
+  //     Only applies when merging from an actual worktree (worktreeCwd differs
+  //     from originalBasePath_).
+  if (worktreeCwd !== originalBasePath_) {
+    try {
+      const worktreeHead = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: worktreeCwd,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf-8",
+      }).trim();
+      const branchHead = execFileSync("git", ["rev-parse", milestoneBranch], {
+        cwd: originalBasePath_,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf-8",
+      }).trim();
+
+      if (worktreeHead && branchHead && worktreeHead !== branchHead) {
+        if (nativeIsAncestor(originalBasePath_, branchHead, worktreeHead)) {
+          // Worktree HEAD is strictly ahead — fast-forward the branch ref
+          nativeUpdateRef(
+            originalBasePath_,
+            `refs/heads/${milestoneBranch}`,
+            worktreeHead,
+          );
+          debugLog("mergeMilestoneToMain", {
+            action: "fast-forward-branch-ref",
+            milestoneBranch,
+            oldRef: branchHead.slice(0, 8),
+            newRef: worktreeHead.slice(0, 8),
+          });
+        } else {
+          // Diverged — fail loudly rather than silently losing commits
+          process.chdir(previousCwd);
+          throw new GSDError(
+            GSD_GIT_ERROR,
+            `Worktree HEAD (${worktreeHead.slice(0, 8)}) diverged from ` +
+              `${milestoneBranch} (${branchHead.slice(0, 8)}). ` +
+              `Manual reconciliation required before merge.`,
+          );
+        }
+      }
+    } catch (err) {
+      // Re-throw GSDError (divergence); swallow rev-parse failures
+      // (e.g. worktree dir already removed by external cleanup)
+      if (err instanceof GSDError) throw err;
+      debugLog("mergeMilestoneToMain", {
+        action: "reconcile-skipped",
+        reason: String(err),
+      });
+    }
+  }
 
   // 7. Squash merge — auto-resolve .gsd/ state file conflicts (#530)
   const mergeResult = nativeMergeSquash(originalBasePath_, milestoneBranch);
 
   if (!mergeResult.success) {
+    // Dirty working tree — the merge was rejected before it started (e.g.
+    // untracked .gsd/ files left by syncStateToProjectRoot).  Preserve the
+    // milestone branch so commits are not lost.
+    if (mergeResult.conflicts.includes("__dirty_working_tree__")) {
+      // Restore cwd so the caller is not stranded on the integration branch
+      process.chdir(previousCwd);
+      throw new GSDError(
+        GSD_GIT_ERROR,
+        `Squash merge of ${milestoneBranch} rejected: working tree has dirty or untracked files that conflict with the merge. ` +
+          `Clean the project root .gsd/ directory and retry.`,
+      );
+    }
+
     // Check for conflicts — use merge result first, fall back to nativeConflictFiles
-    const conflictedFiles = mergeResult.conflicts.length > 0
-      ? mergeResult.conflicts
-      : nativeConflictFiles(originalBasePath_);
+    const conflictedFiles =
+      mergeResult.conflicts.length > 0
+        ? mergeResult.conflicts
+        : nativeConflictFiles(originalBasePath_);
 
     if (conflictedFiles.length > 0) {
       // Separate .gsd/ state file conflicts from real code conflicts.
-      // GSD state files (STATE.md, completed-units.json, auto.lock, etc.)
+      // GSD state files (STATE.md, auto.lock, etc.)
       // diverge between branches during normal operation — always prefer the
       // milestone branch version since it has the latest execution state.
-      const gsdConflicts = conflictedFiles.filter(f => f.startsWith(".gsd/"));
-      const codeConflicts = conflictedFiles.filter(f => !f.startsWith(".gsd/"));
+      const gsdConflicts = conflictedFiles.filter((f) => f.startsWith(".gsd/"));
+      const codeConflicts = conflictedFiles.filter(
+        (f) => !f.startsWith(".gsd/"),
+      );
 
       // Auto-resolve .gsd/ conflicts by accepting the milestone branch version
       if (gsdConflicts.length > 0) {
@@ -605,7 +1137,12 @@ export function mergeMilestoneToMain(
 
       // If there are still non-.gsd conflicts, escalate
       if (codeConflicts.length > 0) {
-        throw new MergeConflictError(codeConflicts, "squash", milestoneBranch, mainBranch);
+        throw new MergeConflictError(
+          codeConflicts,
+          "squash",
+          milestoneBranch,
+          mainBranch,
+        );
       }
     }
     // No conflicts detected — possibly "already up to date", fall through to commit
@@ -615,12 +1152,68 @@ export function mergeMilestoneToMain(
   const commitResult = nativeCommit(originalBasePath_, commitMessage);
   const nothingToCommit = commitResult === null;
 
+  // 8a. Clean up SQUASH_MSG left by git merge --squash (#1853).
+  // git only removes SQUASH_MSG when the commit reads it directly (plain
+  // `git commit`).  nativeCommit uses `-F -` (stdin) or libgit2, neither
+  // of which trigger git's SQUASH_MSG cleanup.  If left on disk, doctor
+  // reports `corrupt_merge_state` on every subsequent run.
+  try {
+    const squashMsgPath = join(resolveGitDir(originalBasePath_), "SQUASH_MSG");
+    if (existsSync(squashMsgPath)) unlinkSync(squashMsgPath);
+  } catch { /* best-effort */ }
+
+  // 8b. Safety check (#1792): if nothing was committed, verify the milestone
+  // work is already on the integration branch before allowing teardown.
+  // Compare only non-.gsd/ paths — .gsd/ state files diverge normally and
+  // are auto-resolved during the squash merge.
+  if (nothingToCommit) {
+    const numstat = nativeDiffNumstat(
+      originalBasePath_,
+      mainBranch,
+      milestoneBranch,
+    );
+    const codeChanges = numstat.filter(
+      (entry) => !entry.path.startsWith(".gsd/"),
+    );
+    if (codeChanges.length > 0) {
+      // Milestone has unanchored code changes — abort teardown.
+      process.chdir(previousCwd);
+      throw new GSDError(
+        GSD_GIT_ERROR,
+        `Squash merge produced nothing to commit but milestone branch "${milestoneBranch}" ` +
+          `has ${codeChanges.length} code file(s) not on "${mainBranch}". ` +
+          `Aborting worktree teardown to prevent data loss.`,
+      );
+    }
+  }
+
+  // 8c. Detect whether any non-.gsd/ code files were actually merged (#1906).
+  // When a milestone only produced .gsd/ metadata (summaries, roadmaps) but no
+  // real code, the user sees "milestone complete" but nothing changed in their
+  // codebase. Surface this so the caller can warn the user.
+  let codeFilesChanged = false;
+  if (!nothingToCommit) {
+    try {
+      const mergedFiles = nativeDiffNumstat(
+        originalBasePath_,
+        "HEAD~1",
+        "HEAD",
+      );
+      codeFilesChanged = mergedFiles.some(
+        (entry) => !entry.path.startsWith(".gsd/"),
+      );
+    } catch {
+      // If HEAD~1 doesn't exist (first commit), assume code was changed
+      codeFilesChanged = true;
+    }
+  }
+
   // 9. Auto-push if enabled
   let pushed = false;
   if (prefs.auto_push === true && !nothingToCommit) {
     const remote = prefs.remote ?? "origin";
     try {
-      execSync(`git push ${remote} ${mainBranch}`, {
+      execFileSync("git", ["push", remote, mainBranch], {
         cwd: originalBasePath_,
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf-8",
@@ -638,43 +1231,77 @@ export function mergeMilestoneToMain(
     const prTarget = prefs.pr_target_branch ?? mainBranch;
     try {
       // Push the milestone branch to remote first
-      execSync(`git push ${remote} ${milestoneBranch}`, {
+      execFileSync("git", ["push", remote, milestoneBranch], {
         cwd: originalBasePath_,
         stdio: ["ignore", "pipe", "pipe"],
         encoding: "utf-8",
       });
       // Create PR via gh CLI
-      execSync(
-        `gh pr create --base "${prTarget}" --head "${milestoneBranch}" --title "Milestone ${milestoneId} complete" --body "Auto-created by GSD on milestone completion."`,
-        {
-          cwd: originalBasePath_,
-          stdio: ["ignore", "pipe", "pipe"],
-          encoding: "utf-8",
-        },
-      );
+      execFileSync("gh", [
+        "pr", "create",
+        "--base", prTarget,
+        "--head", milestoneBranch,
+        "--title", `Milestone ${milestoneId} complete`,
+        "--body", "Auto-created by GSD on milestone completion.",
+      ], {
+        cwd: originalBasePath_,
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf-8",
+      });
       prCreated = true;
     } catch {
       // PR creation failure is non-fatal — gh may not be installed or authenticated
     }
   }
 
-  // 10. Remove worktree directory first (must happen before branch deletion)
+  // 10. Guard removed — step 8b (#1792) now handles this with a smarter check:
+  //     throws only when the milestone has unanchored code changes, passes
+  //     through when the code is genuinely already on the integration branch.
+
+  // 10a. Pre-teardown safety net (#1853): if the worktree still has uncommitted
+  // changes (e.g. nativeHasChanges cache returned stale false, or auto-commit
+  // silently failed), force one final commit so code is not destroyed by
+  // `git worktree remove --force`.
+  if (existsSync(worktreeCwd)) {
+    try {
+      const dirtyCheck = nativeWorkingTreeStatus(worktreeCwd);
+      if (dirtyCheck) {
+        debugLog("mergeMilestoneToMain", {
+          phase: "pre-teardown-dirty",
+          worktreeCwd,
+          status: dirtyCheck.slice(0, 200),
+        });
+        nativeAddAllWithExclusions(worktreeCwd, RUNTIME_EXCLUSION_PATHS);
+        nativeCommit(worktreeCwd, "chore: pre-teardown auto-commit of uncommitted worktree changes");
+      }
+    } catch (e) {
+      debugLog("mergeMilestoneToMain", {
+        phase: "pre-teardown-commit-error",
+        error: String(e),
+      });
+    }
+  }
+
+  // 11. Remove worktree directory first (must happen before branch deletion)
   try {
-    removeWorktree(originalBasePath_, milestoneId, { branch: null as unknown as string, deleteBranch: false });
+    removeWorktree(originalBasePath_, milestoneId, {
+      branch: null as unknown as string,
+      deleteBranch: false,
+    });
   } catch {
     // Best-effort -- worktree dir may already be gone
   }
 
-  // 11. Delete milestone branch (after worktree removal so ref is unlocked)
+  // 12. Delete milestone branch (after worktree removal so ref is unlocked)
   try {
     nativeBranchDelete(originalBasePath_, milestoneBranch);
   } catch {
     // Best-effort
   }
 
-  // 12. Clear module state
+  // 13. Clear module state
   originalBase = null;
   nudgeGitBranchCache(previousCwd);
 
-  return { commitMessage, pushed, prCreated };
+  return { commitMessage, pushed, prCreated, codeFilesChanged };
 }

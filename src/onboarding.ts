@@ -63,6 +63,7 @@ const TOOL_KEYS: ToolKeyConfig[] = [
 /** Known LLM provider IDs that, if authed, mean the user doesn't need onboarding */
 const LLM_PROVIDER_IDS = [
   'anthropic',
+  'anthropic-vertex',
   'openai',
   'github-copilot',
   'openai-codex',
@@ -123,7 +124,8 @@ async function loadPico(): Promise<PicoModule> {
 /** Open a URL in the system browser (best-effort, non-blocking) */
 function openBrowser(url: string): void {
   if (process.platform === 'win32') {
-    execFile('cmd', ['/c', 'start', '', url], () => {})
+    // PowerShell's Start-Process handles URLs with '&' safely; cmd /c start does not.
+    execFile('powershell', ['-c', `Start-Process '${url.replace(/'/g, "''")}'`], () => {})
   } else {
     const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open'
     execFile(cmd, [url], () => {})

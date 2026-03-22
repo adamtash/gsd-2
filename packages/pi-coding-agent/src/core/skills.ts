@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 import { parseFrontmatter } from "../utils/frontmatter.js";
+import { toPosixPath } from "../utils/path-display.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
 
 /** Max name length per spec */
@@ -15,10 +16,6 @@ const MAX_DESCRIPTION_LENGTH = 1024;
 const IGNORE_FILE_NAMES = [".gitignore", ".ignore", ".fdignore"];
 
 type IgnoreMatcher = ReturnType<typeof ignore>;
-
-function toPosixPath(p: string): string {
-	return p.split(sep).join("/");
-}
 
 function prefixIgnorePattern(line: string, prefix: string): string | null {
 	const trimmed = line.trim();
@@ -82,6 +79,12 @@ export interface Skill {
 export interface LoadSkillsResult {
 	skills: Skill[];
 	diagnostics: ResourceDiagnostic[];
+}
+
+let loadedSkills: Skill[] = [];
+
+export function getLoadedSkills(): Skill[] {
+	return [...loadedSkills];
 }
 
 /**
@@ -296,7 +299,8 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use the read tool to load a skill's file when the task matches its description.",
+		"Use the Skill tool with the exact skill name from <available_skills> when the task matches its description.",
+		"If the Skill tool reports an unknown skill, do not guess: use an exact name from <available_skills> or tell the user the skill is unavailable.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
 		"<available_skills>",
@@ -452,8 +456,10 @@ export function loadSkills(options: LoadSkillsOptions = {}): LoadSkillsResult {
 		}
 	}
 
+	loadedSkills = Array.from(skillMap.values());
+
 	return {
-		skills: Array.from(skillMap.values()),
+		skills: [...loadedSkills],
 		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
 	};
 }

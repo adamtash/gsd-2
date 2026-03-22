@@ -3,7 +3,7 @@
 // Discovery order (D003): preference → task plan verify → package.json scripts.
 // First non-empty source wins.
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import type { AuditWarning, RuntimeError, VerificationCheck, VerificationResult } from "./types.js";
@@ -45,12 +45,11 @@ const PACKAGE_SCRIPT_KEYS = ["typecheck", "lint", "test"] as const;
  *   4. None found
  */
 export function discoverCommands(options: DiscoverCommandsOptions): DiscoveredCommands {
-  // 1. Preference commands (still sanitize — may contain prose from misconfiguration)
+  // 1. Preference commands
   if (options.preferenceCommands && options.preferenceCommands.length > 0) {
     const filtered = options.preferenceCommands
       .map(c => c.trim())
-      .filter(Boolean)
-      .filter(c => isLikelyCommand(c));
+      .filter(Boolean);
     if (filtered.length > 0) {
       return { commands: filtered, source: "preference" };
     }
@@ -260,8 +259,11 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
 
   for (const command of commands) {
     const start = Date.now();
-    const result = spawnSync(command, {
-      shell: true,
+    // Pass the command string as an argument to the shell explicitly
+    // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
+    const shellBin = process.platform === "win32" ? "cmd" : "sh";
+    const shellArgs = process.platform === "win32" ? ["/c", command] : ["-c", command];
+    const result: SpawnSyncReturns<string> = spawnSync(shellBin, shellArgs, {
       cwd: options.cwd,
       stdio: "pipe",
       encoding: "utf-8",

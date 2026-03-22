@@ -14,7 +14,7 @@ Pi isn't locked to one provider. It supports 20+ providers out of the box and le
 You can add multiple subscription accounts for the same provider by running `/login` again. When one account is temporarily rate limited, pi will rotate to the next available account for that provider before falling back to a different provider/model.
 
 **API keys (via environment variables):**
-- Anthropic, OpenAI, Azure OpenAI, Google Gemini, Google Vertex, Amazon Bedrock
+- Anthropic, Anthropic (Vertex AI), OpenAI, Azure OpenAI, Google Gemini, Google Vertex, Amazon Bedrock
 - Mistral, Groq, Cerebras, xAI, OpenRouter, Vercel AI Gateway
 - ZAI, OpenCode Zen, OpenCode Go, Hugging Face, Kimi, MiniMax
 

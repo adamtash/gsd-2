@@ -7,7 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
-import { showNextAction } from "../shared/mod.js";
+import { showNextAction } from "../shared/tui.js";
 import { setQueuePhaseActive } from "./index.js";
 import { loadFile } from "./files.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
@@ -22,17 +22,6 @@ import { nativeAddPaths, nativeCommit } from "./native-git-bridge.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { loadQueueOrder, sortByQueueOrder, saveQueueOrder } from "./queue-order.js";
 import { findMilestoneIds, nextMilestoneId } from "./milestone-ids.js";
-
-// ─── Commit Instruction Helper (local copy — avoids circular dep) ───────────
-
-/** Build conditional commit instruction for queue prompts based on commit_docs preference. */
-function buildDocsCommitInstruction(message: string): string {
-  const prefs = loadEffectiveGSDPreferences();
-  const commitDocsEnabled = prefs?.preferences?.git?.commit_docs !== false;
-  return commitDocsEnabled
-    ? `Commit: \`${message}\`. Stage only the .gsd/milestones/, .gsd/PROJECT.md, .gsd/REQUIREMENTS.md, .gsd/DECISIONS.md, and .gitignore files you changed — do not stage .gsd/STATE.md or other runtime files.`
-    : "Do not commit — planning docs are not tracked in git for this project.";
-}
 
 // ─── Queue Entry Point ──────────────────────────────────────────────────────
 
@@ -181,7 +170,7 @@ export async function showQueueAdd(
   const existingContext = await buildExistingMilestonesContext(basePath, milestoneIds, state);
 
   // ── Determine next milestone ID ─────────────────────────────────────
-  // Note: the LLM will use the gsd_generate_milestone_id tool to get IDs
+  // Note: the LLM will use the gsd_milestone_generate_id tool to get IDs
   // at creation time, but we still mention the next ID in the preamble
   // for context about where the sequence is.
   const uniqueEnabled = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
@@ -211,7 +200,7 @@ export async function showQueueAdd(
     preamble,
     existingMilestonesContext: existingContext,
     inlinedTemplates: queueInlinedTemplates,
-    commitInstruction: buildDocsCommitInstruction("docs: queue <milestone list>"),
+    commitInstruction: "Do not commit planning artifacts — .gsd/ is managed externally.",
   });
 
   pi.sendMessage(

@@ -18,7 +18,6 @@ import {
 import { getOAuthProvider, getOAuthProviders } from "@gsd/pi-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
 import {
 	formatActiveRateLimitSummary,
@@ -28,6 +27,7 @@ import {
 	type CredentialRateLimitInfo,
 } from "./rate-limit-inspector.js";
 import { AUTH_LOCK_STALE_MS } from "./constants.js";
+import { acquireLockAsync, acquireLockSyncWithRetry } from "./lock-utils.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 
 type AuthCredentialMetadata = {
@@ -98,40 +98,13 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 	}
 
-	private acquireLockSyncWithRetry(path: string): () => void {
-		const maxAttempts = 10;
-		const delayMs = 20;
-		let lastError: unknown;
-
-		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-			try {
-				return lockfile.lockSync(path, { realpath: false });
-			} catch (error) {
-				const code =
-					typeof error === "object" && error !== null && "code" in error
-						? String((error as { code?: unknown }).code)
-						: undefined;
-				if (code !== "ELOCKED" || attempt === maxAttempts) {
-					throw error;
-				}
-				lastError = error;
-				const start = Date.now();
-				while (Date.now() - start < delayMs) {
-					// Sleep synchronously to avoid changing callers to async.
-				}
-			}
-		}
-
-		throw (lastError as Error) ?? new Error("Failed to acquire auth storage lock");
-	}
-
 	withLock<T>(fn: (current: string | undefined) => LockResult<T>): T {
 		this.ensureParentDir();
 		this.ensureFileExists();
 
 		let release: (() => void) | undefined;
 		try {
-			release = this.acquireLockSyncWithRetry(this.authPath);
+			release = acquireLockSyncWithRetry(this.authPath);
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
@@ -160,15 +133,8 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		};
 
 		try {
-			release = await lockfile.lock(this.authPath, {
-				retries: {
-					retries: 10,
-					factor: 2,
-					minTimeout: 100,
-					maxTimeout: 10000,
-					randomize: true,
-				},
-				stale: AUTH_LOCK_STALE_MS,
+			release = await acquireLockAsync(this.authPath, {
+				staleMs: AUTH_LOCK_STALE_MS,
 				onCompromised: (err) => {
 					lockCompromised = true;
 					lockCompromisedError = err;

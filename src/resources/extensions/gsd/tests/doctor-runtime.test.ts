@@ -2,9 +2,9 @@
  * doctor-runtime.test.ts — Tests for doctor runtime health checks.
  *
  * Tests detection and auto-fix of:
- *   stale_crash_lock, orphaned_completed_units, stale_hook_state,
- *   activity_log_bloat, state_file_missing, state_file_stale,
- *   gitignore_missing_patterns
+ *   stale_crash_lock, stranded_lock_directory, orphaned_completed_units,
+ *   stale_hook_state, activity_log_bloat, state_file_missing,
+ *   state_file_stale, gitignore_missing_patterns
  */
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, realpathSync } from "node:fs";
@@ -231,15 +231,14 @@ None
       const detect = await runGSDDoctor(dir);
       const gitignoreIssues = detect.issues.filter(i => i.code === "gitignore_missing_patterns");
       assertTrue(gitignoreIssues.length > 0, "detects missing gitignore patterns");
-      assertTrue(gitignoreIssues[0]?.message.includes(".gsd/activity/"), "message lists missing patterns");
+      assertTrue(gitignoreIssues[0]?.message.includes(".gsd"), "message lists missing .gsd pattern");
 
       const fixed = await runGSDDoctor(dir, { fix: true });
       assertTrue(fixed.fixesApplied.some(f => f.includes("added missing GSD runtime patterns")), "fix adds patterns");
 
-      // Verify patterns were added
+      // Verify .gsd entry was added (external state symlink)
       const content = readFileSync(join(dir, ".gitignore"), "utf-8");
-      assertTrue(content.includes(".gsd/activity/"), "gitignore now has activity pattern");
-      assertTrue(content.includes(".gsd/auto.lock"), "gitignore now has auto.lock pattern");
+      assertTrue(content.includes(".gsd"), "gitignore now has .gsd entry");
     }
     } else {
       console.log("\n=== gitignore_missing_patterns (skipped on Windows) ===");
@@ -289,6 +288,102 @@ node_modules/
       // Verify keys were cleaned
       const content = JSON.parse(readFileSync(join(dir, ".gsd", "completed-units.json"), "utf-8"));
       assertEq(content.length, 0, "all orphaned keys removed");
+    }
+
+    // ─── Test: Stranded lock directory detection & fix ────────────────
+    // Skip on Windows: proper-lockfile uses advisory file locking on Windows,
+    // not the directory-based mechanism. The .gsd.lock/ directory pattern is
+    // a POSIX-specific lockfile implementation detail.
+    if (process.platform !== "win32") {
+    console.log("\n=== stranded_lock_directory ===");
+    {
+      const dir = createMinimalProject();
+      cleanups.push(dir);
+
+      // Create the proper-lockfile lock directory without a live lock holder.
+      // The lock dir sits at <parent of .gsd>/.gsd.lock (i.e., <basePath>/.gsd.lock).
+      const lockDir = join(dir, ".gsd.lock");
+      mkdirSync(lockDir, { recursive: true });
+
+      const detect = await runGSDDoctor(dir);
+      const strandedIssues = detect.issues.filter(i => i.code === "stranded_lock_directory");
+      assertTrue(strandedIssues.length > 0, "detects stranded lock directory");
+      assertTrue(strandedIssues[0]?.message.includes("lock directory"), "message describes stranded lock directory");
+      assertTrue(strandedIssues[0]?.fixable === true, "stranded lock dir is fixable");
+
+      const fixed = await runGSDDoctor(dir, { fix: true });
+      assertTrue(
+        fixed.fixesApplied.some(f => f.includes("removed stranded lock directory")),
+        "fix removes stranded lock directory",
+      );
+      assertTrue(!existsSync(lockDir), "lock directory removed after fix");
+    }
+
+    // ─── Test: Stranded lock dir with live lock holder — NOT flagged ───
+    console.log("\n=== stranded_lock_directory (live holder not flagged) ===");
+    {
+      const dir = createMinimalProject();
+      cleanups.push(dir);
+
+      // Create lock dir + auto.lock with PID 1 (init/launchd — always alive, never our own PID)
+      const lockDir = join(dir, ".gsd.lock");
+      mkdirSync(lockDir, { recursive: true });
+      const liveLockData = {
+        pid: 1,
+        startedAt: new Date().toISOString(),
+        unitType: "execute-task",
+        unitId: "M001/S01/T01",
+        unitStartedAt: new Date().toISOString(),
+        completedUnits: 1,
+      };
+      writeFileSync(join(dir, ".gsd", "auto.lock"), JSON.stringify(liveLockData, null, 2));
+
+      const detect = await runGSDDoctor(dir);
+      const strandedIssues = detect.issues.filter(i => i.code === "stranded_lock_directory");
+      assertEq(strandedIssues.length, 0, "live lock holder: stranded_lock_directory NOT detected");
+    }
+    } else {
+      console.log("\n=== stranded_lock_directory (skipped on Windows) ===");
+    }
+
+    // ─── Test: orphaned_completed_units NOT auto-fixed at fixLevel="task" (#1809) ──
+    // Regression: task-level doctor was removing completed-unit keys whose artifacts
+    // were temporarily missing, causing deriveState to revert the user to S01 and
+    // effectively discarding hours of work.
+    console.log("\n=== orphaned_completed_units protected at fixLevel=task (#1809) ===");
+    {
+      const dir = createMinimalProject();
+      cleanups.push(dir);
+
+      // Write completed-units.json with keys that reference non-existent artifacts.
+      // At fixLevel="task" (auto-mode post-unit), these must NOT be removed.
+      const completedKeys = [
+        "execute-task/M001/S01/T99",  // artifact missing
+        "complete-slice/M001/S99",     // artifact missing
+      ];
+      writeFileSync(join(dir, ".gsd", "completed-units.json"), JSON.stringify(completedKeys));
+
+      // fixLevel="task" — the level used by auto-post-unit after every task
+      const taskLevelFix = await runGSDDoctor(dir, { fix: true, fixLevel: "task" });
+      const taskLevelOrphan = taskLevelFix.issues.filter(i => i.code === "orphaned_completed_units");
+      assertTrue(taskLevelOrphan.length > 0, "orphaned_completed_units detected at task fixLevel");
+
+      // Verify keys were NOT removed — the fix must be suppressed at task level
+      const afterTaskFix = JSON.parse(readFileSync(join(dir, ".gsd", "completed-units.json"), "utf-8"));
+      assertEq(afterTaskFix.length, 2, "completed-unit keys preserved at fixLevel=task (data loss prevention)");
+      assertTrue(
+        !taskLevelFix.fixesApplied.some(f => f.includes("orphaned")),
+        "no orphaned-units fix applied at fixLevel=task",
+      );
+
+      // fixLevel="all" (explicit manual doctor) — fix SHOULD apply
+      const allLevelFix = await runGSDDoctor(dir, { fix: true, fixLevel: "all" });
+      assertTrue(
+        allLevelFix.fixesApplied.some(f => f.includes("orphaned")),
+        "orphaned-units fix applied at fixLevel=all (manual doctor)",
+      );
+      const afterAllFix = JSON.parse(readFileSync(join(dir, ".gsd", "completed-units.json"), "utf-8"));
+      assertEq(afterAllFix.length, 0, "orphaned keys removed at fixLevel=all");
     }
 
   } finally {

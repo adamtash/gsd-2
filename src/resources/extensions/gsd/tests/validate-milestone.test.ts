@@ -104,6 +104,11 @@ test("isValidationTerminal returns true for verdict: needs-remediation (#832)", 
   assert.equal(isValidationTerminal(content), true);
 });
 
+test("isValidationTerminal returns true for verdict: passed (#1429)", () => {
+  const content = "---\nverdict: passed\nremediation_round: 0\n---\n\n# Validation";
+  assert.equal(isValidationTerminal(content), true);
+});
+
 test("isValidationTerminal returns false for missing frontmatter", () => {
   const content = "# Validation\nNo frontmatter here.";
   assert.equal(isValidationTerminal(content), false);
@@ -196,6 +201,7 @@ test("dispatch rule matches validating-milestone phase", async () => {
   try {
     // Set up minimal milestone structure for the prompt builder
     writeRoadmap(base, "M001", ALL_DONE_ROADMAP);
+    writeSliceSummary(base, "M001", "S01", "# S01 Summary\nDone."); // Guard requires slice summaries (#1368)
 
     const ctx: DispatchContext = {
       basePath: base,
@@ -231,6 +237,7 @@ test("dispatch rule skips when skip_milestone_validation preference is set", asy
   const base = makeTmpBase();
   try {
     writeRoadmap(base, "M001", ALL_DONE_ROADMAP);
+    writeSliceSummary(base, "M001", "S01", "# S01 Summary\nDone."); // Guard requires slice summaries (#1368)
 
     const ctx: DispatchContext = {
       basePath: base,
@@ -285,6 +292,61 @@ test("verifyExpectedArtifact fails when VALIDATION.md is missing", () => {
     clearParseCache();
     const result = verifyExpectedArtifact("validate-milestone", "M001", base);
     assert.equal(result, false);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact rejects VALIDATION with missing frontmatter", () => {
+  const base = makeTmpBase();
+  try {
+    // A VALIDATION file without frontmatter should be treated as incomplete —
+    // matching what deriveState expects. Without this, the artifact check passes
+    // but deriveState still returns validating-milestone, causing the hard skip loop.
+    writeValidation(base, "M001", "# Validation\nNo frontmatter here.");
+    clearPathCache();
+    clearParseCache();
+    const result = verifyExpectedArtifact("validate-milestone", "M001", base);
+    assert.equal(result, false, "VALIDATION without frontmatter should fail verification");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact rejects VALIDATION with missing verdict field", () => {
+  const base = makeTmpBase();
+  try {
+    writeValidation(base, "M001", "---\nremediation_round: 0\n---\n\n# Validation");
+    clearPathCache();
+    clearParseCache();
+    const result = verifyExpectedArtifact("validate-milestone", "M001", base);
+    assert.equal(result, false, "VALIDATION without verdict field should fail verification");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact rejects VALIDATION with unrecognized verdict", () => {
+  const base = makeTmpBase();
+  try {
+    writeValidation(base, "M001", "---\nverdict: unknown-value\nremediation_round: 0\n---\n\n# Validation");
+    clearPathCache();
+    clearParseCache();
+    const result = verifyExpectedArtifact("validate-milestone", "M001", base);
+    assert.equal(result, false, "VALIDATION with unrecognized verdict should fail verification");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact passes VALIDATION with needs-attention verdict", () => {
+  const base = makeTmpBase();
+  try {
+    writeValidation(base, "M001", "---\nverdict: needs-attention\nremediation_round: 0\n---\n\n# Validation\nNeeds attention.");
+    clearPathCache();
+    clearParseCache();
+    const result = verifyExpectedArtifact("validate-milestone", "M001", base);
+    assert.equal(result, true, "VALIDATION with needs-attention verdict should pass verification");
   } finally {
     cleanup(base);
   }

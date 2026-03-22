@@ -16,12 +16,14 @@ Summarize your understanding of the specification concretely:
 - Scope estimate (how many milestones × slices)
 - Any ambiguities or gaps you notice
 
-### Step 2: Investigate
+### Step 2: Investigate (brief)
 
-Scout the codebase to understand what already exists:
+Quickly scout the codebase to understand what already exists — spend no more than 5-6 tool calls here:
 - `ls` the project root and key directories
 - Search for relevant existing code, patterns, dependencies
 - Check library docs if needed (`resolve_library` / `get_library_docs`)
+
+Then move on to writing artifacts. Do not explore exhaustively — the research phase will do deeper investigation later.
 
 ### Step 3: Make Decisions
 
@@ -54,7 +56,7 @@ Use these templates exactly:
 9. Say exactly: "Milestone {{milestoneId}} ready."
 
 **For multi-milestone**, write in this order:
-1. For each milestone, call `gsd_generate_milestone_id` to get its ID — never invent milestone IDs manually. Then `mkdir -p .gsd/milestones/<ID>/slices` for each.
+1. For each milestone, call `gsd_milestone_generate_id` to get its ID — never invent milestone IDs manually. Then `mkdir -p .gsd/milestones/<ID>/slices` for each.
 2. Write `.gsd/PROJECT.md` — full vision across ALL milestones (using Project template)
 3. Write `.gsd/REQUIREMENTS.md` — full capability contract (using Requirements template)
 4. Seed `.gsd/DECISIONS.md` (using Decisions template)
@@ -80,5 +82,5 @@ Use these templates exactly:
 - **Investigate before writing** — always scout the codebase first
 - **Use depends_on frontmatter** for multi-milestone sequences (the state machine reads this field to determine execution order)
 - **Anti-reduction rule** — if the spec describes a big vision, plan the big vision. Do not ask "what's the minimum viable version?" or reduce scope. Phase complex/risky work into later milestones — do not cut it.
-- **Naming convention** — always use `gsd_generate_milestone_id` to get milestone IDs. Directories use bare IDs (e.g. `M001/` or `M001-r5jzab/`), files use ID-SUFFIX format (e.g. `M001-CONTEXT.md` or `M001-r5jzab-CONTEXT.md`). Never invent milestone IDs manually.
+- **Naming convention** — always use `gsd_milestone_generate_id` to get milestone IDs. Directories use bare IDs (e.g. `M001/` or `M001-r5jzab/`), files use ID-SUFFIX format (e.g. `M001-CONTEXT.md` or `M001-r5jzab-CONTEXT.md`). Never invent milestone IDs manually.
 - **End with "Milestone {{milestoneId}} ready."** — this triggers auto-start detection

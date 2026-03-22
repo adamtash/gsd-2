@@ -18,11 +18,14 @@ import {
 import {
   resolveGsdRootFile,
   milestonesDir,
+  gsdRoot,
   resolveTaskFiles,
 } from './paths.js';
 import { findMilestoneIds } from './guided-flow.js';
 
 // ─── DECISIONS.md Parser ───────────────────────────────────────────────────
+
+const VALID_MADE_BY = new Set(['human', 'agent', 'collaborative']);
 
 /**
  * Parse a DECISIONS.md markdown table into Decision objects (without seq).
@@ -63,6 +66,9 @@ export function parseDecisionsTable(content: string): Omit<Decision, 'seq'>[] {
     const choice = cells[4].trim();
     const rationale = cells[5].trim();
     const revisable = cells[6].trim();
+    // Made By column is optional for backward compatibility — defaults to 'agent'
+    const rawMadeBy = cells.length >= 8 ? cells[7].trim().toLowerCase() : 'agent';
+    const made_by = (VALID_MADE_BY.has(rawMadeBy) ? rawMadeBy : 'agent') as import('./types.js').DecisionMadeBy;
 
     // Detect (amends DXXX) in the Decision column
     const amendsMatch = decisionText.match(/\(amends\s+(D\d+)\)/i);
@@ -78,6 +84,7 @@ export function parseDecisionsTable(content: string): Omit<Decision, 'seq'>[] {
       choice,
       rationale,
       revisable,
+      made_by,
       superseded_by: null,
     });
   }
@@ -298,7 +305,7 @@ const TASK_SUFFIXES = ['PLAN', 'SUMMARY', 'CONTINUE', 'CONTEXT', 'RESEARCH'];
  */
 function importHierarchyArtifacts(gsdDir: string): number {
   let count = 0;
-  const gsdPath = join(gsdDir, '.gsd');
+  const gsdPath = gsdRoot(gsdDir);
 
   // Root-level artifacts: PROJECT.md, QUEUE.md
   const rootFiles = ['PROJECT.md', 'QUEUE.md', 'SECRETS-MANIFEST.md'];
@@ -487,7 +494,7 @@ export function migrateFromMarkdown(gsdDir: string): {
   requirements: number;
   artifacts: number;
 } {
-  const dbPath = join(gsdDir, '.gsd', 'gsd.db');
+  const dbPath = join(gsdRoot(gsdDir), 'gsd.db');
 
   // Open DB if not already open
   if (!_getAdapter()) {

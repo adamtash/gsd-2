@@ -9,7 +9,7 @@ import {
   runPrintMode,
   runRpcMode,
 } from '@gsd/pi-coding-agent'
-import { existsSync, readdirSync, renameSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { agentDir, sessionsDir, authFilePath } from './app-paths.js'
 import { initResources, buildResourceLoader, getNewerManagedResourceVersion } from './resource-loader.js'
@@ -20,6 +20,14 @@ import { shouldRunOnboarding, runOnboarding } from './onboarding.js'
 import chalk from 'chalk'
 import { checkForUpdates } from './update-check.js'
 import { printHelp, printSubcommandHelp } from './help-text.js'
+import {
+  parseCliArgs as parseWebCliArgs,
+  runWebCliBranch,
+  migrateLegacyFlatSessions,
+} from './cli-web-branch.js'
+import { stopWebMode } from './web-mode.js'
+import { getProjectSessionsDir } from './project-sessions.js'
+import { markStartup, printStartupTimings } from './startup-timings.js'
 
 // ---------------------------------------------------------------------------
 // Minimal CLI arg parser — detects print/subagent mode flags
@@ -29,12 +37,16 @@ interface CliFlags {
   print?: boolean
   continue?: boolean
   noSession?: boolean
+  worktree?: boolean | string
   model?: string
   listModels?: string | true
   extensions: string[]
   appendSystemPrompt?: string
   tools?: string[]
   messages: string[]
+  web?: boolean
+  webPath?: string
+
   /** Set by `gsd sessions` when the user picks a specific session to resume */
   _selectedSessionPath?: string
 }
@@ -81,9 +93,22 @@ function parseCliArgs(argv: string[]): CliFlags {
     } else if (arg === '--version' || arg === '-v') {
       process.stdout.write((process.env.GSD_VERSION || '0.0.0') + '\n')
       process.exit(0)
+    } else if (arg === '--worktree' || arg === '-w') {
+      // -w with no value → auto-generate name; -w <name> → use that name
+      if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
+        flags.worktree = args[++i]
+      } else {
+        flags.worktree = true
+      }
     } else if (arg === '--help' || arg === '-h') {
       printHelp(process.env.GSD_VERSION || '0.0.0')
       process.exit(0)
+    } else if (arg === '--web') {
+      flags.web = true
+      // Capture optional project path after --web (not a flag)
+      if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
+        flags.webPath = args[++i]
+      }
     } else if (!arg.startsWith('--') && !arg.startsWith('-')) {
       flags.messages.push(arg)
     }
@@ -93,6 +118,23 @@ function parseCliArgs(argv: string[]): CliFlags {
 
 const cliFlags = parseCliArgs(process.argv)
 const isPrintMode = cliFlags.print || cliFlags.mode !== undefined
+
+// Early resource-skew check — must run before TTY gate so version mismatch
+// errors surface even in non-TTY environments.
+exitIfManagedResourcesAreNewer(agentDir)
+
+// Early TTY check — must come before heavy initialization to avoid dangling
+// handles that prevent process.exit() from completing promptly.
+const hasSubcommand = cliFlags.messages.length > 0
+if (!process.stdin.isTTY && !isPrintMode && !hasSubcommand && !cliFlags.listModels && !cliFlags.web) {
+  process.stderr.write('[gsd] Error: Interactive mode requires a terminal (TTY).\n')
+  process.stderr.write('[gsd] Non-interactive alternatives:\n')
+  process.stderr.write('[gsd]   gsd --print "your message"     Single-shot prompt\n')
+  process.stderr.write('[gsd]   gsd --mode rpc                 JSON-RPC over stdin/stdout\n')
+  process.stderr.write('[gsd]   gsd --mode mcp                 MCP server over stdin/stdout\n')
+  process.stderr.write('[gsd]   gsd --mode text "message"      Text output mode\n')
+  process.exit(1)
+}
 
 // `gsd <subcommand> --help` — show subcommand-specific help
 const subcommand = cliFlags.messages[0]
@@ -116,6 +158,34 @@ if (cliFlags.messages[0] === 'update') {
   await runUpdate()
   process.exit(0)
 }
+
+// `gsd web stop [path|all]` — stop web server before anything else
+if (cliFlags.messages[0] === 'web' && cliFlags.messages[1] === 'stop') {
+  const webFlags = parseWebCliArgs(process.argv)
+  const webBranch = await runWebCliBranch(webFlags, {
+    stopWebMode,
+    stderr: process.stderr,
+    baseSessionsDir: sessionsDir,
+    agentDir,
+  })
+  if (webBranch.handled) {
+    process.exit(webBranch.exitCode)
+  }
+}
+
+// `gsd --web [path]` or `gsd web [start] [path]` — launch browser-only web mode
+if (cliFlags.web || (cliFlags.messages[0] === 'web' && cliFlags.messages[1] !== 'stop')) {
+  const webFlags = parseWebCliArgs(process.argv)
+  const webBranch = await runWebCliBranch(webFlags, {
+    stderr: process.stderr,
+    baseSessionsDir: sessionsDir,
+    agentDir,
+  })
+  if (webBranch.handled) {
+    process.exit(webBranch.exitCode)
+  }
+}
+
 
 // `gsd sessions` — list past sessions and pick one to resume
 if (cliFlags.messages[0] === 'sessions') {
@@ -185,8 +255,10 @@ if (cliFlags.messages[0] === 'headless') {
 // because spawnSync(..., ["--version"]) returns EPERM despite a zero exit code.
 // Provision local managed binaries first so Pi sees them without probing PATH.
 ensureManagedTools(join(agentDir, 'bin'))
+markStartup('ensureManagedTools')
 
 const authStorage = AuthStorage.create(authFilePath)
+markStartup('AuthStorage.create')
 loadStoredEnvKeys(authStorage)
 migratePiCredentials(authStorage)
 
@@ -195,7 +267,9 @@ const { resolveModelsJsonPath } = await import('./models-resolver.js')
 const modelsJsonPath = resolveModelsJsonPath()
 
 const modelRegistry = new ModelRegistry(authStorage, modelsJsonPath)
+markStartup('ModelRegistry')
 const settingsManager = SettingsManager.create(agentDir)
+markStartup('SettingsManager.create')
 
 // Run onboarding wizard on first launch (no LLM provider configured)
 if (!isPrintMode && shouldRunOnboarding(authStorage, settingsManager.getDefaultProvider())) {
@@ -335,12 +409,14 @@ if (isPrintMode) {
 
   exitIfManagedResourcesAreNewer(agentDir)
   initResources(agentDir)
+  markStartup('initResources')
   const resourceLoader = new DefaultResourceLoader({
     agentDir,
     additionalExtensionPaths: cliFlags.extensions.length > 0 ? cliFlags.extensions : undefined,
     appendSystemPrompt,
   })
   await resourceLoader.reload()
+  markStartup('resourceLoader.reload')
 
   const { session, extensionsResult } = await createAgentSession({
     authStorage,
@@ -349,10 +425,14 @@ if (isPrintMode) {
     sessionManager,
     resourceLoader,
   })
+  markStartup('createAgentSession')
 
   if (extensionsResult.errors.length > 0) {
     for (const err of extensionsResult.errors) {
-      process.stderr.write(`[gsd] Extension load error: ${err.error}\n`)
+      // Downgrade conflicts with built-in tools to warnings (#1347)
+      const isSuperseded = err.error.includes("supersedes");
+      const prefix = isSuperseded ? "Extension conflict" : "Extension load error";
+      process.stderr.write(`[gsd] ${prefix}: ${err.error}\n`)
     }
   }
 
@@ -370,11 +450,13 @@ if (isPrintMode) {
   const mode = cliFlags.mode || 'text'
 
   if (mode === 'rpc') {
+    printStartupTimings()
     await runRpcMode(session)
     process.exit(0)
   }
 
   if (mode === 'mcp') {
+    printStartupTimings()
     const { startMcpServer } = await import('./mcp-server.js')
     await startMcpServer({
       tools: session.agent.state.tools ?? [],
@@ -384,11 +466,53 @@ if (isPrintMode) {
     await new Promise(() => {})
   }
 
+  printStartupTimings()
   await runPrintMode(session, {
     mode: mode as 'text' | 'json',
     messages: cliFlags.messages,
   })
   process.exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// Worktree subcommand — `gsd worktree <list|merge|clean|remove>`
+// ---------------------------------------------------------------------------
+if (cliFlags.messages[0] === 'worktree' || cliFlags.messages[0] === 'wt') {
+  const { handleList, handleMerge, handleClean, handleRemove } = await import('./worktree-cli.js')
+  const sub = cliFlags.messages[1]
+  const subArgs = cliFlags.messages.slice(2)
+
+  if (!sub || sub === 'list') {
+    await handleList(process.cwd())
+  } else if (sub === 'merge') {
+    await handleMerge(process.cwd(), subArgs)
+  } else if (sub === 'clean') {
+    await handleClean(process.cwd())
+  } else if (sub === 'remove' || sub === 'rm') {
+    await handleRemove(process.cwd(), subArgs)
+  } else {
+    process.stderr.write(`Unknown worktree command: ${sub}\n`)
+    process.stderr.write('Commands: list, merge [name], clean, remove <name>\n')
+  }
+  process.exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// Worktree flag (-w) — create/resume a worktree for the interactive session
+// ---------------------------------------------------------------------------
+if (cliFlags.worktree) {
+  const { handleWorktreeFlag } = await import('./worktree-cli.js')
+  await handleWorktreeFlag(cliFlags.worktree)
+}
+
+// ---------------------------------------------------------------------------
+// Active worktree banner — remind user of unmerged worktrees on normal launch
+// ---------------------------------------------------------------------------
+if (!cliFlags.worktree && !isPrintMode) {
+  try {
+    const { handleStatusBanner } = await import('./worktree-cli.js')
+    await handleStatusBanner(process.cwd())
+  } catch { /* non-fatal */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,31 +522,12 @@ if (isPrintMode) {
 // Per-directory session storage — same encoding as the upstream SDK so that
 // /resume only shows sessions from the current working directory.
 const cwd = process.cwd()
-const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
-const projectSessionsDir = join(sessionsDir, safePath)
+const projectSessionsDir = getProjectSessionsDir(cwd)
 
 // Migrate legacy flat sessions: before per-directory scoping, all .jsonl session
 // files lived directly in ~/.gsd/sessions/. Move them into the correct per-cwd
 // subdirectory so /resume can find them.
-if (existsSync(sessionsDir)) {
-  try {
-    const entries = readdirSync(sessionsDir)
-    const flatJsonl = entries.filter(f => f.endsWith('.jsonl'))
-    if (flatJsonl.length > 0) {
-      const { mkdirSync } = await import('node:fs')
-      mkdirSync(projectSessionsDir, { recursive: true })
-      for (const file of flatJsonl) {
-        const src = join(sessionsDir, file)
-        const dst = join(projectSessionsDir, file)
-        if (!existsSync(dst)) {
-          renameSync(src, dst)
-        }
-      }
-    }
-  } catch {
-    // Non-fatal — don't block startup if migration fails
-  }
-}
+migrateLegacyFlatSessions(sessionsDir, projectSessionsDir)
 
 const sessionManager = cliFlags._selectedSessionPath
   ? SessionManager.open(cliFlags._selectedSessionPath, projectSessionsDir)
@@ -432,8 +537,10 @@ const sessionManager = cliFlags._selectedSessionPath
 
 exitIfManagedResourcesAreNewer(agentDir)
 initResources(agentDir)
+markStartup('initResources')
 const resourceLoader = buildResourceLoader(agentDir)
 await resourceLoader.reload()
+markStartup('resourceLoader.reload')
 
 const { session, extensionsResult } = await createAgentSession({
   authStorage,
@@ -442,10 +549,13 @@ const { session, extensionsResult } = await createAgentSession({
   sessionManager,
   resourceLoader,
 })
+markStartup('createAgentSession')
 
 if (extensionsResult.errors.length > 0) {
   for (const err of extensionsResult.errors) {
-    process.stderr.write(`[gsd] Extension load error: ${err.error}\n`)
+    const isSuperseded = err.error.includes("supersedes");
+    const prefix = isSuperseded ? "Extension conflict" : "Extension load error";
+    process.stderr.write(`[gsd] ${prefix}: ${err.error}\n`)
   }
 }
 
@@ -496,11 +606,24 @@ if (!process.stdin.isTTY) {
   process.stderr.write('[gsd] Error: Interactive mode requires a terminal (TTY).\n')
   process.stderr.write('[gsd] Non-interactive alternatives:\n')
   process.stderr.write('[gsd]   gsd --print "your message"     Single-shot prompt\n')
+  process.stderr.write('[gsd]   gsd --web [path]               Browser-only web mode\n')
   process.stderr.write('[gsd]   gsd --mode rpc                 JSON-RPC over stdin/stdout\n')
   process.stderr.write('[gsd]   gsd --mode mcp                 MCP server over stdin/stdout\n')
   process.stderr.write('[gsd]   gsd --mode text "message"      Text output mode\n')
   process.exit(1)
 }
 
+// Welcome screen — shown on every fresh interactive session before TUI takes over
+{
+  const { printWelcomeScreen } = await import('./welcome-screen.js')
+  printWelcomeScreen({
+    version: process.env.GSD_VERSION || '0.0.0',
+    modelName: settingsManager.getDefaultModel() || undefined,
+    provider: settingsManager.getDefaultProvider() || undefined,
+  })
+}
+
 const interactiveMode = new InteractiveMode(session)
+markStartup('InteractiveMode')
+printStartupTimings()
 await interactiveMode.run()

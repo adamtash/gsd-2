@@ -10,11 +10,19 @@
  * Also contains resource staleness detection and stale worktree escape.
  */
 
-import { existsSync, mkdirSync, readFileSync, cpSync, unlinkSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  cpSync,
+  unlinkSync,
+  readdirSync,
+} from "node:fs";
 import { join, sep as pathSep } from "node:path";
 import { homedir } from "node:os";
 import { safeCopy, safeCopyRecursive } from "./safe-fs.js";
-import { atomicWriteSync } from "./atomic-write.js";
+
+const gsdHome = process.env.GSD_HOME || join(homedir(), ".gsd");
 
 // ─── Project Root → Worktree Sync ─────────────────────────────────────────
 
@@ -25,7 +33,11 @@ import { atomicWriteSync } from "./atomic-write.js";
  * gsd.db in the worktree so it rebuilds from fresh disk state (#853).
  * Non-fatal — sync failure should never block dispatch.
  */
-export function syncProjectRootToWorktree(projectRoot: string, worktreePath: string, milestoneId: string | null): void {
+export function syncProjectRootToWorktree(
+  projectRoot: string,
+  worktreePath: string,
+  milestoneId: string | null,
+): void {
   if (!worktreePath || !projectRoot || worktreePath === projectRoot) return;
   if (!milestoneId) return;
 
@@ -34,7 +46,10 @@ export function syncProjectRootToWorktree(projectRoot: string, worktreePath: str
 
   // Copy milestone directory from project root to worktree if the project root
   // has newer artifacts (e.g. slices that don't exist in the worktree yet)
-  safeCopyRecursive(join(prGsd, "milestones", milestoneId), join(wtGsd, "milestones", milestoneId))
+  safeCopyRecursive(
+    join(prGsd, "milestones", milestoneId),
+    join(wtGsd, "milestones", milestoneId),
+  );
 
   // Delete worktree gsd.db so it rebuilds from the freshly synced files.
   // Stale DB rows are the root cause of the infinite skip loop (#853).
@@ -43,7 +58,9 @@ export function syncProjectRootToWorktree(projectRoot: string, worktreePath: str
     if (existsSync(wtDb)) {
       unlinkSync(wtDb);
     }
-  } catch { /* non-fatal */ }
+  } catch {
+    /* non-fatal */
+  }
 }
 
 // ─── Worktree → Project Root Sync ─────────────────────────────────────────
@@ -54,7 +71,11 @@ export function syncProjectRootToWorktree(projectRoot: string, worktreePath: str
  * Copies: STATE.md + active milestone directory (roadmap, slice plans, task summaries).
  * Non-fatal — sync failure should never block dispatch.
  */
-export function syncStateToProjectRoot(worktreePath: string, projectRoot: string, milestoneId: string | null): void {
+export function syncStateToProjectRoot(
+  worktreePath: string,
+  projectRoot: string,
+  milestoneId: string | null,
+): void {
   if (!worktreePath || !projectRoot || worktreePath === projectRoot) return;
   if (!milestoneId) return;
 
@@ -62,33 +83,25 @@ export function syncStateToProjectRoot(worktreePath: string, projectRoot: string
   const prGsd = join(projectRoot, ".gsd");
 
   // 1. STATE.md — the quick-glance status used by initial deriveState()
-  safeCopy(join(wtGsd, "STATE.md"), join(prGsd, "STATE.md"), { force: true })
+  safeCopy(join(wtGsd, "STATE.md"), join(prGsd, "STATE.md"), { force: true });
 
   // 2. Milestone directory — ROADMAP, slice PLANs, task summaries
   // Copy the entire milestone .gsd subtree so deriveState reads current checkboxes
-  safeCopyRecursive(join(wtGsd, "milestones", milestoneId), join(prGsd, "milestones", milestoneId), { force: true })
-
-  // 3. Merge completed-units.json (set-union of both locations)
-  // Prevents already-completed units from being re-dispatched after crash/restart.
-  const srcKeysFile = join(wtGsd, "completed-units.json");
-  const dstKeysFile = join(prGsd, "completed-units.json");
-  if (existsSync(srcKeysFile)) {
-    try {
-      const srcKeys: string[] = JSON.parse(readFileSync(srcKeysFile, "utf8"));
-      let dstKeys: string[] = [];
-      if (existsSync(dstKeysFile)) {
-        try { dstKeys = JSON.parse(readFileSync(dstKeysFile, "utf8")); } catch { /* ignore corrupt dst */ }
-      }
-      const merged = [...new Set([...dstKeys, ...srcKeys])];
-      atomicWriteSync(dstKeysFile, JSON.stringify(merged, null, 2));
-    } catch { /* non-fatal */ }
-  }
+  safeCopyRecursive(
+    join(wtGsd, "milestones", milestoneId),
+    join(prGsd, "milestones", milestoneId),
+    { force: true },
+  );
 
   // 4. Runtime records — unit dispatch state used by selfHealRuntimeRecords().
   // Without this, a crash during a unit leaves the runtime record only in the
   // worktree. If the next session resolves basePath before worktree re-entry,
   // selfHeal can't find or clear the stale record (#769).
-  safeCopyRecursive(join(wtGsd, "runtime", "units"), join(prGsd, "runtime", "units"), { force: true })
+  safeCopyRecursive(
+    join(wtGsd, "runtime", "units"),
+    join(prGsd, "runtime", "units"),
+    { force: true },
+  );
 }
 
 // ─── Resource Staleness ───────────────────────────────────────────────────
@@ -99,11 +112,14 @@ export function syncStateToProjectRoot(worktreePath: string, projectRoot: string
  * doesn't falsely trigger staleness (#804).
  */
 export function readResourceVersion(): string | null {
-  const agentDir = process.env.GSD_CODING_AGENT_DIR || join(homedir(), ".gsd", "agent");
+  const agentDir =
+    process.env.GSD_CODING_AGENT_DIR || join(gsdHome, "agent");
   const manifestPath = join(agentDir, "managed-resources.json");
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-    return typeof manifest?.gsdVersion === "string" ? manifest.gsdVersion : null;
+    return typeof manifest?.gsdVersion === "string"
+      ? manifest.gsdVersion
+      : null;
   } catch {
     return null;
   }
@@ -113,7 +129,9 @@ export function readResourceVersion(): string | null {
  * Check if managed resources have been updated since session start.
  * Returns a warning message if stale, null otherwise.
  */
-export function checkResourcesStale(versionOnStart: string | null): string | null {
+export function checkResourcesStale(
+  versionOnStart: string | null,
+): string | null {
   if (versionOnStart === null) return null;
   const current = readResourceVersion();
   if (current === null) return null;
@@ -137,12 +155,35 @@ export function checkResourcesStale(versionOnStart: string | null): string | nul
  * Returns the corrected base path.
  */
 export function escapeStaleWorktree(base: string): string {
-  const marker = `${pathSep}.gsd${pathSep}worktrees${pathSep}`;
-  const idx = base.indexOf(marker);
-  if (idx === -1) return base;
+  // Direct layout: /.gsd/worktrees/
+  const directMarker = `${pathSep}.gsd${pathSep}worktrees${pathSep}`;
+  let idx = base.indexOf(directMarker);
+  if (idx === -1) {
+    // Symlink-resolved layout: /.gsd/projects/<hash>/worktrees/
+    const symlinkRe = new RegExp(
+      `\\${pathSep}\\.gsd\\${pathSep}projects\\${pathSep}[a-f0-9]+\\${pathSep}worktrees\\${pathSep}`,
+    );
+    const match = base.match(symlinkRe);
+    if (!match || match.index === undefined) return base;
+    idx = match.index;
+  }
 
   // base is inside .gsd/worktrees/<something> — extract the project root
   const projectRoot = base.slice(0, idx);
+
+  // Guard: If the candidate project root's .gsd IS the user-level ~/.gsd,
+  // the string-slice heuristic matched the wrong /.gsd/ boundary. This happens
+  // when .gsd is a symlink into ~/.gsd/projects/<hash> and process.cwd()
+  // resolved through the symlink. Returning ~ would be catastrophic (#1676).
+  const candidateGsd = join(projectRoot, ".gsd").replaceAll("\\", "/");
+  const gsdHomePath = gsdHome.replaceAll("\\", "/");
+  if (candidateGsd === gsdHomePath || candidateGsd.startsWith(gsdHomePath + "/")) {
+    // Don't chdir to home — return base unchanged.
+    // resolveProjectRoot() in worktree.ts has the full git-file-based recovery
+    // and will be called by the caller (startAuto → projectRoot()).
+    return base;
+  }
+
   try {
     process.chdir(projectRoot);
   } catch {
@@ -176,9 +217,13 @@ export function cleanStaleRuntimeUnits(
         try {
           unlinkSync(join(runtimeUnitsDir, file));
           cleaned++;
-        } catch { /* non-fatal */ }
+        } catch {
+          /* non-fatal */
+        }
       }
     }
-  } catch { /* non-fatal */ }
+  } catch {
+    /* non-fatal */
+  }
   return cleaned;
 }

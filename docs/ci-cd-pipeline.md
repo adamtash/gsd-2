@@ -66,15 +66,49 @@ docker run --rm -v $(pwd):/workspace ghcr.io/gsd-build/gsd-pi:latest --version
 | Release Pipeline | `pipeline.yml` | After CI succeeds on main | Three-stage promotion |
 | Native Binaries | `build-native.yml` | `v*` tags | Cross-compile platform binaries |
 | Dev Cleanup | `cleanup-dev-versions.yml` | Weekly (Monday 06:00 UTC) | Unpublish `-dev.` versions older than 30 days |
+| AI Triage | `triage.yml` | New issues + PRs | Automated classification via Claude Haiku (v2.36) |
+
+**CI optimization (v2.38):** GitHub Actions minutes were reduced ~60-70% (~10k → ~3-4k/month) through workflow consolidation and caching improvements.
+
+**Pipeline optimization (v2.41):**
+- **Shallow clones** — CI lint and build jobs use `fetch-depth: 1` or `fetch-depth: 2` instead of full history, saving ~30-60s per job
+- **npm cache in pipeline** — dev-publish, test-verify, and prod-release now use `cache: 'npm'` on setup-node, saving ~1-2 min per job on repeat runs
+- **Exponential backoff** — npm registry propagation waits in `build-native.yml` replaced hardcoded `sleep 30` + fixed 15s retries with exponential backoff (5s → 10s → 20s → 30s cap), typically finishing in <15s when the registry is fast
+- **Security hardening** — pipeline.yml moved `${{ }}` expressions from `run:` blocks to `env:` variables to prevent command injection vectors
+### Docs-Only PR Detection (v2.41)
+
+CI automatically detects when a PR contains only documentation changes (`.md` files and `docs/` content). When docs-only:
+
+- **Skipped:** `build`, `windows-portability` (no code to compile or test)
+- **Still runs:** `lint` (secret scanning, `.gsd/` check), `docs-check` (prompt injection scan)
+
+This saves CI minutes on documentation PRs while still enforcing security checks.
+
+### Prompt Injection Scan (v2.41)
+
+The `docs-check` job runs `scripts/docs-prompt-injection-scan.sh` on every PR that touches markdown files. It scans documentation prose (excluding fenced code blocks) for patterns that could manipulate LLM behavior when docs are ingested as context:
+
+- **System prompt markers** — `<system-prompt>`, `<|im_start|>system`, `[SYSTEM]:`
+- **Role/instruction overrides** — `ignore previous instructions`, `you are now`, `new instructions:`
+- **Hidden HTML directives** — `<!-- PROMPT:`, `<!-- INSTRUCTION:`
+- **Tool call injection** — `<tool_call>`, `<function_call>`, `<invoke`
+- **Invisible Unicode** — zero-width character sequences that hide directives
+
+Content inside fenced code blocks (` ``` `) is excluded — patterns in code examples are expected and legitimate.
+
+**False positives:** Add exceptions to `.prompt-injection-scanignore` using the same format as `.secretscanignore` (one pattern per line, `file:regex` for file-scoped exceptions).
 
 ### Gating Tests
 
 The pipeline only triggers after `ci.yml` passes. Key gating tests include:
 
-- **Unit tests** (`npm run test:unit`) — includes `auto-session-encapsulation.test.ts` which enforces that all auto-mode state is encapsulated in `AutoSession`. Any PR adding module-level mutable state to `auto.ts` will fail CI and block the pipeline.
+- **Unit tests** (`npm run test:unit`) — includes `auto-session-encapsulation.test.ts` which enforces that all auto-mode state is encapsulated in `AutoSession`, plus dispatch loop regression tests that exercise the full `deriveState → resolveDispatch → idempotency` chain without an LLM. Any PR adding module-level mutable state to `auto.ts` will fail CI and block the pipeline.
 - **Integration tests** (`npm run test:integration`)
 - **Extension typecheck** (`npm run typecheck:extensions`)
 - **Package validation** (`npm run validate-pack`)
+- **Smoke tests** (`npm run test:smoke`) — run post-build in the pipeline against the local binary and again against the globally-installed `@dev` package
+- **Fixture tests** (`npm run test:fixtures`) — replay recorded LLM conversations without hitting real APIs
+- **Live regression tests** (`npm run test:live-regression`) — run against the installed binary in the Test stage to catch runtime regressions before promotion to `@next`
 
 ### Approving a Prod Release
 
@@ -119,8 +153,8 @@ For `@dev` or `@next` rollbacks, the next successful merge will overwrite the ta
 
 | Image | Base | Purpose | Tags |
 |-------|------|---------|------|
-| `ghcr.io/gsd-build/gsd-ci-builder` | `node:22-bookworm` | CI build environment with Rust toolchain | `:latest`, `:<date>` |
-| `ghcr.io/gsd-build/gsd-pi` | `node:22-slim` | User-facing runtime | `:latest`, `:next`, `:v<version>` |
+| `ghcr.io/gsd-build/gsd-ci-builder` | `node:24-bookworm` | CI build environment with Rust toolchain | `:latest`, `:<date>` |
+| `ghcr.io/gsd-build/gsd-pi` | `node:24-slim` | User-facing runtime | `:latest`, `:next`, `:v<version>` |
 
 The CI builder image is rebuilt automatically when the `Dockerfile` changes. It eliminates ~3-5 min of toolchain setup per CI run.
 

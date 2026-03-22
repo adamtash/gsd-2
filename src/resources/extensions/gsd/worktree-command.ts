@@ -14,7 +14,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent
 import { loadPrompt } from "./prompt-loader.js";
 import { autoCommitCurrentBranch, getMainBranch, resolveGitHeadPath, nudgeGitBranchCache } from "./worktree.js";
 import { runWorktreePostCreateHook } from "./auto-worktree.js";
-import { showConfirm } from "../shared/mod.js";
+import { showConfirm } from "../shared/tui.js";
 import { gsdRoot, milestonesDir } from "./paths.js";
 import {
   createWorktree,
@@ -228,6 +228,15 @@ async function worktreeHandler(
   }
 }
 
+export async function handleWorktreeCommand(
+  args: string,
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+  alias: string,
+): Promise<void> {
+  await worktreeHandler(args, ctx, pi, alias);
+}
+
 export function registerWorktreeCommand(pi: ExtensionAPI): void {
   // Restore worktree state after /reload.
   // The module-level originalCwd resets to null when extensions are re-loaded,
@@ -246,7 +255,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI): void {
     getArgumentCompletions: worktreeCompletions,
 
     async handler(args: string, ctx: ExtensionCommandContext) {
-      await worktreeHandler(args, ctx, pi, "worktree");
+      await handleWorktreeCommand(args, ctx, pi, "worktree");
     },
   });
 
@@ -255,7 +264,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI): void {
     description: "Alias for /worktree",
     getArgumentCompletions: worktreeCompletions,
     async handler(args: string, ctx: ExtensionCommandContext) {
-      await worktreeHandler(args, ctx, pi, "wt");
+      await handleWorktreeCommand(args, ctx, pi, "wt");
     },
   });
 }
@@ -503,6 +512,14 @@ async function handleList(
       return;
     }
 
+    // Compute health status for each worktree
+    const { getAllWorktreeHealth, formatWorktreeStatusLine } = await import("./worktree-health.js");
+    const healthMap = new Map<string, ReturnType<typeof getAllWorktreeHealth>[number]>();
+    try {
+      const statuses = getAllWorktreeHealth(mainBase);
+      for (const s of statuses) healthMap.set(s.worktree.name, s);
+    } catch { /* health check failed — show list without status */ }
+
     const cwd = process.cwd();
     const lines = [CLR.header("GSD Worktrees"), ""];
     for (const wt of worktrees) {
@@ -519,6 +536,19 @@ async function handleList(
       lines.push(`  ${styledName}${badge}`);
       lines.push(`    ${CLR.label("branch")}  ${CLR.branch(wt.branch)}`);
       lines.push(`    ${CLR.label("path")}    ${CLR.path(wt.path)}`);
+
+      // Show health status line
+      const health = healthMap.get(wt.name);
+      if (health) {
+        const statusLine = formatWorktreeStatusLine(health);
+        const statusColor = health.safeToRemove
+          ? CLR.ok(statusLine)
+          : health.stale || health.dirty
+            ? CLR.warn(statusLine)
+            : CLR.muted(statusLine);
+        lines.push(`    ${CLR.label("status")}  ${statusColor}`);
+      }
+
       lines.push("");
     }
 

@@ -11,7 +11,8 @@ import { truncateToWidth, visibleWidth, matchesKey, Key } from "@gsd/pi-tui";
 import { deriveState } from "./state.js";
 import { loadFile, parseRoadmap, parsePlan } from "./files.js";
 import { resolveMilestoneFile, resolveSliceFile } from "./paths.js";
-import { getAutoDashboardData, type AutoDashboardData } from "./auto.js";
+import { getAutoDashboardData } from "./auto.js";
+import type { AutoDashboardData } from "./auto-dashboard.js";
 import {
   getLedger, getProjectTotals, aggregateByPhase, aggregateBySlice,
   aggregateByModel, aggregateCacheHitRate, formatCost, formatTokenCount, formatCostProjection,
@@ -22,6 +23,8 @@ import { getActiveWorktreeName } from "./worktree-command.js";
 import { getWorkerBatches, hasActiveWorkers, type WorkerEntry } from "../subagent/worker-registry.js";
 import { formatDuration, padRight, joinColumns, centerLine, fitColumns, STATUS_GLYPH, STATUS_COLOR } from "../shared/mod.js";
 import { estimateTimeRemaining } from "./auto-dashboard.js";
+import { computeProgressScore, formatProgressLine } from "./progress-score.js";
+import { runEnvironmentChecks, type EnvironmentCheckResult } from "./doctor-environment.js";
 
 function unitLabel(type: string): string {
   switch (type) {
@@ -35,6 +38,7 @@ function unitLabel(type: string): string {
     case "triage-captures": return "Triage";
     case "quick-task": return "Quick Task";
     case "replan-slice": return "Replan";
+    case "custom-step": return "Workflow Step";
     default: return type;
   }
 }
@@ -409,13 +413,36 @@ export class GSDDashboardOverlay {
       : "";
     let elapsedParts = "";
     if (this.dashData.active || this.dashData.paused) {
-      elapsedParts = th.fg("dim", formatDuration(this.dashData.elapsed));
+      // Guard: skip display when elapsed is zero or unreasonably large (>30 days)
+      const elapsed = this.dashData.elapsed;
+      elapsedParts = elapsed > 0 && elapsed < 30 * 24 * 3600_000
+        ? th.fg("dim", formatDuration(elapsed))
+        : "";
       const eta = estimateTimeRemaining();
       if (eta) elapsedParts += th.fg("dim", `  ·  ${eta}`);
     } else if (isRemote) {
       elapsedParts = th.fg("dim", `since ${this.dashData.remoteSession!.startedAt.replace("T", " ").slice(0, 19)}`);
     }
     lines.push(row(joinColumns(`${title}  ${status}${worktreeTag}`, elapsedParts, contentWidth)));
+
+    // Progress score — traffic light indicator (#1221)
+    if (this.dashData.active || this.dashData.paused) {
+      const progressScore = computeProgressScore();
+      const progressIcon = progressScore.level === "green" ? th.fg("success", "●")
+        : progressScore.level === "yellow" ? th.fg("warning", "●")
+          : th.fg("error", "●");
+      lines.push(row(`${progressIcon} ${th.fg("text", progressScore.summary)}`));
+
+      // Show signal details when degraded — real-time visibility into what doctor found
+      if (progressScore.level !== "green" && progressScore.signals.length > 0) {
+        for (const signal of progressScore.signals) {
+          const prefix = signal.kind === "positive" ? th.fg("success", "  ✓")
+            : signal.kind === "negative" ? th.fg("error", "  ✗")
+              : th.fg("dim", "  ·");
+          lines.push(row(`${prefix} ${th.fg("dim", signal.label)}`));
+        }
+      }
+    }
     lines.push(blank());
 
     if (this.dashData.currentUnit) {
@@ -730,6 +757,23 @@ export class GSDDashboardOverlay {
       const cacheRate = aggregateCacheHitRate();
       if (cacheRate > 0) {
         lines.push(row(`${th.fg("dim", "cache hit rate:")} ${th.fg("text", `${cacheRate}%`)}`));
+      }
+    }
+
+    // Environment health section (#1221) — only show issues
+    const envResults = runEnvironmentChecks(this.dashData.basePath || process.cwd());
+    const envIssues = envResults.filter(r => r.status !== "ok");
+    if (envIssues.length > 0) {
+      lines.push(blank());
+      lines.push(hr());
+      lines.push(row(th.fg("text", th.bold("Environment"))));
+      lines.push(blank());
+      for (const r of envIssues) {
+        const icon = r.status === "error" ? th.fg("error", "✗") : th.fg("warning", "⚠");
+        lines.push(row(`  ${icon} ${th.fg("text", r.message)}`));
+        if (r.detail) {
+          lines.push(row(th.fg("dim", `     ${r.detail}`)));
+        }
       }
     }
 

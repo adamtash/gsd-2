@@ -16,7 +16,7 @@ This version is different. GSD is now a standalone CLI built on the [Pi SDK](htt
 
 One command. Walk away. Come back to a built project with clean git history.
 
-<pre><code>npm install -g gsd-pi</code></pre>
+<pre><code>npm install -g gsd-pi@latest</code></pre>
 
 > **📋 NOTICE: New to Node on Mac?** If you installed Node.js via Homebrew, you may be running a development release instead of LTS. **[Read this guide](./docs/node-lts-macos.md)** to pin Node 24 LTS and avoid compatibility issues.
 
@@ -24,22 +24,75 @@ One command. Walk away. Come back to a built project with clean git history.
 
 ---
 
-## What's New in v2.28
+## What's New in v2.41.0
 
-- **`gsd headless query`** — instant JSON snapshot of project state (~50ms, no LLM session)
-- **`/gsd update`** — update GSD to the latest version without leaving your session
-- **`/gsd export --html --all`** — generate retrospective HTML reports for all milestones at once
-- **Reliability hardening** — atomic file writes, OAuth fetch timeouts, RPC exit detection, blob GC, LSP init retry with backoff
-- **RPC utilities** now part of the public API for headless/scripted integrations
-- **npm** established as the canonical package manager
-- **CI/CD Pipeline** — three-stage promotion (Dev → Test → Prod) with automated versioning
-- **Docker support** — containerized builds with multi-stage Dockerfile
-- **`/gsd keys`** — full API key lifecycle management (list, add, remove, test, rotate, doctor)
-- **Milestone parking** — park in-progress milestones to work on something else, unpark to resume
-- **Studio** — experimental Electron desktop app (early preview)
-- **Per-project MCP config** — `.gsd/mcp.json` for project-scoped MCP server definitions
+### New Features
 
-See the full [Changelog](./CHANGELOG.md) for details.
+- **Browser-based web interface** — run GSD from the browser with `gsd --web`. Full project management, real-time progress, and multi-project support via server-sent events. (#1717)
+- **Doctor: worktree lifecycle checks** — `/gsd doctor` now validates worktree health, detects orphaned worktrees, consolidates cleanup, and enhances `/worktree list` with lifecycle status. (#1814)
+- **CI: docs-only PR detection** — PRs that only change documentation skip build and test steps, with a new prompt injection scan for security. (#1699)
+- **Custom Models guide** — new documentation for adding custom providers (Ollama, vLLM, LM Studio, proxies) via `models.json`. (#1670)
+
+### Data Loss Prevention (Critical Fixes)
+
+This release includes 7 fixes preventing silent data loss in auto-mode:
+
+- **Hallucination guard** — execute-task agents that complete with zero tool calls are now rejected as hallucinated. Previously, agents could produce detailed but fabricated summaries without writing any code, wasting ~$25/milestone. (#1838)
+- **Merge anchor verification** — before deleting a milestone worktree/branch, GSD now verifies the code is actually on the integration branch. Prevents orphaning commits when squash-merge produces an empty diff. (#1829)
+- **Dirty working tree detection** — `nativeMergeSquash` now distinguishes dirty-tree rejections from content conflicts, preventing silent commit loss when synced `.gsd/` files block the merge. (#1752)
+- **Doctor cleanup safety** — the `orphaned_completed_units` check no longer auto-fixes during post-task health checks. Previously, timing races could cause the doctor to remove valid completion keys, reverting users to earlier tasks. (#1825)
+- **Root file reverse-sync** — worktree teardown now syncs root-level `.gsd/` files (PROJECT.md, REQUIREMENTS.md, completed-units.json) back to the project root. Previously these were lost on milestone closeout. (#1831)
+- **Empty merge guard** — milestone branches with unanchored code changes are preserved instead of deleted when squash-merge produces nothing to commit. (#1755)
+- **Crash-safe task closeout** — orphaned checkboxes in PLAN.md are unchecked on retry, preventing phantom task completion. (#1759)
+
+### Auto-Mode Stability
+
+- **Terminal hang fix** — `stopAuto()` now resolves pending promises, preventing the terminal from freezing permanently after stopping auto-mode. (#1818)
+- **Signal handler coverage** — SIGHUP and SIGINT now clean up lock files, not just SIGTERM. Prevents stranded locks on VS-Code crash. (#1821)
+- **Needs-discussion routing** — milestones in `needs-discussion` phase now route to the smart entry UI instead of hard-stopping, breaking the infinite loop. (#1820)
+- **Infrastructure error handling** — auto-mode stops immediately on ENOSPC, ENOMEM, and similar unrecoverable errors instead of retrying. (#1780)
+- **Dependency-aware dispatch** — slice dispatch now uses declared `depends_on` instead of positional ordering. (#1770)
+- **Queue mode depth verification** — the write gate now processes depth verification in queue mode, fixing a deadlock where CONTEXT.md writes were permanently blocked. (#1823)
+
+### Roadmap Parser Improvements
+
+- **Table format support** — roadmaps using markdown tables (`| S01 | Title | Risk | Status |`) are now parsed correctly. (#1741)
+- **Prose header fallback** — when `## Slices` contains H3 headers instead of checkboxes, the prose parser is invoked as a fallback. (#1744)
+- **Completion marker detection** — prose headers with `✓` or `(Complete)` markers are correctly identified as done. (#1816)
+- **Zero-slice stub handling** — stub roadmaps from `/gsd queue` return `pre-planning` instead of `blocked`. (#1826)
+- **Immediate roadmap fix** — roadmap checkbox and UAT stub are fixed immediately after last task instead of deferring to `complete-slice`. (#1819)
+
+### State & Git Improvements
+
+- **CONTEXT-DRAFT.md fallback** — `depends_on` is read from CONTEXT-DRAFT.md when CONTEXT.md doesn't exist, preventing draft milestones from being promoted past dependency constraints. (#1743)
+- **Unborn branch support** — `nativeBranchExists` handles repos with zero commits, preventing dispatch deadlock on new repos. (#1815)
+- **Ghost milestone detection** — empty `.gsd/milestones/` directories are skipped instead of crashing `deriveState()`. (#1817)
+- **Default branch detection** — milestone merge detects `master` vs `main` instead of hardcoding. (#1669)
+- **Milestone title extraction** — titles are pulled from CONTEXT.md headings when no ROADMAP exists. (#1729)
+
+### Windows & Platform
+
+- **Windows path handling** — 8.3 short paths, `pathToFileURL` for ESM imports, and `realpathSync.native` fixes across the test suite and verification gate. (#1804)
+- **DEP0190 fix** — `spawnSync` deprecation warning eliminated by passing commands to shell explicitly. (#1827)
+- **Web build skip on Windows** — Next.js webpack EPERM errors on system directories are handled gracefully.
+
+### Developer Experience
+
+- **@ file finder fix** — typing `@` no longer freezes the TUI. The fix adds debounce, dedup, and empty-query short-circuit. (#1832)
+- **Tool-call loop guard** — detects and breaks infinite tool-call loops within a single unit, preventing stack overflow. (#1801)
+- **Completion deferral fix** — roadmap checkbox and UAT stub are fixed at task level, closing the fragile handoff window between last task and `complete-slice`. (#1819)
+
+See the full [Changelog](./CHANGELOG.md) for all 70+ fixes in this release.
+
+### Previous highlights (v2.39–v2.40)
+
+- **GitHub sync extension** — auto-sync milestones to GitHub Issues, PRs, and Milestones
+- **Skill tool resolution** — skills auto-activate in dispatched prompts
+- **Health check phase 2** — real-time doctor issues in dashboard and visualizer
+- **Forensics upgrade** — full-access GSD debugger with anomaly detection
+- **Pipeline decomposition** — auto-loop rewritten as linear phase pipeline
+- **Sliding-window stuck detection** — pattern-aware, fewer false positives
+- **Data-loss recovery** — automatic detection and recovery from v2.30–v2.38 migration issues
 
 ---
 
@@ -50,7 +103,8 @@ Full documentation is available in the [`docs/`](./docs/) directory:
 - **[Getting Started](./docs/getting-started.md)** — install, first run, basic usage
 - **[Auto Mode](./docs/auto-mode.md)** — autonomous execution deep-dive
 - **[Configuration](./docs/configuration.md)** — all preferences, models, git, and hooks
-- **[Token Optimization](./docs/token-optimization.md)** — profiles, context compression, complexity routing (v2.17)
+- **[Custom Models](./docs/custom-models.md)** — add custom providers (Ollama, vLLM, LM Studio, proxies)
+- **[Token Optimization](./docs/token-optimization.md)** — profiles, context compression, complexity routing
 - **[Cost Management](./docs/cost-management.md)** — budgets, tracking, projections
 - **[Git Strategy](./docs/git-strategy.md)** — worktree isolation, branching, merge behavior
 - **[Parallel Orchestration](./docs/parallel-orchestration.md)** — run multiple milestones simultaneously
@@ -62,6 +116,9 @@ Full documentation is available in the [`docs/`](./docs/) directory:
 - **[CI/CD Pipeline](./docs/ci-cd-pipeline.md)** — three-stage promotion pipeline (Dev → Test → Prod)
 - **[VS Code Extension](./vscode-extension/README.md)** — chat participant, sidebar dashboard, RPC integration
 - **[Visualizer](./docs/visualizer.md)** — workflow visualizer with stats and discussion status
+- **[Remote Questions](./docs/remote-questions.md)** — route decisions to Slack or Discord when human input is needed
+- **[Dynamic Model Routing](./docs/dynamic-model-routing.md)** — complexity-based model selection and budget pressure
+- **[Pipeline Simplification (ADR-003)](./docs/ADR-003-pipeline-simplification.md)** — merged research into planning, mechanical completion
 - **[Migration from v1](./docs/migration.md)** — `.planning` → `.gsd` migration
 
 ---
@@ -138,12 +195,12 @@ The iron rule: **a task must fit in one context window.** If it can't, it's two 
 Each slice flows through phases automatically:
 
 ```
-Research → Plan → Execute (per task) → Complete → Reassess Roadmap → Next Slice
-                                                                      ↓ (all slices done)
-                                                              Validate Milestone → Complete Milestone
+Plan (with integrated research) → Execute (per task) → Complete → Reassess Roadmap → Next Slice
+                                                                                      ↓ (all slices done)
+                                                                              Validate Milestone → Complete Milestone
 ```
 
-**Research** scouts the codebase and relevant docs. **Plan** decomposes the slice into tasks with must-haves (mechanically verifiable outcomes). **Execute** runs each task in a fresh context window with only the relevant files pre-loaded — then runs configured verification commands (lint, test, etc.) with auto-fix retries. **Complete** writes the summary, UAT script, marks the roadmap, and commits with meaningful messages derived from task summaries. **Reassess** checks if the roadmap still makes sense given what was learned. **Validate Milestone** runs a reconciliation gate after all slices complete — comparing roadmap success criteria against actual results before sealing the milestone.
+**Plan** scouts the codebase, researches relevant docs, and decomposes the slice into tasks with must-haves (mechanically verifiable outcomes). **Execute** runs each task in a fresh context window with only the relevant files pre-loaded — then runs configured verification commands (lint, test, etc.) with auto-fix retries. **Complete** writes the summary, UAT script, marks the roadmap, and commits with meaningful messages derived from task summaries. **Reassess** checks if the roadmap still makes sense given what was learned. **Validate Milestone** runs a reconciliation gate after all slices complete — comparing roadmap success criteria against actual results before sealing the milestone.
 
 ### `/gsd auto` — The Main Event
 
@@ -167,7 +224,7 @@ Auto mode is a state machine driven by files on disk. It reads `.gsd/STATE.md`, 
 
 5. **Provider error recovery** — Transient provider errors (rate limits, 500/503 server errors, overloaded) auto-resume after a delay. Permanent errors (auth, billing) pause for manual review. The model fallback chain retries transient network errors before switching models.
 
-6. **Stuck detection** — If the same unit dispatches twice (the LLM didn't produce the expected artifact), it retries once with a deep diagnostic. If it fails again, auto mode stops with the exact file it expected.
+6. **Stuck detection** — A sliding-window detector identifies repeated dispatch patterns (including multi-unit cycles). On detection, it retries once with a deep diagnostic. If it fails again, auto mode stops with the exact file it expected.
 
 7. **Timeout supervision** — Soft timeout warns the LLM to wrap up. Idle watchdog detects stalls. Hard timeout pauses auto mode. Recovery steering nudges the LLM to finish durable output before giving up.
 
@@ -175,7 +232,7 @@ Auto mode is a state machine driven by files on disk. It reads `.gsd/STATE.md`, 
 
 9. **Adaptive replanning** — After each slice completes, the roadmap is reassessed. If the work revealed new information that changes the plan, slices are reordered, added, or removed before continuing.
 
-10. **Verification enforcement** — Configure shell commands (`npm run lint`, `npm run test`, etc.) that run automatically after task execution. Failures trigger auto-fix retries before advancing. Configurable via `verification_commands`, `verification_auto_fix`, and `verification_max_retries` preferences.
+10. **Verification enforcement** — Configure shell commands (`npm run lint`, `npm run test`, etc.) that run automatically after task execution. Failures trigger auto-fix retries before advancing. Auto-discovered checks from `package.json` run in advisory mode — they log warnings but don't block on pre-existing errors. Configurable via `verification_commands`, `verification_auto_fix`, and `verification_max_retries` preferences.
 
 11. **Milestone validation** — After all slices complete, a `validate-milestone` gate compares roadmap success criteria against actual results before sealing the milestone.
 
@@ -303,10 +360,11 @@ On first run, GSD launches a branded setup wizard that walks you through LLM pro
 | `/gsd migrate`          | Migrate a v1 `.planning` directory to `.gsd` format             |
 | `/gsd help`             | Categorized command reference for all GSD subcommands           |
 | `/gsd mode`             | Switch workflow mode (solo/team) with coordinated defaults      |
-| `/gsd forensics`        | Post-mortem investigation of auto-mode failures                 |
+| `/gsd forensics`        | Full-access GSD debugger for auto-mode failure investigation    |
 | `/gsd cleanup`          | Archive phase directories from completed milestones             |
-| `/gsd doctor`           | Runtime health checks with auto-fix for common issues           |
+| `/gsd doctor`           | Runtime health checks — issues surface across widget, visualizer, and reports |
 | `/gsd keys`             | API key manager — list, add, remove, test, rotate, doctor       |
+| `/gsd logs`             | Browse activity, debug, and metrics logs                        |
 | `/gsd export --html`    | Generate HTML report for current or completed milestone         |
 | `/worktree` (`/wt`)     | Git worktree lifecycle — create, switch, merge, remove          |
 | `/voice`                | Toggle real-time speech-to-text (macOS, Linux)                  |
@@ -322,6 +380,7 @@ On first run, GSD launches a branded setup wizard that walks you through LLM pro
 | `gsd headless [cmd]`    | Run `/gsd` commands without TUI (CI, cron, scripts)             |
 | `gsd headless query`    | Instant JSON snapshot — state, next dispatch, costs (no LLM)    |
 | `gsd --continue` (`-c`) | Resume the most recent session for the current directory        |
+| `gsd --worktree` (`-w`) | Launch an isolated worktree session for the active milestone    |
 | `gsd sessions`          | Interactive session picker — browse and resume any saved session |
 
 ---
@@ -336,6 +395,8 @@ Every dispatch is carefully constructed. The LLM never wastes tool calls on orie
 | ------------------ | --------------------------------------------------------------- |
 | `PROJECT.md`       | Living doc — what the project is right now                      |
 | `DECISIONS.md`     | Append-only register of architectural decisions                 |
+| `KNOWLEDGE.md`     | Cross-session rules, patterns, and lessons learned              |
+| `RUNTIME.md`       | Runtime context — API endpoints, env vars, services (v2.39)     |
 | `STATE.md`         | Quick-glance dashboard — always read first                      |
 | `M001-ROADMAP.md`  | Milestone plan with slice checkboxes, risk levels, dependencies |
 | `M001-CONTEXT.md`  | User decisions from the discuss phase                           |
@@ -447,18 +508,21 @@ auto_report: true
 | `verification_max_retries` | Max retries for verification failures (default: 2)                                               |
 | `require_slice_discussion` | Pause auto-mode before each slice for human discussion review                                    |
 | `auto_report`          | Auto-generate HTML reports after milestone completion (default: true)                                 |
+| `searchExcludeDirs`    | Directories to exclude from `@` file autocomplete (e.g., `["node_modules", ".git", "dist"]`)          |
 
 ### Agent Instructions
 
-Create an `agent-instructions.md` file in your project root to inject persistent per-project behavioral guidance into every agent session. This file is loaded automatically and provides project-specific context the LLM should always have — coding standards, architectural decisions, domain terminology, or workflow preferences.
+Place an `AGENTS.md` file in any directory to provide persistent behavioral guidance for that scope. Pi core loads `AGENTS.md` automatically (with `CLAUDE.md` as a fallback) at both user and project levels. Use these files for coding standards, architectural decisions, domain terminology, or workflow preferences.
+
+> **Note:** The legacy `agent-instructions.md` format (`~/.gsd/agent-instructions.md` and `.gsd/agent-instructions.md`) is deprecated and no longer loaded. Migrate any existing instructions to `AGENTS.md` or `CLAUDE.md`.
 
 ### Debug Mode
 
 Start GSD with `gsd --debug` to enable structured JSONL diagnostic logging. Debug logs capture dispatch decisions, state transitions, and timing data for troubleshooting auto-mode issues.
 
-### Token Optimization (v2.17)
+### Token Optimization
 
-GSD 2.17 introduced a coordinated token optimization system that reduces usage by 40-60% on cost-sensitive workloads. Set a single preference to coordinate model selection, phase skipping, and context compression:
+GSD includes a coordinated token optimization system that reduces usage by 40-60% on cost-sensitive workloads. Set a single preference to coordinate model selection, phase skipping, and context compression:
 
 ```yaml
 token_profile: budget      # or balanced (default), quality
@@ -478,7 +542,7 @@ See the full [Token Optimization Guide](./docs/token-optimization.md) for detail
 
 ### Bundled Tools
 
-GSD ships with 14 extensions, all loaded automatically:
+GSD ships with 19 extensions, all loaded automatically:
 
 | Extension              | What it provides                                                                                                       |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
@@ -488,14 +552,19 @@ GSD ships with 14 extensions, all loaded automatically:
 | **Google Search**      | Gemini-powered web search with AI-synthesized answers                                                                  |
 | **Context7**           | Up-to-date library/framework documentation                                                                             |
 | **Background Shell**   | Long-running process management with readiness detection                                                               |
+| **Async Jobs**         | Background bash commands with job tracking and cancellation                                                            |
 | **Subagent**           | Delegated tasks with isolated context windows                                                                          |
+| **GitHub**             | Full-suite GitHub issues and PR management via `/gh` command                                                           |
 | **Mac Tools**          | macOS native app automation via Accessibility APIs                                                                     |
-| **MCPorter**           | Lazy on-demand MCP server integration                                                                                  |
+| **MCP Client**         | Native MCP server integration via @modelcontextprotocol/sdk                                                            |
 | **Voice**              | Real-time speech-to-text transcription (macOS, Linux — Ubuntu 22.04+)                                                  |
 | **Slash Commands**     | Custom command creation                                                                                                |
-| **LSP**                | Language Server Protocol integration — diagnostics, go-to-definition, references, hover, symbols, rename, code actions |
 | **Ask User Questions** | Structured user input with single/multi-select                                                                         |
 | **Secure Env Collect** | Masked secret collection without manual .env editing                                                                   |
+| **Remote Questions**   | Route decisions to Slack/Discord when human input is needed in headless/CI mode                                         |
+| **Universal Config**   | Discover and import MCP servers and rules from other AI coding tools                                                    |
+| **AWS Auth**           | Automatic Bedrock credential refresh for AWS-hosted models                                                              |
+| **TTSR**               | Tool-use type-safe runtime validation                                                                                   |
 
 ### Bundled Agents
 
@@ -580,7 +649,7 @@ gsd (CLI binary)
           ├─ resource-loader.ts  Syncs bundled extensions + agents to ~/.gsd/agent/
           └─ src/resources/
               ├─ extensions/gsd/    Core GSD extension (auto, state, commands, ...)
-              ├─ extensions/...     12 supporting extensions
+              ├─ extensions/...     18 supporting extensions
               ├─ agents/            scout, researcher, worker
               ├─ AGENTS.md          Agent routing instructions
               └─ GSD-WORKFLOW.md    Manual bootstrap protocol
@@ -597,7 +666,7 @@ gsd (CLI binary)
 
 ## Requirements
 
-- **Node.js** ≥ 20.6.0 (22+ recommended)
+- **Node.js** ≥ 22.0.0 (24 LTS recommended)
 - **An LLM provider** — any of the 20+ supported providers (see [Use Any Model](#use-any-model))
 - **Git** — initialized automatically if missing
 
@@ -617,7 +686,7 @@ GSD isn't locked to one provider. It runs on the [Pi SDK](https://github.com/bad
 
 ### Built-in Providers
 
-Anthropic, OpenAI, Google (Gemini), OpenRouter, GitHub Copilot, Amazon Bedrock, Azure OpenAI, Google Vertex, Groq, Cerebras, Mistral, xAI, HuggingFace, Vercel AI Gateway, and more.
+Anthropic, Anthropic (Vertex AI), OpenAI, Google (Gemini), OpenRouter, GitHub Copilot, Amazon Bedrock, Azure OpenAI, Google Vertex, Groq, Cerebras, Mistral, xAI, HuggingFace, Vercel AI Gateway, and more.
 
 ### OAuth / Max Plans
 

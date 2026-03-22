@@ -76,6 +76,90 @@ This opens an interactive wizard showing which keys are configured and which are
 4. Environment variables (`export BRAVE_API_KEY=...`) take precedence over saved keys
 5. Anthropic models don't need Brave/Tavily — they have built-in web search
 
+## MCP Servers
+
+GSD can connect to external MCP servers configured in project files. This is useful for local tools, internal APIs, self-hosted services, or integrations that aren't built in as native GSD extensions.
+
+### Config file locations
+
+GSD reads MCP client configuration from these project-local paths:
+
+- `.mcp.json`
+- `.gsd/mcp.json`
+
+If both files exist, server names are merged and the first definition found wins. Use:
+
+- `.mcp.json` for repo-shared MCP configuration you may want to commit
+- `.gsd/mcp.json` for local-only MCP configuration you do **not** want to share
+
+### Supported transports
+
+| Transport | Config shape | Use when |
+|-----------|--------------|----------|
+| `stdio` | `command` + optional `args`, `env`, `cwd` | Launching a local MCP server process |
+| `http` | `url` | Connecting to an already-running MCP server over HTTP |
+
+### Example: stdio server
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "type": "stdio",
+      "command": "/absolute/path/to/python3",
+      "args": ["/absolute/path/to/server.py"],
+      "env": {
+        "API_URL": "http://localhost:8000"
+      }
+    }
+  }
+}
+```
+
+### Example: HTTP server
+
+```json
+{
+  "mcpServers": {
+    "my-http-server": {
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
+
+### Verifying a server
+
+After adding config, verify it from a GSD session:
+
+```text
+mcp_servers
+mcp_discover(server="my-server")
+mcp_call(server="my-server", tool="<tool_name>", args={...})
+```
+
+Recommended verification order:
+
+1. `mcp_servers` — confirms GSD can see the config file and parse the server entry
+2. `mcp_discover` — confirms the server process starts and responds to `tools/list`
+3. `mcp_call` — confirms at least one real tool invocation works
+
+### Notes
+
+- Use absolute paths for local executables and scripts when possible.
+- For `stdio` servers, prefer setting required environment variables directly in the MCP config instead of relying on an interactive shell profile.
+- If a server is team-shared and safe to commit, `.mcp.json` is usually the better home.
+- If a server depends on machine-local paths, personal services, or local-only secrets, prefer `.gsd/mcp.json`.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GSD_HOME` | `~/.gsd` | Global GSD directory. All paths derive from this unless individually overridden. Affects preferences, skills, sessions, and per-project state. (v2.39) |
+| `GSD_PROJECT_ID` | (auto-hash) | Override the automatic project identity hash. Per-project state goes to `$GSD_HOME/projects/<GSD_PROJECT_ID>/` instead of the computed hash. Useful for CI/CD or sharing state across clones of the same repo. (v2.39) |
+| `GSD_STATE_DIR` | `$GSD_HOME` | Per-project state root. Controls where `projects/<repo-hash>/` directories are created. Takes precedence over `GSD_HOME` for project state. |
+| `GSD_CODING_AGENT_DIR` | `$GSD_HOME/agent` | Agent directory containing managed resources, extensions, and auth. Takes precedence over `GSD_HOME` for agent paths. |
+
 ## All Settings
 
 ### `models`
@@ -104,12 +188,34 @@ models:
 
 ### Custom Model Definitions (`models.json`)
 
-Define custom models in `~/.gsd/agent/models.json`. This lets you add models not included in the default registry — useful for self-hosted endpoints, fine-tuned models, or new releases.
+Define custom models and providers in `~/.gsd/agent/models.json`. This lets you add models not included in the default registry — useful for self-hosted endpoints (Ollama, vLLM, LM Studio), fine-tuned models, proxies, or new provider releases.
 
 GSD resolves models.json with fallback logic:
 1. `~/.gsd/agent/models.json` — primary (GSD)
 2. `~/.pi/agent/models.json` — fallback (Pi)
 3. If neither exists, creates `~/.gsd/agent/models.json`
+
+**Quick example for local models (Ollama):**
+
+```json
+{
+  "providers": {
+    "ollama": {
+      "baseUrl": "http://localhost:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "models": [
+        { "id": "llama3.1:8b" },
+        { "id": "qwen2.5-coder:7b" }
+      ]
+    }
+  }
+}
+```
+
+The file reloads each time you open `/model` — no restart needed.
+
+For full documentation including provider configuration, model overrides, OpenAI compatibility settings, and advanced examples, see the [Custom Models Guide](./custom-models.md).
 
 **With fallbacks:**
 
@@ -156,10 +262,13 @@ phases:
   skip_research: false        # skip milestone-level research
   skip_reassess: false        # skip roadmap reassessment after each slice
   skip_slice_research: true   # skip per-slice research
+  reassess_after_slice: true  # enable roadmap reassessment after each slice (required for reassessment)
   require_slice_discussion: false  # pause auto-mode before each slice for discussion
 ```
 
 These are usually set automatically by `token_profile`, but can be overridden explicitly.
+
+> **Note:** Roadmap reassessment requires `reassess_after_slice: true` to be set explicitly. Without it, reassessment is skipped regardless of `skip_reassess`.
 
 ### `skill_discovery`
 
@@ -343,6 +452,34 @@ git:
 
 If `pr_target_branch` is not set, the PR targets the `main_branch` (or auto-detected main branch). PR creation failure is non-fatal — GSD logs and continues.
 
+### `github` (v2.39)
+
+GitHub sync configuration. When enabled, GSD auto-syncs milestones, slices, and tasks to GitHub Issues, PRs, and Milestones.
+
+```yaml
+github:
+  enabled: true
+  repo: "owner/repo"              # auto-detected from git remote if omitted
+  labels: [gsd, auto-generated]   # labels applied to created issues/PRs
+  project: "Project ID"           # optional GitHub Project board
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Enable GitHub sync |
+| `repo` | string | (auto-detected) | GitHub repository in `owner/repo` format |
+| `labels` | string[] | `[]` | Labels to apply to created issues and PRs |
+| `project` | string | (none) | GitHub Project ID for project board integration |
+
+**Requirements:**
+- `gh` CLI installed and authenticated (`gh auth login`)
+- Sync mapping is persisted in `.gsd/.github-sync.json`
+- Rate-limit aware — skips sync when GitHub API rate limit is low
+
+**Commands:**
+- `/github-sync bootstrap` — initial setup and sync
+- `/github-sync status` — show sync mapping counts
+
 ### `notifications`
 
 Control what notifications GSD sends during auto mode:
@@ -468,6 +605,32 @@ custom_instructions:
 ```
 
 For project-specific knowledge (patterns, gotchas, lessons learned), use `.gsd/KNOWLEDGE.md` instead — it's injected into every agent prompt automatically. Add entries with `/gsd knowledge rule|pattern|lesson <description>`.
+
+### `RUNTIME.md` — Runtime Context (v2.39)
+
+Declare project-level runtime context in `.gsd/RUNTIME.md`. This file is inlined into task execution prompts, giving the agent accurate information about your runtime environment without relying on hallucinated paths or URLs.
+
+**Location:** `.gsd/RUNTIME.md`
+
+**Example:**
+
+```markdown
+# Runtime Context
+
+## API Endpoints
+- Main API: https://api.example.com
+- Cache: redis://localhost:6379
+
+## Environment Variables
+- DEPLOYMENT_ENV: staging
+- DB_POOL_SIZE: 20
+
+## Local Services
+- PostgreSQL: localhost:5432
+- Redis: localhost:6379
+```
+
+Use this for information that the agent needs during execution but that doesn't belong in `DECISIONS.md` (architectural) or `KNOWLEDGE.md` (patterns/rules). Common examples: API base URLs, service ports, deployment targets, and environment-specific configuration.
 
 ### `dynamic_routing`
 

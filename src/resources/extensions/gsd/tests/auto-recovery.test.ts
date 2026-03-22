@@ -11,10 +11,7 @@ import {
   diagnoseExpectedArtifact,
   buildLoopRemediationSteps,
   selfHealRuntimeRecords,
-  completedKeysPath,
-  persistCompletedKey,
-  removePersistedKey,
-  loadPersistedKeys,
+  hasImplementationArtifacts,
 } from "../auto-recovery.ts";
 import { parseRoadmap, clearParseCache } from "../files.ts";
 import { invalidateAllCaches } from "../cache.ts";
@@ -198,143 +195,6 @@ test("buildLoopRemediationSteps returns null for unknown type", () => {
     assert.equal(buildLoopRemediationSteps("unknown", "M001", base), null);
   } finally {
     cleanup(base);
-  }
-});
-
-// ─── Completed-unit key persistence ───────────────────────────────────────
-
-test("completedKeysPath returns path inside .gsd", () => {
-  const path = completedKeysPath("/project");
-  assert.ok(path.includes(".gsd"));
-  assert.ok(path.includes("completed-units.json"));
-});
-
-test("persistCompletedKey and loadPersistedKeys round-trip", () => {
-  const base = makeTmpBase();
-  try {
-    persistCompletedKey(base, "execute-task/M001/S01/T01");
-    persistCompletedKey(base, "plan-slice/M001/S02");
-
-    const keys = new Set<string>();
-    loadPersistedKeys(base, keys);
-
-    assert.ok(keys.has("execute-task/M001/S01/T01"));
-    assert.ok(keys.has("plan-slice/M001/S02"));
-    assert.equal(keys.size, 2);
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("persistCompletedKey is idempotent", () => {
-  const base = makeTmpBase();
-  try {
-    persistCompletedKey(base, "execute-task/M001/S01/T01");
-    persistCompletedKey(base, "execute-task/M001/S01/T01");
-
-    const keys = new Set<string>();
-    loadPersistedKeys(base, keys);
-    assert.equal(keys.size, 1);
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("removePersistedKey removes a key", () => {
-  const base = makeTmpBase();
-  try {
-    persistCompletedKey(base, "a");
-    persistCompletedKey(base, "b");
-    removePersistedKey(base, "a");
-
-    const keys = new Set<string>();
-    loadPersistedKeys(base, keys);
-    assert.ok(!keys.has("a"));
-    assert.ok(keys.has("b"));
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("loadPersistedKeys handles missing file gracefully", () => {
-  const base = makeTmpBase();
-  try {
-    const keys = new Set<string>();
-    assert.doesNotThrow(() => loadPersistedKeys(base, keys));
-    assert.equal(keys.size, 0);
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("removePersistedKey is safe when file doesn't exist", () => {
-  const base = makeTmpBase();
-  try {
-    assert.doesNotThrow(() => removePersistedKey(base, "nonexistent"));
-  } finally {
-    cleanup(base);
-  }
-});
-
-// ─── Dual-load across worktree boundary (#769) ───────────────────────────
-
-test("loadPersistedKeys unions keys from project root and worktree", () => {
-  // Simulate two separate .gsd directories (project root + worktree)
-  // each with a different set of completed keys. Loading from both
-  // into the same Set should produce the union.
-  const projectRoot = makeTmpBase();
-  const worktree = makeTmpBase();
-  try {
-    // Persist different keys in each location
-    persistCompletedKey(projectRoot, "execute-task/M001/S01/T01");
-    persistCompletedKey(projectRoot, "plan-slice/M001/S02");
-
-    persistCompletedKey(worktree, "execute-task/M001/S01/T02");
-    persistCompletedKey(worktree, "plan-slice/M001/S02"); // overlap
-
-    // Load from both into the same set (mimicking startup dual-load)
-    const keys = new Set<string>();
-    loadPersistedKeys(projectRoot, keys);
-    loadPersistedKeys(worktree, keys);
-
-    assert.ok(keys.has("execute-task/M001/S01/T01"), "key from project root");
-    assert.ok(keys.has("plan-slice/M001/S02"), "shared key");
-    assert.ok(keys.has("execute-task/M001/S01/T02"), "key from worktree");
-    assert.equal(keys.size, 3, "union should deduplicate overlapping keys");
-  } finally {
-    cleanup(projectRoot);
-    cleanup(worktree);
-  }
-});
-
-test("completed-units.json set-union merge produces correct result", () => {
-  // Verify that a manual set-union merge (as done in syncStateToProjectRoot)
-  // correctly merges two JSON arrays of keys.
-  const projectRoot = makeTmpBase();
-  const worktree = makeTmpBase();
-  try {
-    // Write keys to both locations
-    const prKeysFile = join(projectRoot, ".gsd", "completed-units.json");
-    const wtKeysFile = join(worktree, ".gsd", "completed-units.json");
-
-    writeFileSync(prKeysFile, JSON.stringify(["a", "b"]));
-    writeFileSync(wtKeysFile, JSON.stringify(["b", "c", "d"]));
-
-    // Perform the same merge logic used in syncStateToProjectRoot
-    const srcKeys: string[] = JSON.parse(readFileSync(wtKeysFile, "utf8"));
-    let dstKeys: string[] = [];
-    if (existsSync(prKeysFile)) {
-      dstKeys = JSON.parse(readFileSync(prKeysFile, "utf8"));
-    }
-    const merged = [...new Set([...dstKeys, ...srcKeys])];
-    writeFileSync(prKeysFile, JSON.stringify(merged, null, 2));
-
-    // Verify the merged result
-    const result: string[] = JSON.parse(readFileSync(prKeysFile, "utf8"));
-    assert.deepStrictEqual(result.sort(), ["a", "b", "c", "d"]);
-  } finally {
-    cleanup(projectRoot);
-    cleanup(worktree);
   }
 });
 
@@ -526,11 +386,96 @@ test("verifyExpectedArtifact plan-slice fails for plan with no tasks (#699)", ()
   }
 });
 
+// ─── verifyExpectedArtifact: heading-style plan tasks (#1691) ─────────────
+
+test("verifyExpectedArtifact accepts plan-slice with heading-style tasks (### T01 --)", () => {
+  const base = makeTmpBase();
+  try {
+    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+    const tasksDir = join(sliceDir, "tasks");
+    mkdirSync(tasksDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-PLAN.md"), [
+      "# S01: Test Slice",
+      "",
+      "## Tasks",
+      "",
+      "### T01 -- Implement feature",
+      "",
+      "Feature description.",
+      "",
+      "### T02 -- Write tests",
+      "",
+      "Test description.",
+    ].join("\n"));
+    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan");
+    writeFileSync(join(tasksDir, "T02-PLAN.md"), "# T02 Plan");
+    assert.strictEqual(
+      verifyExpectedArtifact("plan-slice", "M001/S01", base),
+      true,
+      "Heading-style plan with task entries should be treated as completed artifact",
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact accepts plan-slice with colon-style heading tasks (### T01:)", () => {
+  const base = makeTmpBase();
+  try {
+    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+    const tasksDir = join(sliceDir, "tasks");
+    mkdirSync(tasksDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-PLAN.md"), [
+      "# S01: Test Slice",
+      "",
+      "## Tasks",
+      "",
+      "### T01: Implement feature",
+      "",
+      "Feature description.",
+    ].join("\n"));
+    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan");
+    assert.strictEqual(
+      verifyExpectedArtifact("plan-slice", "M001/S01", base),
+      true,
+      "Colon heading-style plan should be treated as completed artifact",
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact execute-task passes for heading-style plan entry (#1691)", () => {
+  const base = makeTmpBase();
+  try {
+    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+    const tasksDir = join(sliceDir, "tasks");
+    mkdirSync(tasksDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-PLAN.md"), [
+      "# S01: Test Slice",
+      "",
+      "## Tasks",
+      "",
+      "### T01 -- Implement feature",
+      "",
+      "Feature description.",
+    ].join("\n"));
+    writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "# T01 Summary\n\nDone.");
+    assert.strictEqual(
+      verifyExpectedArtifact("execute-task", "M001/S01/T01", base),
+      true,
+      "execute-task should pass for heading-style plan entry when summary exists",
+    );
+  } finally {
+    cleanup(base);
+  }
+});
+
 // ─── selfHealRuntimeRecords — worktree base path (#769) ──────────────────
 
-test("selfHealRuntimeRecords clears stale record when artifact exists at worktree base (#769)", async () => {
-  // Simulate worktree layout: the runtime record AND the artifact both live
-  // under the worktree's .gsd/, not the main project root.
+test("selfHealRuntimeRecords clears stale dispatched records (#769)", async () => {
+  // selfHealRuntimeRecords now only clears stale dispatched records (>1h).
+  // No completedKeySet parameter — deriveState is sole authority.
   const worktreeBase = makeTmpBase();
   const mainBase = makeTmpBase();
   try {
@@ -540,10 +485,6 @@ test("selfHealRuntimeRecords clears stale record when artifact exists at worktre
     writeUnitRuntimeRecord(worktreeBase, "run-uat", "M001/S01", Date.now() - 7200_000, {
       phase: "dispatched",
     });
-
-    // Write the UAT result artifact in the worktree .gsd/milestones/
-    const uatPath = join(worktreeBase, ".gsd", "milestones", "M001", "slices", "S01", "S01-UAT-RESULT.md");
-    writeFileSync(uatPath, "---\nresult: pass\n---\n# UAT Result\nAll tests passed.\n");
 
     // Verify the runtime record exists before heal
     const before = readUnitRuntimeRecord(worktreeBase, "run-uat", "M001/S01");
@@ -555,35 +496,59 @@ test("selfHealRuntimeRecords clears stale record when artifact exists at worktre
       ui: { notify: (msg: string) => { notifications.push(msg); } },
     } as any;
 
-    // Call selfHeal with worktreeBase — this is the fix: using the worktree path
-    // so both the runtime record and artifact are found
-    const completedKeys = new Set<string>();
-    await selfHealRuntimeRecords(worktreeBase, mockCtx, completedKeys);
+    // Call selfHeal with worktreeBase — should clear the stale record
+    await selfHealRuntimeRecords(worktreeBase, mockCtx);
 
     // The stale record should be cleared
     const after = readUnitRuntimeRecord(worktreeBase, "run-uat", "M001/S01");
     assert.equal(after, null, "runtime record should be cleared after heal");
-
-    // The completion key should be persisted
-    assert.ok(completedKeys.has("run-uat/M001/S01"), "completion key should be added");
     assert.ok(notifications.some(n => n.includes("Self-heal")), "should emit self-heal notification");
 
-    // Now verify that calling with mainBase does NOT find/clear anything (the old bug)
-    // Write a stale record at mainBase but NO artifact there
+    // Write a stale record at mainBase
     writeUnitRuntimeRecord(mainBase, "run-uat", "M001/S01", Date.now() - 7200_000, {
       phase: "dispatched",
     });
-    const mainKeys = new Set<string>();
-    await selfHealRuntimeRecords(mainBase, mockCtx, mainKeys);
+    await selfHealRuntimeRecords(mainBase, mockCtx);
 
-    // The record at mainBase should be cleared by the stale timeout (>1h),
-    // but the completion key should NOT be set (artifact doesn't exist at mainBase)
+    // The record at mainBase should also be cleared by the stale timeout (>1h)
     const afterMain = readUnitRuntimeRecord(mainBase, "run-uat", "M001/S01");
     assert.equal(afterMain, null, "stale record at main base should be cleared by timeout");
-    assert.ok(!mainKeys.has("run-uat/M001/S01"), "completion key should NOT be set when artifact is missing");
   } finally {
     cleanup(worktreeBase);
     cleanup(mainBase);
+  }
+});
+
+// ─── #1625: selfHealRuntimeRecords on resume clears paused-session leftovers ──
+
+test("selfHealRuntimeRecords clears recently-paused dispatched records on resume (#1625)", async () => {
+  // When pauseAuto closes out a unit but clearUnitRuntimeRecord silently fails
+  // (e.g. permission error), selfHealRuntimeRecords on resume should still
+  // clean up stale dispatched records that are >1h old.
+  const base = makeTmpBase();
+  try {
+    const { writeUnitRuntimeRecord, readUnitRuntimeRecord } = await import("../unit-runtime.ts");
+
+    // Simulate a record left behind after a pause — aged >1h to be considered stale
+    writeUnitRuntimeRecord(base, "execute-task", "M001/S01/T01", Date.now() - 3700_000, {
+      phase: "dispatched",
+    });
+
+    const before = readUnitRuntimeRecord(base, "execute-task", "M001/S01/T01");
+    assert.ok(before, "dispatched record should exist before resume heal");
+    assert.equal(before!.phase, "dispatched");
+
+    const notifications: string[] = [];
+    const mockCtx = {
+      ui: { notify: (msg: string) => { notifications.push(msg); } },
+    } as any;
+
+    await selfHealRuntimeRecords(base, mockCtx);
+
+    const after = readUnitRuntimeRecord(base, "execute-task", "M001/S01/T01");
+    assert.equal(after, null, "stale dispatched record should be cleared on resume (#1625)");
+  } finally {
+    cleanup(base);
   }
 });
 
@@ -634,6 +599,109 @@ test("#793: invalidateAllCaches clears all caches so deriveState sees fresh disk
     // do not throw (they should be no-ops after invalidateAllCaches already cleared them)
     clearParseCache(); // no-op, but should not throw
     assert.ok(true, "clearParseCache after invalidateAllCaches is safe");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ─── hasImplementationArtifacts (#1703) ───────────────────────────────────
+
+import { execFileSync } from "node:child_process";
+
+function makeGitBase(): string {
+  const base = join(tmpdir(), `gsd-test-git-${randomUUID()}`);
+  mkdirSync(base, { recursive: true });
+  execFileSync("git", ["init", "--initial-branch=main"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: base, stdio: "ignore" });
+  // Create initial commit so HEAD exists
+  writeFileSync(join(base, ".gitkeep"), "");
+  execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: base, stdio: "ignore" });
+  return base;
+}
+
+test("hasImplementationArtifacts returns false when only .gsd/ files committed (#1703)", () => {
+  const base = makeGitBase();
+  try {
+    // Create a feature branch and commit only .gsd/ files
+    execFileSync("git", ["checkout", "-b", "feat/test-milestone"], { cwd: base, stdio: "ignore" });
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# Roadmap");
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Summary");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "chore: add plan files"], { cwd: base, stdio: "ignore" });
+
+    const result = hasImplementationArtifacts(base);
+    assert.equal(result, false, "should return false when only .gsd/ files were committed");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("hasImplementationArtifacts returns true when implementation files committed (#1703)", () => {
+  const base = makeGitBase();
+  try {
+    // Create a feature branch with both .gsd/ and implementation files
+    execFileSync("git", ["checkout", "-b", "feat/test-impl"], { cwd: base, stdio: "ignore" });
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# Roadmap");
+    mkdirSync(join(base, "src"), { recursive: true });
+    writeFileSync(join(base, "src", "feature.ts"), "export function feature() {}");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: add feature"], { cwd: base, stdio: "ignore" });
+
+    const result = hasImplementationArtifacts(base);
+    assert.equal(result, true, "should return true when implementation files are present");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("hasImplementationArtifacts returns true on non-git directory (fail-open)", () => {
+  const base = join(tmpdir(), `gsd-test-nogit-${randomUUID()}`);
+  mkdirSync(base, { recursive: true });
+  try {
+    const result = hasImplementationArtifacts(base);
+    assert.equal(result, true, "should return true (fail-open) in non-git directory");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ─── verifyExpectedArtifact: complete-milestone requires impl artifacts (#1703) ──
+
+test("verifyExpectedArtifact complete-milestone fails with only .gsd/ files (#1703)", () => {
+  const base = makeGitBase();
+  try {
+    // Create feature branch with only .gsd/ files
+    execFileSync("git", ["checkout", "-b", "feat/ms-only-gsd"], { cwd: base, stdio: "ignore" });
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\nDone.");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "chore: milestone plan files"], { cwd: base, stdio: "ignore" });
+
+    const result = verifyExpectedArtifact("complete-milestone", "M001", base);
+    assert.equal(result, false, "complete-milestone should fail verification when only .gsd/ files present");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)", () => {
+  const base = makeGitBase();
+  try {
+    // Create feature branch with implementation files AND milestone summary
+    execFileSync("git", ["checkout", "-b", "feat/ms-with-impl"], { cwd: base, stdio: "ignore" });
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"), "# Milestone Summary\nDone.");
+    mkdirSync(join(base, "src"), { recursive: true });
+    writeFileSync(join(base, "src", "app.ts"), "console.log('hello');");
+    execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: implementation"], { cwd: base, stdio: "ignore" });
+
+    const result = verifyExpectedArtifact("complete-milestone", "M001", base);
+    assert.equal(result, true, "complete-milestone should pass verification with implementation files");
   } finally {
     cleanup(base);
   }

@@ -1,10 +1,12 @@
 import { DefaultResourceLoader } from '@gsd/pi-coding-agent'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { compareSemver } from './update-check.js'
 import { discoverExtensionEntryPaths } from './extension-discovery.js'
+import { loadRegistry, readManifestFromEntryPath, isExtensionEnabled, ensureRegistryEntries } from './extension-registry.js'
 
 // Resolve resources directory — prefer dist/resources/ (stable, set at build time)
 // over src/resources/ (live working tree, changes with git branch).
@@ -17,20 +19,34 @@ import { discoverExtensionEntryPaths } from './extension-discovery.js'
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const distResources = join(packageRoot, 'dist', 'resources')
 const srcResources = join(packageRoot, 'src', 'resources')
-const resourcesDir = existsSync(distResources) ? distResources : srcResources
+// Use dist/resources only if it has the full expected structure.
+// A partial build (tsc without copy-resources) creates dist/resources/extensions/
+// but not agents/ or skills/, causing initResources to sync from an incomplete source.
+const resourcesDir = (existsSync(distResources) && existsSync(join(distResources, 'agents')))
+  ? distResources
+  : srcResources
 const bundledExtensionsDir = join(resourcesDir, 'extensions')
 const resourceVersionManifestName = 'managed-resources.json'
 
 interface ManagedResourceManifest {
   gsdVersion: string
   syncedAt?: number
+  /** Content fingerprint of bundled resources — detects same-version content changes. */
+  contentHash?: string
+  /**
+   * Root-level files installed in extensions/ by this GSD version.
+   * Used on the next upgrade to detect and prune files that were removed or
+   * moved into a subdirectory, preventing orphaned non-extension files from
+   * causing extension load errors.
+   */
+  installedExtensionRootFiles?: string[]
 }
 
 export { discoverExtensionEntryPaths } from './extension-discovery.js'
 
-function getExtensionKey(entryPath: string, extensionsDir: string): string {
+export function getExtensionKey(entryPath: string, extensionsDir: string): string {
   const relPath = relative(extensionsDir, entryPath)
-  return relPath.split(/[\\/]/)[0]
+  return relPath.split(/[\\/]/)[0].replace(/\.(?:ts|js)$/, '')
 }
 
 function getManagedResourceManifestPath(agentDir: string): string {
@@ -51,7 +67,23 @@ function getBundledGsdVersion(): string {
 }
 
 function writeManagedResourceManifest(agentDir: string): void {
-  const manifest: ManagedResourceManifest = { gsdVersion: getBundledGsdVersion(), syncedAt: Date.now() }
+  // Record root-level files currently in the bundled extensions source so that
+  // future upgrades can detect and prune any that get removed or moved.
+  let installedExtensionRootFiles: string[] = []
+  try {
+    if (existsSync(bundledExtensionsDir)) {
+      installedExtensionRootFiles = readdirSync(bundledExtensionsDir, { withFileTypes: true })
+        .filter(e => e.isFile())
+        .map(e => e.name)
+    }
+  } catch { /* non-fatal */ }
+
+  const manifest: ManagedResourceManifest = {
+    gsdVersion: getBundledGsdVersion(),
+    syncedAt: Date.now(),
+    contentHash: computeResourceFingerprint(),
+    installedExtensionRootFiles,
+  }
   writeFileSync(getManagedResourceManifestPath(agentDir), JSON.stringify(manifest))
 }
 
@@ -61,6 +93,44 @@ export function readManagedResourceVersion(agentDir: string): string | null {
     return typeof manifest?.gsdVersion === 'string' ? manifest.gsdVersion : null
   } catch {
     return null
+  }
+}
+
+function readManagedResourceManifest(agentDir: string): ManagedResourceManifest | null {
+  try {
+    return JSON.parse(readFileSync(getManagedResourceManifestPath(agentDir), 'utf-8')) as ManagedResourceManifest
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Computes a lightweight content fingerprint of the bundled resources directory.
+ *
+ * Walks all files under resourcesDir and hashes their relative paths + sizes.
+ * This catches same-version content changes (npm link dev workflow, hotfixes
+ * within a release) without the cost of reading every file's contents.
+ *
+ * ~1ms for a typical resources tree (~100 files) — just stat calls, no reads.
+ */
+function computeResourceFingerprint(): string {
+  const entries: string[] = []
+  collectFileEntries(resourcesDir, resourcesDir, entries)
+  entries.sort()
+  return createHash('sha256').update(entries.join('\n')).digest('hex').slice(0, 16)
+}
+
+function collectFileEntries(dir: string, root: string, out: string[]): void {
+  if (!existsSync(dir)) return
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      collectFileEntries(fullPath, root, out)
+    } else {
+      const rel = relative(root, fullPath)
+      const size = statSync(fullPath).size
+      out.push(`${rel}:${size}`)
+    }
   }
 }
 
@@ -87,7 +157,12 @@ export function getNewerManagedResourceVersion(agentDir: string, currentVersion:
 function makeTreeWritable(dirPath: string): void {
   if (!existsSync(dirPath)) return
 
-  const stats = statSync(dirPath)
+  // Use lstatSync to avoid following symlinks into immutable filesystems
+  // (e.g., Nix store on NixOS/nix-darwin). Symlinks don't carry their own
+  // permissions and their targets may be read-only by design (#1298).
+  const stats = lstatSync(dirPath)
+  if (stats.isSymbolicLink()) return
+
   const isDir = stats.isDirectory()
   const currentMode = stats.mode & 0o777
 
@@ -98,7 +173,11 @@ function makeTreeWritable(dirPath: string): void {
   }
 
   if (newMode !== currentMode) {
-    chmodSync(dirPath, newMode)
+    try {
+      chmodSync(dirPath, newMode)
+    } catch {
+      // Non-fatal — may fail on read-only filesystems or insufficient permissions
+    }
   }
 
   if (isDir) {
@@ -121,15 +200,146 @@ function makeTreeWritable(dirPath: string): void {
 function syncResourceDir(srcDir: string, destDir: string): void {
   makeTreeWritable(destDir)
   if (existsSync(srcDir)) {
+    pruneStaleSiblingFiles(srcDir, destDir)
     for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
         const target = join(destDir, entry.name)
         if (existsSync(target)) rmSync(target, { recursive: true, force: true })
       }
     }
-    cpSync(srcDir, destDir, { recursive: true, force: true })
+    try {
+      cpSync(srcDir, destDir, { recursive: true, force: true })
+    } catch {
+      // Fallback for Windows paths with non-ASCII characters where cpSync
+      // fails with the \\?\ extended-length prefix (#1178).
+      copyDirRecursive(srcDir, destDir)
+    }
     makeTreeWritable(destDir)
   }
+}
+
+function pruneStaleSiblingFiles(srcDir: string, destDir: string): void {
+  if (!existsSync(destDir)) return
+
+  const sourceFiles = new Set(
+    readdirSync(srcDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name),
+  )
+
+  for (const entry of readdirSync(destDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue
+    if (sourceFiles.has(entry.name)) continue
+
+    const sourceJsName = entry.name.replace(/\.ts$/, '.js')
+    const sourceTsName = entry.name.replace(/\.js$/, '.ts')
+    if (sourceFiles.has(sourceJsName) || sourceFiles.has(sourceTsName)) {
+      rmSync(join(destDir, entry.name), { force: true })
+    }
+  }
+}
+
+/**
+ * Recursive directory copy using copyFileSync — workaround for cpSync failures
+ * on Windows paths containing non-ASCII characters (#1178).
+ */
+function copyDirRecursive(src: string, dest: string): void {
+  mkdirSync(dest, { recursive: true })
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const srcPath = join(src, entry.name)
+    const destPath = join(dest, entry.name)
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath)
+    } else {
+      copyFileSync(srcPath, destPath)
+    }
+  }
+}
+
+/**
+ * Creates (or updates) a symlink at agentDir/node_modules pointing to GSD's
+ * own node_modules directory.
+ *
+ * Native ESM `import()` ignores NODE_PATH — it resolves packages by walking
+ * up the directory tree from the importing file. Extension files synced to
+ * ~/.gsd/agent/extensions/ have no ancestor node_modules, so imports of
+ * @gsd/* packages fail. The symlink makes Node's standard resolution find
+ * them without requiring every call site to use jiti.
+ */
+function ensureNodeModulesSymlink(agentDir: string): void {
+  const agentNodeModules = join(agentDir, 'node_modules')
+  const gsdNodeModules = join(packageRoot, 'node_modules')
+
+  try {
+    const stat = lstatSync(agentNodeModules)
+
+    if (stat.isSymbolicLink()) {
+      const existing = readlinkSync(agentNodeModules)
+      // Symlink exists — verify it points to the correct, existing target
+      if (existing === gsdNodeModules && existsSync(agentNodeModules)) return  // correct and target exists
+      // Stale or wrong target — remove and recreate
+      unlinkSync(agentNodeModules)
+    } else {
+      // Real directory (not a symlink) is blocking — remove it
+      rmSync(agentNodeModules, { recursive: true, force: true })
+    }
+  } catch {
+    // lstatSync throws if path doesn't exist — that's fine, we'll create below
+  }
+
+  try {
+    symlinkSync(gsdNodeModules, agentNodeModules, 'junction')
+  } catch (err) {
+    // This failure makes GSD non-functional — extensions can't resolve @gsd/* packages
+    console.error(`[gsd] WARN: Failed to symlink ${agentNodeModules} → ${gsdNodeModules}: ${err instanceof Error ? err.message : err}`)
+  }
+}
+
+/**
+ * Prune root-level extension files that were installed by a previous GSD version
+ * but have since been removed or relocated to a subdirectory.
+ *
+ * Two strategies:
+ * 1. Manifest-based (preferred): the manifest records which root files were installed
+ *    last time; any that are no longer in the current bundle are deleted.
+ * 2. Known-stale fallback: for upgrades from versions before manifest tracking,
+ *    explicitly delete files known to have been moved (e.g. env-utils.js → gsd/).
+ */
+function pruneRemovedBundledExtensions(
+  manifest: ManagedResourceManifest | null,
+  agentDir: string,
+): void {
+  const extensionsDir = join(agentDir, 'extensions')
+  if (!existsSync(extensionsDir)) return
+
+  // Current bundled root-level files (what the new version provides)
+  const currentSourceFiles = new Set<string>()
+  try {
+    if (existsSync(bundledExtensionsDir)) {
+      for (const e of readdirSync(bundledExtensionsDir, { withFileTypes: true })) {
+        if (e.isFile()) currentSourceFiles.add(e.name)
+      }
+    }
+  } catch { /* non-fatal */ }
+
+  const removeIfStale = (fileName: string) => {
+    if (currentSourceFiles.has(fileName)) return  // still in bundle, not stale
+    const stale = join(extensionsDir, fileName)
+    try { if (existsSync(stale)) rmSync(stale, { force: true }) } catch { /* non-fatal */ }
+  }
+
+  if (manifest?.installedExtensionRootFiles) {
+    // Manifest-based: remove previously-installed root files that are no longer bundled
+    for (const prevFile of manifest.installedExtensionRootFiles) {
+      removeIfStale(prevFile)
+    }
+  }
+
+  // Always remove known stale files regardless of manifest state.
+  // These were installed by pre-manifest versions so they may not appear in
+  // installedExtensionRootFiles even when a manifest exists.
+  // env-utils.js was moved from extensions/ root → gsd/ in v2.39.x (#1634)
+  removeIfStale('env-utils.js')
 }
 
 /**
@@ -138,7 +348,7 @@ function syncResourceDir(srcDir: string, destDir: string): void {
  * - extensions/ → ~/.gsd/agent/extensions/   (overwrite when version changes)
  * - agents/     → ~/.gsd/agent/agents/        (overwrite when version changes)
  * - skills/     → ~/.gsd/agent/skills/        (overwrite when version changes)
- * - GSD-WORKFLOW.md is read directly from bundled path via GSD_WORKFLOW_PATH env var
+ * - GSD-WORKFLOW.md → ~/.gsd/agent/GSD-WORKFLOW.md (fallback for env var miss)
  *
  * Skips the copy when the managed-resources.json version matches the current
  * GSD version, avoiding ~128ms of synchronous cpSync on every startup.
@@ -150,23 +360,63 @@ function syncResourceDir(srcDir: string, destDir: string): void {
 export function initResources(agentDir: string): void {
   mkdirSync(agentDir, { recursive: true })
 
-  // Skip the full copy when the synced version already matches the running version.
-  // This avoids ~800ms of synchronous rmSync + cpSync on every startup.
   const currentVersion = getBundledGsdVersion()
-  const managedVersion = readManagedResourceVersion(agentDir)
-  if (managedVersion && managedVersion === currentVersion) {
-    return
+  const manifest = readManagedResourceManifest(agentDir)
+
+  // Always prune root-level extension files that were removed from the bundle.
+  // This is cheap (a few existence checks + at most one rmSync) and must run
+  // unconditionally so that stale files left by a previous version are cleaned
+  // up even when the version/hash match causes the full sync to be skipped.
+  pruneRemovedBundledExtensions(manifest, agentDir)
+
+  // Ensure ~/.gsd/agent/node_modules symlinks to GSD's node_modules on EVERY
+  // launch, not just during resource syncs. A stale/broken symlink makes ALL
+  // extensions fail to resolve @gsd/* packages, rendering GSD non-functional.
+  ensureNodeModulesSymlink(agentDir)
+
+  // Skip the full copy when both version AND content fingerprint match.
+  // Version-only checks miss same-version content changes (npm link dev workflow,
+  // hotfixes within a release). The content hash catches those at ~1ms cost.
+  if (manifest && manifest.gsdVersion === currentVersion) {
+    // Version matches — check content fingerprint for same-version staleness.
+    const currentHash = computeResourceFingerprint()
+    const hasStaleExtensionFiles = hasStaleCompiledExtensionSiblings(join(agentDir, 'extensions'))
+    if (manifest.contentHash && manifest.contentHash === currentHash && !hasStaleExtensionFiles) {
+      return
+    }
   }
+
+  // Sync bundled resources — overwrite so updates land on next launch.
 
   syncResourceDir(bundledExtensionsDir, join(agentDir, 'extensions'))
   syncResourceDir(join(resourcesDir, 'agents'), join(agentDir, 'agents'))
   syncResourceDir(join(resourcesDir, 'skills'), join(agentDir, 'skills'))
+
+  // Sync GSD-WORKFLOW.md to agentDir as a fallback for when GSD_WORKFLOW_PATH
+  // env var is not set (e.g. fork/dev builds, alternative entry points).
+  const workflowSrc = join(resourcesDir, 'GSD-WORKFLOW.md')
+  if (existsSync(workflowSrc)) {
+    try { copyFileSync(workflowSrc, join(agentDir, 'GSD-WORKFLOW.md')) } catch { /* non-fatal */ }
+  }
 
   // Ensure all newly copied files are owner-writable so the next run can
   // overwrite them (covers extensions, agents, and skills in one walk).
   makeTreeWritable(agentDir)
 
   writeManagedResourceManifest(agentDir)
+  ensureRegistryEntries(join(agentDir, 'extensions'))
+}
+
+export function hasStaleCompiledExtensionSiblings(extensionsDir: string): boolean {
+  if (!existsSync(extensionsDir)) return false
+  for (const entry of readdirSync(extensionsDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.ts')) continue
+    const jsName = entry.name.replace(/\.ts$/, '.js')
+    if (existsSync(join(extensionsDir, jsName))) {
+      return true
+    }
+  }
+  return false
 }
 
 /**
@@ -187,12 +437,17 @@ function getBundledExtensionKeys(): Set<string> {
 }
 
 export function buildResourceLoader(agentDir: string): DefaultResourceLoader {
+  const registry = loadRegistry()
   const piAgentDir = join(homedir(), '.pi', 'agent')
   const piExtensionsDir = join(piAgentDir, 'extensions')
   const bundledKeys = getBundledExtensionKeys()
-  const piExtensionPaths = discoverExtensionEntryPaths(piExtensionsDir).filter(
-    (entryPath) => !bundledKeys.has(getExtensionKey(entryPath, piExtensionsDir)),
-  )
+  const piExtensionPaths = discoverExtensionEntryPaths(piExtensionsDir)
+    .filter((entryPath) => !bundledKeys.has(getExtensionKey(entryPath, piExtensionsDir)))
+    .filter((entryPath) => {
+      const manifest = readManifestFromEntryPath(entryPath)
+      if (!manifest) return true
+      return isExtensionEnabled(registry, manifest.id)
+    })
 
   return new DefaultResourceLoader({
     agentDir,

@@ -9,6 +9,7 @@ import { randomInt } from "node:crypto";
 import { readdirSync, existsSync } from "node:fs";
 import { milestonesDir } from "./paths.js";
 import { loadQueueOrder, sortByQueueOrder } from "./queue-order.js";
+import { getErrorMessage } from "./error-utils.js";
 
 // ─── Regex ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +70,44 @@ export function nextMilestoneId(milestoneIds: string[], uniqueEnabled?: boolean)
   return `M${seq}`;
 }
 
+// ─── Reservation ─────────────────────────────────────────────────────────────
+
+/**
+ * Module-level set of milestone IDs that have been previewed/promised to the
+ * user but not yet materialised on disk. Both guided-flow (preview) and
+ * gsd_milestone_generate_id (tool) share this set so the ID shown in the UI
+ * matches the one the tool returns.
+ */
+const reservedMilestoneIds = new Set<string>();
+
+/** Reserve an ID so that subsequent calls to `claimReservedId` / `nextMilestoneId` account for it. */
+export function reserveMilestoneId(id: string): void {
+  reservedMilestoneIds.add(id);
+}
+
+/**
+ * If any IDs have been reserved, shift one out and return it.
+ * Returns `undefined` when the reservation set is empty.
+ */
+export function claimReservedId(): string | undefined {
+  const first = reservedMilestoneIds.values().next().value;
+  if (first !== undefined) {
+    reservedMilestoneIds.delete(first);
+    return first;
+  }
+  return undefined;
+}
+
+/** Return a snapshot of all currently reserved IDs (for merging into the "existing" list). */
+export function getReservedMilestoneIds(): ReadonlySet<string> {
+  return reservedMilestoneIds;
+}
+
+/** Clear all reservations (useful for tests). */
+export function clearReservedMilestoneIds(): void {
+  reservedMilestoneIds.clear();
+}
+
 // ─── Discovery ──────────────────────────────────────────────────────────────
 
 /** Scan the milestones directory and return IDs sorted by queue order (or numeric fallback). */
@@ -79,8 +118,9 @@ export function findMilestoneIds(basePath: string): string[] {
       .filter((d) => d.isDirectory())
       .map((d) => {
         const match = d.name.match(/^(M\d+(?:-[a-z0-9]{6})?)/);
-        return match ? match[1] : d.name;
-      });
+        return match ? match[1] : null;
+      })
+      .filter((id): id is string => id !== null);
 
     // Apply custom queue order if available, else fall back to numeric sort
     const customOrder = loadQueueOrder(basePath);
@@ -88,7 +128,7 @@ export function findMilestoneIds(basePath: string): string[] {
   } catch (err) {
     // Log why milestone scanning failed — silent [] here causes infinite loops (#456)
     if (existsSync(dir)) {
-      console.error(`[gsd] findMilestoneIds: .gsd/milestones/ exists but readdirSync failed — ${err instanceof Error ? err.message : String(err)}`);
+      console.error(`[gsd] findMilestoneIds: .gsd/milestones/ exists but readdirSync failed — ${getErrorMessage(err)}`);
     }
     return [];
   }

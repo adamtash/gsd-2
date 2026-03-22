@@ -8,60 +8,9 @@ import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } fr
 const decode = (s: string) => atob(s);
 const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
-const TOKEN_URL = "https://console.anthropic.com/v1/oauth/token";
-const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
-const REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback";
+const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+const REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const SCOPES = "org:create_api_key user:profile user:inference";
-
-type AnthropicProfileResponse = {
-	account?: {
-		uuid?: string;
-		email?: string;
-		display_name?: string;
-	};
-	organization?: {
-		uuid?: string;
-		name?: string;
-	};
-	subscriptionType?: string | null;
-	rateLimitTier?: string | null;
-};
-
-async function fetchAnthropicProfile(accessToken: string): Promise<AnthropicProfileResponse | null> {
-	const response = await fetch(PROFILE_URL, {
-		headers: {
-			Authorization: `Bearer ${accessToken}`,
-			"Content-Type": "application/json",
-		},
-	});
-
-	if (!response.ok) {
-		return null;
-	}
-
-	return (await response.json()) as AnthropicProfileResponse;
-}
-
-function attachProfileMetadata(
-	credentials: OAuthCredentials,
-	profile: AnthropicProfileResponse | null,
-): OAuthCredentials {
-	return {
-		...credentials,
-		email: profile?.account?.email ?? getString(credentials, "email"),
-		displayName: profile?.account?.display_name ?? getString(credentials, "displayName"),
-		accountId: profile?.account?.uuid ?? getString(credentials, "accountId"),
-		organizationUuid: profile?.organization?.uuid ?? getString(credentials, "organizationUuid"),
-		organizationName: profile?.organization?.name ?? getString(credentials, "organizationName"),
-		subscriptionType: profile?.subscriptionType ?? credentials.subscriptionType,
-		rateLimitTier: profile?.rateLimitTier ?? credentials.rateLimitTier,
-	};
-}
-
-function getString(credentials: OAuthCredentials, key: string): string | undefined {
-	const value = credentials[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
 
 /**
  * Login with Anthropic OAuth (device code flow)
@@ -130,14 +79,11 @@ export async function loginAnthropic(
 	const expiresAt = Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000;
 
 	// Save credentials
-	const credentials = {
+	return {
 		refresh: tokenData.refresh_token,
 		access: tokenData.access_token,
 		expires: expiresAt,
 	};
-
-	const profile = await fetchAnthropicProfile(credentials.access).catch(() => null);
-	return attachProfileMetadata(credentials, profile);
 }
 
 /**
@@ -166,14 +112,11 @@ export async function refreshAnthropicToken(refreshToken: string): Promise<OAuth
 		expires_in: number;
 	};
 
-	const credentials = {
+	return {
 		refresh: data.refresh_token,
 		access: data.access_token,
 		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
 	};
-
-	const profile = await fetchAnthropicProfile(credentials.access).catch(() => null);
-	return attachProfileMetadata(credentials, profile);
 }
 
 export const anthropicOAuthProvider: OAuthProviderInterface = {
