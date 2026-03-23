@@ -262,6 +262,7 @@ export class AuthStorage {
 	private errors: Error[] = [];
 	private activeCredentialIndex = new Map<string, number>();
 	private activeCredentialIndexBySession = new Map<string, Map<string, number>>();
+	private credentialChangeListeners: Set<() => void> = new Set();
 
 	/**
 	 * Round-robin index per provider. Incremented on each call to getApiKey
@@ -326,6 +327,25 @@ export class AuthStorage {
 	 */
 	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
 		this.fallbackResolver = resolver;
+	}
+
+	/**
+	 * Register a callback to be notified when credentials change (e.g., after OAuth token refresh).
+	 * Returns a function to unregister the listener.
+	 */
+	onCredentialChange(listener: () => void): () => void {
+		this.credentialChangeListeners.add(listener);
+		return () => this.credentialChangeListeners.delete(listener);
+	}
+
+	private notifyCredentialChange(): void {
+		for (const listener of this.credentialChangeListeners) {
+			try {
+				listener();
+			} catch {
+				// Don't let listener errors break the refresh flow
+			}
+		}
 	}
 
 	private recordError(error: unknown): void {
@@ -1345,6 +1365,11 @@ export class AuthStorage {
 			};
 		});
 
+		// Notify listeners after credential change (e.g., model registry refresh)
+		if (result) {
+			queueMicrotask(() => this.notifyCredentialChange());
+		}
+
 		return result;
 	}
 
@@ -1412,9 +1437,12 @@ export class AuthStorage {
 				if (sessionId || this.getStoredPreferredCredentialIndex(providerId) !== undefined) {
 					this.setActiveCredentialIndex(providerId, index, sessionId);
 				}
-				return this.resolveCredentialApiKey(providerId, credentials[index]);
+				const resolved = await this.resolveCredentialApiKey(providerId, credentials[index]);
+				if (resolved) return resolved;
+				// Credential unresolvable (e.g. type:"oauth" for a non-OAuth provider) —
+				// fall through to env / fallback instead of returning undefined (#2083)
 			}
-			// All credentials backed off - fall through to env/fallback
+			// All credentials backed off or unresolvable - fall through to env/fallback
 		}
 
 		// Fall back to environment variable

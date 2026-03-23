@@ -261,9 +261,7 @@ export async function runPreDispatch(
 
     if (mid) {
       if (deps.getIsolationMode() !== "none") {
-        deps.captureIntegrationBranch(s.basePath, mid, {
-          commitDocs: prefs?.git?.commit_docs,
-        });
+        deps.captureIntegrationBranch(s.basePath, mid);
       }
       deps.resolver.enterMilestone(mid, ctx.ui);
     } else {

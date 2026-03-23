@@ -245,7 +245,6 @@ export function writeIntegrationBranch(
   basePath: string,
   milestoneId: string,
   branch: string,
-  _options?: { commitDocs?: boolean },
 ): void {
   // Don't record slice branches as the integration target
   if (SLICE_BRANCH_RE.test(branch)) return;

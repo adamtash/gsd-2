@@ -109,7 +109,6 @@ export interface LoopDeps {
   captureIntegrationBranch: (
     basePath: string,
     mid: string,
-    opts?: { commitDocs?: boolean },
   ) => void;
   getIsolationMode: () => string;
   getCurrentBranch: (basePath: string) => string;

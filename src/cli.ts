@@ -30,6 +30,15 @@ import { getProjectSessionsDir } from './project-sessions.js'
 import { markStartup, printStartupTimings } from './startup-timings.js'
 
 // ---------------------------------------------------------------------------
+// V8 compile cache — Node 22+ can cache compiled bytecode across runs,
+// eliminating repeated parse/compile overhead for unchanged modules.
+// Must be set early so dynamic imports (extensions, lazy subcommands) benefit.
+// ---------------------------------------------------------------------------
+if (parseInt(process.versions.node) >= 22) {
+  process.env.NODE_COMPILE_CACHE ??= join(agentDir, '.compile-cache')
+}
+
+// ---------------------------------------------------------------------------
 // Minimal CLI arg parser — detects print/subagent mode flags
 // ---------------------------------------------------------------------------
 interface CliFlags {
@@ -538,8 +547,16 @@ const sessionManager = cliFlags._selectedSessionPath
 exitIfManagedResourcesAreNewer(agentDir)
 initResources(agentDir)
 markStartup('initResources')
+
+// Overlap resource loading with session manager setup — both are independent.
+// resourceLoader.reload() is the most expensive step (jiti compilation), so
+// starting it early shaves ~50-200ms off interactive startup.
 const resourceLoader = buildResourceLoader(agentDir)
-await resourceLoader.reload()
+const resourceLoadPromise = resourceLoader.reload()
+
+// While resources load, let session manager finish any async I/O it needs.
+// Then await the resource promise before creating the agent session.
+await resourceLoadPromise
 markStartup('resourceLoader.reload')
 
 const { session, extensionsResult } = await createAgentSession({
@@ -613,8 +630,9 @@ if (!process.stdin.isTTY) {
   process.exit(1)
 }
 
-// Welcome screen — shown on every fresh interactive session before TUI takes over
-{
+// Welcome screen — shown on every fresh interactive session before TUI takes over.
+// Skip when the first-run banner was already printed in loader.ts (prevents double banner).
+if (!process.env.GSD_FIRST_RUN_BANNER) {
   const { printWelcomeScreen } = await import('./welcome-screen.js')
   printWelcomeScreen({
     version: process.env.GSD_VERSION || '0.0.0',

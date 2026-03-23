@@ -151,6 +151,38 @@ rm -rf "$(dirname .gsd)/.gsd.lock"
 - If the error persists, close tools that may be holding the file open and then retry.
 - If repeated failures continue, run `/gsd doctor` to confirm the repo state is still healthy and report the exact path + error code.
 
+### Node v24 web boot failure
+
+**Symptoms:** `gsd --web` fails with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING` on Node v24.
+
+**Cause:** Node v24 changed type-stripping behavior for `node_modules`, breaking the Next.js web build.
+
+**Fix:** Fixed in v2.42.0+ (#1864). Upgrade to the latest version.
+
+### Orphan web server process
+
+**Symptoms:** `gsd --web` fails because port 3000 is already in use, even though no GSD session is running.
+
+**Cause:** A previous web server process was not cleaned up on exit.
+
+**Fix:** Fixed in v2.42.0+. GSD now cleans up stale web server processes automatically. If you're on an older version, kill the orphan process manually: `lsof -ti:3000 | xargs kill`.
+
+### Non-JS project blocked by worktree health check
+
+**Symptoms:** Worktree health check fails or blocks auto-mode in projects that don't use Node.js (e.g., Rust, Go, Python).
+
+**Cause:** The worktree health check only recognized JavaScript ecosystems prior to v2.42.0.
+
+**Fix:** Fixed in v2.42.0+ (#1860). The health check now supports 17+ ecosystems. Upgrade to the latest version.
+
+### German/non-English locale git errors
+
+**Symptoms:** Git commands fail or produce unexpected results when the system locale is non-English (e.g., German).
+
+**Cause:** GSD parsed git output assuming English locale strings.
+
+**Fix:** Fixed in v2.42.0+. All git commands now force `LC_ALL=C` to ensure consistent English output regardless of system locale.
+
 ## MCP Client Issues
 
 ### `mcp_servers` shows no configured servers
@@ -277,6 +309,16 @@ Doctor rebuilds `STATE.md` from plan and roadmap files on disk and fixes detecte
 - **Dashboard:** `Ctrl+Alt+G` or `/gsd status` for real-time diagnostics
 - **Forensics:** `/gsd forensics` for structured post-mortem analysis of auto-mode failures
 - **Session logs:** `.gsd/activity/` contains JSONL session dumps for crash forensics
+
+## iTerm2-Specific Issues
+
+### Ctrl+Alt shortcuts trigger the wrong action (e.g., Ctrl+Alt+G opens external editor instead of GSD dashboard)
+
+**Symptoms:** Pressing Ctrl+Alt+G opens the external editor prompt (Ctrl+G) instead of the GSD dashboard. Other Ctrl+Alt shortcuts behave as their Ctrl-only counterparts.
+
+**Cause:** iTerm2's default Left Option Key setting is "Normal", which swallows the Alt modifier for Ctrl+Alt key combinations. The terminal receives only the Ctrl key, so Ctrl+Alt+G arrives as Ctrl+G.
+
+**Fix:** In iTerm2, go to **Profiles → Keys → General** and set **Left Option Key** to **Esc+**. This makes Alt/Option send an escape prefix that terminal applications can detect, enabling Ctrl+Alt shortcuts to work correctly.
 
 ## Windows-Specific Issues
 

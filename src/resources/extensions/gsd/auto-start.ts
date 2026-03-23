@@ -167,22 +167,19 @@ export async function bootstrapAutoSession(
     // ensureGitignore checks for git-tracked .gsd/ files and skips the
     // ".gsd" pattern if the project intentionally tracks .gsd/ in git.
     const gitPrefs = loadEffectiveGSDPreferences()?.preferences?.git;
-    const commitDocs = gitPrefs?.commit_docs;
     const manageGitignore = gitPrefs?.manage_gitignore;
-    ensureGitignore(base, { commitDocs, manageGitignore });
+    ensureGitignore(base, { manageGitignore });
     if (manageGitignore !== false) untrackRuntimeFiles(base);
 
     // Bootstrap .gsd/ if it doesn't exist
     const gsdDir = join(base, ".gsd");
     if (!existsSync(gsdDir)) {
       mkdirSync(join(gsdDir, "milestones"), { recursive: true });
-      if (commitDocs !== false) {
-        try {
-          nativeAddAll(base);
-          nativeCommit(base, "chore: init gsd");
-        } catch {
-          /* nothing to commit */
-        }
+      try {
+        nativeAddAll(base);
+        nativeCommit(base, "chore: init gsd");
+      } catch {
+        /* nothing to commit */
       }
     }
 
@@ -487,7 +484,7 @@ export async function bootstrapAutoSession(
     // Capture integration branch
     if (s.currentMilestoneId) {
       if (getIsolationMode() !== "none") {
-        captureIntegrationBranch(base, s.currentMilestoneId, { commitDocs });
+        captureIntegrationBranch(base, s.currentMilestoneId);
       }
       setActiveMilestoneId(base, s.currentMilestoneId);
     }

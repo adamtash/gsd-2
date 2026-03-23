@@ -6,6 +6,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.43.0] - 2026-03-23
+
+### Added
+- **forensics**: opt-in duplicate detection before issue creation (#2105)
+
+### Fixed
+- prevent banner from printing twice on first run (#2251)
+- **test**: Windows CI — use double quotes in git commit message (#2252)
+- **async-jobs**: suppress duplicate follow-up for awaited job results (#2248) (#2250)
+- **gsd**: remove force-staging of .gsd/milestones/ through symlinks (#2247) (#2249)
+- **gsd**: remove over-broad skill activation heuristic (#2239) (#2244)
+- **auth**: fall through to env/fallback when OAuth credential has no registered provider (#2097)
+- **lsp**: bound message buffer and clean up stale client state (#2171)
+- clean up macOS numbered .gsd collision variants (#2205) (#2210)
+- **search**: keep duplicate-search loop guard armed (#2117)
+- clean up extension error listener on session dispose (#2165)
+- **web**: resolve 4 pre-existing onboarding contract test failures (#2209)
+- async bash job timeout hangs indefinitely instead of erroring out (#2214)
+- **gsd**: apply fast service tier outside auto-mode (#2126)
+- **interactive**: clean up leaked SIGINT and extension selector listeners (#2172)
+- **ci**: standardize GitHub Actions and Node.js versions (#2169)
+- **native**: resolve memory leaks in glob, ttsr, and image overflow (#2170)
+- extension resource management — prune stale dirs, fix isBuiltIn, gate skills on Skill tool, suppress search warnings (#2235)
+- batch isolated fixes — error messages, preferences, web auth, MCP vars, detection, gitignore (#2232)
+- document iTerm2 Ctrl+Alt+G keybinding conflict and add helpful hint (#2231)
+- **footer**: display active inference model during execution (#1982)
+- **web**: kill stale server process before launch to prevent EADDRINUSE (#1934) (#2034)
+- **git**: force LC_ALL=C in GIT_NO_PROMPT_ENV to support non-English locales (#2035)
+- **forensics**: force gh CLI for issue creation to prevent misrouting (#2067) (#2094)
+- force-stage .gsd/milestones/ artifacts when .gsd is a symlink (#2104) (#2112)
+- **pi-ai**: correct Copilot context window and output token limits (#2118)
+
+### Changed
+- startup optimizations — pre-compiled extensions, compile cache, batch discovery (#2125)
+
 ## [2.42.0] - 2026-03-22
 
 ### Added
@@ -1637,7 +1672,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.42.0...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.43.0...HEAD
+[2.43.0]: https://github.com/gsd-build/gsd-2/compare/v2.42.0...v2.43.0
 [2.42.0]: https://github.com/gsd-build/gsd-2/compare/v2.41.0...v2.42.0
 [2.41.0]: https://github.com/gsd-build/gsd-2/compare/v2.40.0...v2.41.0
 [2.40.0]: https://github.com/gsd-build/gsd-2/compare/v2.39.0...v2.40.0

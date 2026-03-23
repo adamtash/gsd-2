@@ -420,8 +420,6 @@ export function buildSkillActivationBlock(params: {
     params.sliceTitle,
     params.taskId,
     params.taskTitle,
-    ...(params.extraContext ?? []),
-    params.taskPlanContent ?? undefined,
   );
 
   const visibleSkills = (typeof getLoadedSkills === 'function' ? getLoadedSkills() : []).filter(skill => !skill.disableModelInvocation);
@@ -449,12 +447,6 @@ export function buildSkillActivationBlock(params: {
       }
     } catch {
       // Non-fatal — malformed task plan should not break prompt construction
-    }
-  }
-
-  for (const skill of visibleSkills) {
-    if (skillMatchesContext(skill, contextTokens)) {
-      matched.add(normalizeSkillReference(skill.name));
     }
   }
 
@@ -983,11 +975,7 @@ export async function buildPlanSlicePrompt(
   const executorContextConstraints = formatExecutorConstraints();
 
   const outputRelPath = relSliceFile(base, mid, sid, "PLAN");
-  const prefs = loadEffectiveGSDPreferences();
-  const commitDocsEnabled = prefs?.preferences?.git?.commit_docs !== false;
-  const commitInstruction = commitDocsEnabled
-    ? `Commit the plan files only: \`git add ${relSlicePath(base, mid, sid)}/ .gsd/DECISIONS.md .gitignore && git commit -m "docs(${sid}): add slice plan"\`. Do not stage .gsd/STATE.md or other runtime files — the system manages those.`
-    : "Do not commit — planning docs are not tracked in git for this project.";
+  const commitInstruction = "Do not commit — .gsd/ planning docs are managed externally and not tracked in git.";
   return loadPrompt("plan-slice", {
     workingDirectory: base,
     milestoneId: mid, sliceId: sid, sliceTitle: sTitle,
@@ -1485,11 +1473,7 @@ export async function buildReassessRoadmapPrompt(
     // Non-fatal — captures module may not be available
   }
 
-  const reassessPrefs = loadEffectiveGSDPreferences();
-  const reassessCommitDocsEnabled = reassessPrefs?.preferences?.git?.commit_docs !== false;
-  const reassessCommitInstruction = reassessCommitDocsEnabled
-    ? `Commit: \`docs(${mid}): reassess roadmap after ${completedSliceId}\`. Stage only the .gsd/milestones/ files you changed — do not stage .gsd/STATE.md or other runtime files.`
-    : "Do not commit — planning docs are not tracked in git for this project.";
+  const reassessCommitInstruction = "Do not commit — .gsd/ planning docs are managed externally and not tracked in git.";
 
   return loadPrompt("reassess-roadmap", {
     workingDirectory: base,

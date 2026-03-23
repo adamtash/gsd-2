@@ -139,11 +139,10 @@ function makeDeps(
     captureIntegrationBranch: (
       basePath: string,
       mid: string | undefined,
-      opts?: { commitDocs?: boolean },
     ) => {
       calls.push({
         fn: "captureIntegrationBranch",
-        args: [basePath, mid, opts],
+        args: [basePath, mid],
       });
     },
     ...overrides,

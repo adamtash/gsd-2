@@ -137,7 +137,7 @@ export function hasGitTrackedGsdFiles(basePath: string): boolean {
  */
 export function ensureGitignore(
   basePath: string,
-  options?: { manageGitignore?: boolean; commitDocs?: boolean },
+  options?: { manageGitignore?: boolean },
 ): boolean {
   // If manage_gitignore is explicitly false, do not touch .gitignore at all
   if (options?.manageGitignore === false) return false;
