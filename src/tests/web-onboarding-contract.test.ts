@@ -52,6 +52,16 @@ function attachJsonLineReader(stream: PassThrough, onLine: (line: string) => voi
   });
 }
 
+function noEnvApiKey(): null {
+  return null;
+}
+
+function projectRequest(projectCwd: string, url: string, init?: RequestInit): Request {
+  const base = new URL(url, "http://localhost");
+  base.searchParams.set("project", projectCwd);
+  return new Request(base, init);
+}
+
 function makeWorkspaceFixture(): { projectCwd: string; sessionsDir: string; cleanup: () => void } {
   const root = mkdtempSync(join(tmpdir(), "gsd-web-onboarding-"));
   const projectCwd = join(root, "project");
@@ -246,10 +256,10 @@ test("boot and onboarding routes expose locked required state plus explicitly sk
   const fixture = makeWorkspaceFixture();
   const authStorage = AuthStorage.inMemory({});
   configureBridgeFixture(fixture, "sess-missing-auth");
-  onboarding.configureOnboardingServiceForTests({ authStorage });
+  onboarding.configureOnboardingServiceForTests({ authStorage, getEnvApiKey: noEnvApiKey });
 
   try {
-    const bootResponse = await bootRoute.GET();
+    const bootResponse = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     assert.equal(bootResponse.status, 200);
     const bootPayload = (await bootResponse.json()) as any;
 
@@ -281,7 +291,7 @@ test("boot and onboarding routes expose locked required state plus explicitly sk
     assert.equal(anthropicProvider.supports.apiKey, true);
     assert.equal(anthropicProvider.supports.oauthAvailable, true);
 
-    const onboardingResponse = await onboardingRoute.GET();
+    const onboardingResponse = await onboardingRoute.GET(projectRequest(fixture.projectCwd, "/api/onboarding"));
     assert.equal(onboardingResponse.status, 200);
     const onboardingPayload = (await onboardingResponse.json()) as any;
     assert.equal(onboardingPayload.onboarding.locked, true);
@@ -299,10 +309,13 @@ test("runtime env-backed auth unlocks boot onboarding state and reports the envi
   const previousGithubToken = process.env.GITHUB_TOKEN;
   process.env.GITHUB_TOKEN = "ghu_runtime_env_token";
   configureBridgeFixture(fixture, "sess-env-auth");
-  onboarding.configureOnboardingServiceForTests({ authStorage });
+  onboarding.configureOnboardingServiceForTests({
+    authStorage,
+    getEnvApiKey: (provider: string) => (provider === "github-copilot" ? process.env.GITHUB_TOKEN : undefined),
+  });
 
   try {
-    const bootResponse = await bootRoute.GET();
+    const bootResponse = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     assert.equal(bootResponse.status, 200);
     const bootPayload = (await bootResponse.json()) as any;
 
@@ -335,6 +348,7 @@ test("failed API-key validation stays locked, redacts the error, and is reflecte
   configureBridgeFixture(fixture, "sess-validation-failure");
   onboarding.configureOnboardingServiceForTests({
     authStorage,
+    getEnvApiKey: noEnvApiKey,
     validateApiKey: async () => ({
       ok: false,
       message: "OpenAI rejected sk-test-secret-123456 because Bearer sk-test-secret-123456 is invalid",
@@ -343,7 +357,7 @@ test("failed API-key validation stays locked, redacts the error, and is reflecte
 
   try {
     const validationResponse = await onboardingRoute.POST(
-      new Request("http://localhost/api/onboarding", {
+      projectRequest(fixture.projectCwd, "/api/onboarding", {
         method: "POST",
         body: JSON.stringify({
           action: "save_api_key",
@@ -366,7 +380,7 @@ test("failed API-key validation stays locked, redacts the error, and is reflecte
     assert.doesNotMatch(validationPayload.onboarding.lastValidation.message, /sk-test-secret-123456/);
     assert.equal(authStorage.hasAuth("openai"), false);
 
-    const bootResponse = await bootRoute.GET();
+    const bootResponse = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     assert.equal(bootResponse.status, 200);
     const bootPayload = (await bootResponse.json()) as any;
     assert.equal(bootPayload.onboarding.locked, true);
@@ -383,11 +397,11 @@ test("direct prompt commands cannot bypass onboarding while required setup is st
   const fixture = makeWorkspaceFixture();
   const authStorage = AuthStorage.inMemory({});
   const harness = configureBridgeFixture(fixture, "sess-command-locked");
-  onboarding.configureOnboardingServiceForTests({ authStorage });
+  onboarding.configureOnboardingServiceForTests({ authStorage, getEnvApiKey: noEnvApiKey });
 
   try {
     const response = await commandRoute.POST(
-      new Request("http://localhost/api/session/command", {
+      projectRequest(fixture.projectCwd, "/api/session/command", {
         method: "POST",
         body: JSON.stringify({ type: "prompt", message: "hello from bypass attempt" }),
       }),
@@ -403,7 +417,7 @@ test("direct prompt commands cannot bypass onboarding while required setup is st
     assert.equal(harness.spawnCalls, 0);
 
     const stateResponse = await commandRoute.POST(
-      new Request("http://localhost/api/session/command", {
+      projectRequest(fixture.projectCwd, "/api/session/command", {
         method: "POST",
         body: JSON.stringify({ type: "get_state" }),
       }),
@@ -426,6 +440,7 @@ test("bridge auth refresh failures remain inspectable and keep the workspace loc
   configureBridgeFixture(fixture, "sess-refresh-failure");
   onboarding.configureOnboardingServiceForTests({
     authStorage,
+    getEnvApiKey: noEnvApiKey,
     validateApiKey: async () => ({ ok: true, message: "openai credentials validated" }),
     refreshBridgeAuth: async () => {
       throw new Error("bridge restart failed for sk-refresh-secret-123456");
@@ -434,7 +449,7 @@ test("bridge auth refresh failures remain inspectable and keep the workspace loc
 
   try {
     const validationResponse = await onboardingRoute.POST(
-      new Request("http://localhost/api/onboarding", {
+      projectRequest(fixture.projectCwd, "/api/onboarding", {
         method: "POST",
         body: JSON.stringify({
           action: "save_api_key",
@@ -455,7 +470,7 @@ test("bridge auth refresh failures remain inspectable and keep the workspace loc
     assert.doesNotMatch(validationPayload.onboarding.bridgeAuthRefresh.error, /sk-refresh-secret-123456/);
     assert.equal(authStorage.hasAuth("openai"), true);
 
-    const bootResponse = await bootRoute.GET();
+    const bootResponse = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     const bootPayload = (await bootResponse.json()) as any;
     assert.equal(bootPayload.onboarding.locked, true);
     assert.equal(bootPayload.onboarding.lockReason, "bridge_refresh_failed");
@@ -473,12 +488,13 @@ test("successful API-key validation persists the credential and unlocks onboardi
   const harness = configureBridgeFixture(fixture, "sess-validation-success");
   onboarding.configureOnboardingServiceForTests({
     authStorage,
+    getEnvApiKey: noEnvApiKey,
     validateApiKey: async () => ({ ok: true, message: "openai credentials validated" }),
   });
 
   try {
     const validationResponse = await onboardingRoute.POST(
-      new Request("http://localhost/api/onboarding", {
+      projectRequest(fixture.projectCwd, "/api/onboarding", {
         method: "POST",
         body: JSON.stringify({
           action: "save_api_key",
@@ -502,7 +518,7 @@ test("successful API-key validation persists the credential and unlocks onboardi
     assert.equal(authStorage.hasAuth("openai"), true);
     assert.equal(harness.spawnCalls, 1);
 
-    const bootResponse = await bootRoute.GET();
+    const bootResponse = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     const bootPayload = (await bootResponse.json()) as any;
     assert.equal(bootPayload.onboarding.locked, false);
     assert.equal(bootPayload.onboarding.lockReason, null);
@@ -521,17 +537,17 @@ test("logout_provider removes saved auth, refreshes the bridge, and relocks onbo
     openai: { type: "api_key", key: "sk-saved-logout" },
   } as any);
   const harness = configureBridgeFixture(fixture, "sess-logout-success");
-  onboarding.configureOnboardingServiceForTests({ authStorage });
+  onboarding.configureOnboardingServiceForTests({ authStorage, getEnvApiKey: noEnvApiKey });
 
   try {
-    const bootBefore = await bootRoute.GET();
+    const bootBefore = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     const bootBeforePayload = (await bootBefore.json()) as any;
     assert.equal(bootBeforePayload.onboarding.locked, false);
     assert.equal(bootBeforePayload.onboarding.required.satisfiedBy.providerId, "openai");
     assert.equal(harness.spawnCalls, 1);
 
     const logoutResponse = await onboardingRoute.POST(
-      new Request("http://localhost/api/onboarding", {
+      projectRequest(fixture.projectCwd, "/api/onboarding", {
         method: "POST",
         body: JSON.stringify({
           action: "logout_provider",
@@ -549,7 +565,7 @@ test("logout_provider removes saved auth, refreshes the bridge, and relocks onbo
     assert.equal(authStorage.hasAuth("openai"), false);
     assert.equal(harness.spawnCalls, 2);
 
-    const bootAfter = await bootRoute.GET();
+    const bootAfter = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     const bootAfterPayload = (await bootAfter.json()) as any;
     assert.equal(bootAfterPayload.onboarding.locked, true);
     assert.equal(bootAfterPayload.onboarding.lockReason, "required_setup");
@@ -568,17 +584,20 @@ test("logout_provider fails clearly for environment-backed auth that the browser
   const previousGithubToken = process.env.GITHUB_TOKEN;
   process.env.GITHUB_TOKEN = "ghu_env_only_token";
   configureBridgeFixture(fixture, "sess-logout-env");
-  onboarding.configureOnboardingServiceForTests({ authStorage });
+  onboarding.configureOnboardingServiceForTests({
+    authStorage,
+    getEnvApiKey: (provider: string) => (provider === "github-copilot" ? process.env.GITHUB_TOKEN : undefined),
+  });
 
   try {
-    const bootBefore = await bootRoute.GET();
+    const bootBefore = await bootRoute.GET(projectRequest(fixture.projectCwd, "/api/boot"));
     const bootBeforePayload = (await bootBefore.json()) as any;
     assert.equal(bootBeforePayload.onboarding.locked, false);
     assert.equal(bootBeforePayload.onboarding.required.satisfiedBy.providerId, "github-copilot");
     assert.equal(bootBeforePayload.onboarding.required.satisfiedBy.source, "environment");
 
     const logoutResponse = await onboardingRoute.POST(
-      new Request("http://localhost/api/onboarding", {
+      projectRequest(fixture.projectCwd, "/api/onboarding", {
         method: "POST",
         body: JSON.stringify({
           action: "logout_provider",
