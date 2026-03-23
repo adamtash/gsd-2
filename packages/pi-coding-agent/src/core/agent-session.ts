@@ -75,6 +75,7 @@ import { RetryHandler } from "./retry-handler.js";
 import type { BranchSummaryEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
+import type { UsageLimitErrorType } from "./auth-storage.js";
 import { BUILTIN_SLASH_COMMANDS, type SlashCommandInfo, type SlashCommandLocation } from "./slash-commands.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import type { BashOperations } from "./tools/bash.js";
@@ -105,6 +106,29 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 		content: match[3],
 		userMessage: match[4]?.trim() || undefined,
 	};
+}
+
+/**
+ * Select credential exhaustion recovery strategy based on error type and available options.
+ */
+export function selectCredentialExhaustionRecoveryMode(options: {
+	errorType: UsageLimitErrorType;
+	hasFallback: boolean;
+	hasRecoveryWindow: boolean;
+}): "fallback" | "give_up" | "wait" | "none" {
+	if (options.hasFallback) {
+		return "fallback";
+	}
+
+	if (options.errorType === "quota_exhausted") {
+		return "give_up";
+	}
+
+	if (options.hasRecoveryWindow) {
+		return "wait";
+	}
+
+	return "none";
 }
 
 /** Session-specific events that extend the core AgentEvent */

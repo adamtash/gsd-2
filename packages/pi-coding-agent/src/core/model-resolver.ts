@@ -11,7 +11,7 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ModelRegistry } from "./model-registry.js";
 
 /** Default model IDs for each known provider */
-const defaultModelPerProvider: Record<KnownProvider, string> = {
+export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
 	anthropic: "claude-opus-4-6[1m]",
 	"anthropic-vertex": "claude-sonnet-4-6",

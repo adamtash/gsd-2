@@ -3307,6 +3307,13 @@ export class InteractiveMode {
 					done();
 					this.ui.requestRender();
 				},
+				(provider: string) => {
+					this.showStatus(`Set ${provider} as active provider`);
+				},
+				(provider: string) => {
+					// Remove account handler
+					this.showStatus(`Removing account for ${provider}`);
+				},
 			);
 			return { component, focus: component };
 		});
