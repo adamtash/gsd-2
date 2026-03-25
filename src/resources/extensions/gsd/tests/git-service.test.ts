@@ -215,10 +215,12 @@ describe('git-service', async () => {
       oneLiner: "Added JWT-based auth with refresh token rotation",
       keyFiles: ["src/auth.ts", "src/middleware/jwt.ts"],
     });
-    assert.ok(msg.startsWith("feat(S01/T02):"), "message starts with type(scope)");
+    assert.ok(msg.startsWith("feat:"), "message starts with type: (no scope)");
+    assert.ok(!msg.includes("(S01/T02)"), "no GSD ID in subject line");
     assert.ok(msg.includes("JWT-based auth"), "message includes one-liner content");
     assert.ok(msg.includes("- src/auth.ts"), "message body includes key files");
     assert.ok(msg.includes("- src/middleware/jwt.ts"), "message body includes second key file");
+    assert.ok(msg.includes("GSD-Task: S01/T02"), "GSD-Task trailer in body");
   });
 
   {
@@ -226,9 +228,9 @@ describe('git-service', async () => {
       taskId: "S02/T01",
       taskTitle: "fix login redirect bug",
     });
-    assert.ok(msg.startsWith("fix(S02/T01):"), "infers fix type from title");
+    assert.ok(msg.startsWith("fix:"), "infers fix type from title");
     assert.ok(msg.includes("fix login redirect bug"), "uses task title when no one-liner");
-    assert.ok(!msg.includes("\n"), "no body when no key files");
+    assert.ok(msg.includes("GSD-Task: S02/T01"), "GSD-Task trailer present");
   }
 
   {
@@ -237,7 +239,8 @@ describe('git-service', async () => {
       taskTitle: "add tests",
       oneLiner: "Unit tests for auth module with coverage",
     });
-    assert.ok(msg.startsWith("test(S01/T03):"), "infers test type");
+    assert.ok(msg.startsWith("test:"), "infers test type");
+    assert.ok(msg.includes("GSD-Task: S01/T03"), "GSD-Task trailer present");
   }
 
   // ─── RUNTIME_EXCLUSION_PATHS ───────────────────────────────────────────
@@ -478,10 +481,10 @@ describe('git-service', async () => {
 
     // Without task context, autoCommit uses generic chore message
     const msg = svc.autoCommit("task", "T01");
-    assert.deepStrictEqual(msg, "chore(T01): auto-commit after task", "autoCommit returns generic format without task context");
+    assert.deepStrictEqual(msg, "chore: auto-commit after task\n\nGSD-Unit: T01", "autoCommit returns generic format with trailer");
 
     const log = run("git log --oneline -1", repo);
-    assert.ok(log.includes("chore(T01): auto-commit after task"), "generic commit message is in git log");
+    assert.ok(log.includes("chore: auto-commit after task"), "generic commit message is in git log");
 
     // With task context, autoCommit uses meaningful message
     createFile(repo, "src/auth.ts", "export function login() {}");
@@ -492,8 +495,9 @@ describe('git-service', async () => {
       keyFiles: ["src/auth.ts"],
     });
     assert.ok(msg2 !== null, "autoCommit with task context returns a message");
-    assert.ok(msg2!.startsWith("feat(S01/T02):"), "meaningful commit uses feat type and scope");
+    assert.ok(msg2!.startsWith("feat:"), "meaningful commit uses feat type without scope");
     assert.ok(msg2!.includes("JWT-based auth"), "meaningful commit includes one-liner content");
+    assert.ok(msg2!.includes("GSD-Task: S01/T02"), "meaningful commit has GSD-Task trailer");
 
     rmSync(repo, { recursive: true, force: true });
   });
@@ -529,7 +533,7 @@ describe('git-service', async () => {
 
     // Auto-commit with .gsd/ excluded (simulates pre-switch)
     const msg = svc.autoCommit("pre-switch", "main", [".gsd/"]);
-    assert.deepStrictEqual(msg, "chore(main): auto-commit after pre-switch", "pre-switch autoCommit with .gsd/ exclusion commits");
+    assert.deepStrictEqual(msg, "chore: auto-commit after pre-switch\n\nGSD-Unit: main", "pre-switch autoCommit with .gsd/ exclusion commits");
 
     // Verify .gsd/ file was NOT committed
     const show = run("git show --stat HEAD", repo);
@@ -1295,7 +1299,12 @@ describe('git-service', async () => {
       issueNumber: 42,
     });
     assert.ok(msg.includes("Resolves #42"), "buildTaskCommitMessage includes Resolves #N trailer when issueNumber is set");
-    assert.ok(msg.startsWith("fix(S01/T03):"), "buildTaskCommitMessage infers fix type");
+    assert.ok(msg.startsWith("fix:"), "buildTaskCommitMessage infers fix type");
+    assert.ok(msg.includes("GSD-Task: S01/T03"), "GSD-Task trailer present");
+    // GSD-Task should come before Resolves
+    const taskIdx = msg.indexOf("GSD-Task: S01/T03");
+    const resolvesIdx = msg.indexOf("Resolves #42");
+    assert.ok(taskIdx < resolvesIdx, "GSD-Task trailer before Resolves trailer");
   });
 
   {
@@ -1305,6 +1314,7 @@ describe('git-service', async () => {
       taskTitle: "add dashboard widget",
     });
     assert.ok(!msg.includes("Resolves"), "buildTaskCommitMessage omits Resolves trailer when issueNumber is absent");
+    assert.ok(msg.includes("GSD-Task: S01/T04"), "GSD-Task trailer still present");
   }
 
   // ─── runPreMergeCheck: skips when no package.json ────────────────────────

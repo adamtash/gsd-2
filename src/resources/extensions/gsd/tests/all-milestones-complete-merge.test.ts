@@ -183,8 +183,8 @@ test("single milestone worktree is merged to main when all complete (#962)", (t)
     "milestone branch should be deleted",
   );
 
-  // Verify squash commit on main
-  const log = run("git log --oneline -3", tempDir);
+  // Verify squash commit on main (milestone ID is in trailer, not subject)
+  const log = run("git log -3", tempDir);
   assert.ok(
     log.includes("M001"),
     "squash commit on main should reference M001",

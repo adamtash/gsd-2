@@ -47,6 +47,16 @@ import {
 import { hasPendingCaptures, loadPendingCaptures } from "./captures.js";
 import { debugLog } from "./debug-logger.js";
 import type { AutoSession } from "./auto/session.js";
+
+/** Unit types that only touch `.gsd/` internal state files (no code changes).
+ *  Auto-commit is skipped for these — their state files are picked up by the
+ *  next actual task commit via `smartStage()`. */
+const LIFECYCLE_ONLY_UNITS = new Set([
+  "research-milestone", "discuss-milestone", "plan-milestone",
+  "validate-milestone", "research-slice", "plan-slice",
+  "replan-slice", "complete-slice", "run-uat",
+  "reassess-roadmap", "rewrite-docs",
+]);
 import {
   updateProgressWidget as _updateProgressWidget,
   updateSliceProgressCache,
@@ -279,9 +289,14 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       // `git worktree remove --force` during teardown.
       _resetHasChangesCache();
 
-      const commitMsg = autoCommitCurrentBranch(s.basePath, s.currentUnit.type, s.currentUnit.id, taskContext);
-      if (commitMsg) {
-        ctx.ui.notify(`Committed: ${commitMsg.split("\n")[0]}`, "info");
+      // Skip auto-commit for lifecycle-only units (#2553) — they only touch
+      // `.gsd/` internal state files. Those files are picked up by the next
+      // actual task commit via smartStage().
+      if (!LIFECYCLE_ONLY_UNITS.has(s.currentUnit.type)) {
+        const commitMsg = autoCommitCurrentBranch(s.basePath, s.currentUnit.type, s.currentUnit.id, taskContext);
+        if (commitMsg) {
+          ctx.ui.notify(`Committed: ${commitMsg.split("\n")[0]}`, "info");
+        }
       }
     } catch (e) {
       debugLog("postUnit", { phase: "auto-commit", error: String(e) });

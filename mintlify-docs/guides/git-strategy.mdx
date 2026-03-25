@@ -37,9 +37,9 @@ Work happens in the project root on a `milestone/<MID>` branch. No worktree is c
 main ─────────────────────────────────────────────────────────
   │                                                     ↑
   └── milestone/M001 (worktree) ────────────────────────┘
-       commit: feat(S01/T01): core types
-       commit: feat(S01/T02): markdown parser
-       commit: feat(S01/T03): file writer
+       commit: feat: core types
+       commit: feat: markdown parser
+       commit: feat: file writer
        → squash-merged to main as single commit
 ```
 
@@ -61,13 +61,16 @@ Merges happen sequentially to avoid conflicts.
 
 ### Commit format
 
-Conventional commit format with scope:
+Conventional commit format with GSD metadata in trailers:
 
 ```
-feat(S01/T01): core type definitions
-feat(S01/T02): markdown parser for plan files
-fix(M001/S03): bug fixes and doc corrections
-docs(M001/S04): workflow documentation
+feat: core type definitions
+
+GSD-Task: M001/S01/T01
+
+feat: markdown parser for plan files
+
+GSD-Task: M001/S01/T02
 ```
 
 ## Workflow modes

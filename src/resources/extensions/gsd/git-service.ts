@@ -102,23 +102,25 @@ export interface TaskCommitContext {
 
 /**
  * Build a meaningful conventional commit message from task execution context.
- * Format: `{type}({sliceId}/{taskId}): {description}`
+ * Format: `{type}: {description}` (clean conventional commit — no GSD IDs in subject).
+ *
+ * GSD metadata is placed in a `GSD-Task:` git trailer at the end of the body,
+ * following the same convention as `Signed-off-by:` or `Co-Authored-By:`.
  *
  * The description is the task summary one-liner if available (it describes
  * what was actually built), falling back to the task title (what was planned).
  */
 export function buildTaskCommitMessage(ctx: TaskCommitContext): string {
-  const scope = ctx.taskId; // e.g. "S01/T02" or just "T02"
   const description = ctx.oneLiner || ctx.taskTitle;
   const type = inferCommitType(ctx.taskTitle, ctx.oneLiner);
 
-  // Truncate description to ~72 chars for subject line
-  const maxDescLen = 68 - type.length - scope.length;
+  // Truncate description to ~72 chars for subject line (full budget without scope)
+  const maxDescLen = 70 - type.length;
   const truncated = description.length > maxDescLen
     ? description.slice(0, maxDescLen - 1).trimEnd() + "…"
     : description;
 
-  const subject = `${type}(${scope}): ${truncated}`;
+  const subject = `${type}: ${truncated}`;
 
   // Build body with key files if available
   const bodyParts: string[] = [];
@@ -131,15 +133,14 @@ export function buildTaskCommitMessage(ctx: TaskCommitContext): string {
     bodyParts.push(fileLines);
   }
 
+  // Trailers: GSD-Task first, then Resolves
+  bodyParts.push(`GSD-Task: ${ctx.taskId}`);
+
   if (ctx.issueNumber) {
     bodyParts.push(`Resolves #${ctx.issueNumber}`);
   }
 
-  if (bodyParts.length > 0) {
-    return `${subject}\n\n${bodyParts.join("\n\n")}`;
-  }
-
-  return subject;
+  return `${subject}\n\n${bodyParts.join("\n\n")}`;
 }
 
 /**
@@ -538,7 +539,7 @@ export class GitServiceImpl {
 
     const message = taskContext
       ? buildTaskCommitMessage(taskContext)
-      : `chore(${unitId}): auto-commit after ${unitType}`;
+      : `chore: auto-commit after ${unitType}\n\nGSD-Unit: ${unitId}`;
     nativeCommit(this.basePath, message, { allowEmpty: false });
     return message;
   }

@@ -76,7 +76,7 @@ test("#2151 bug 1: auto-stash unblocks merge when unrelated files are dirty", ()
 
     // Should succeed — the dirty README.md is auto-stashed before merge.
     const result = mergeMilestoneToMain(repo, "M200", roadmap);
-    assert.ok(result.commitMessage.includes("feat(M200)"), "merge succeeds with dirty unrelated file");
+    assert.ok(result.commitMessage.includes("feat:") && result.commitMessage.includes("GSD-Milestone: M200"), "merge succeeds with dirty unrelated file");
     assert.ok(existsSync(join(repo, "stash-test.ts")), "milestone code merged to main");
 
     // Verify the dirty file was restored (stash popped).

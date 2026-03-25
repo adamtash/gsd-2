@@ -1058,13 +1058,15 @@ export function mergeMilestoneToMain(
     if (titleMatch) milestoneTitle = titleMatch[1].trim();
   }
   milestoneTitle = milestoneTitle || milestoneId;
-  const subject = `feat(${milestoneId}): ${milestoneTitle}`;
+  const subject = `feat: ${milestoneTitle}`;
   let body = "";
   if (completedSlices.length > 0) {
     const sliceLines = completedSlices
       .map((s) => `- ${s.id}: ${s.title}`)
       .join("\n");
-    body = `\n\nCompleted slices:\n${sliceLines}\n\nBranch: ${milestoneBranch}`;
+    body = `\n\nCompleted slices:\n${sliceLines}\n\nGSD-Milestone: ${milestoneId}\nBranch: ${milestoneBranch}`;
+  } else {
+    body = `\n\nGSD-Milestone: ${milestoneId}\nBranch: ${milestoneBranch}`;
   }
   const commitMessage = subject + body;
 

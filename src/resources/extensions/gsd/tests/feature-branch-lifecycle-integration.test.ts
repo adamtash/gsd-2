@@ -252,7 +252,7 @@ describe('feature-branch-lifecycle-integration', async () => {
       // Exactly one new commit on feature branch (the squash merge)
       const featureLog = run(`git log --oneline ${featureBranch}`, repo);
       assert.ok(
-        featureLog.includes(`feat(${milestoneId})`),
+        featureLog.includes("feat:"),
         "feature branch has milestone merge commit",
       );
 
