@@ -26,7 +26,7 @@ You are executing **multiple tasks in parallel** for this slice. The task graph 
 2. **Wait for all subagents** to complete.
 3. **Verify each dispatched task's outputs** — check that expected files were created/modified, that verification commands pass where applicable, and that each task wrote its own `T##-SUMMARY.md`.
 4. **Do not rewrite successful task summaries or duplicate completion tool calls.** Treat a subagent-written summary as authoritative for that task.
-5. **If a failed task produced no summary, write a recovery summary for that task** with `blocker_discovered: true`, clear failure details, and leave the task unchecked so replan/retry has an authoritative record.
+5. **If a failed task produced no summary, call `gsd_summary_save`** with `milestone_id: {{milestoneId}}`, `slice_id: {{sliceId}}`, the failed task's `task_id`, and `artifact_type: "SUMMARY"` — include `blocker_discovered: true` and clear failure details in the `content`. Do NOT call `gsd_task_complete` for the failed task — leave it uncompleted so replan/retry has an authoritative record.
 6. **Preserve successful sibling tasks exactly as they landed.** Do not roll back good work because another parallel task failed.
 7. **Do NOT create a batch commit.** The surrounding unit lifecycle owns commits; this parent batch agent should not invent a second commit layer.
 8. **Report the batch outcome** — which tasks succeeded, which failed, and any output collisions or dependency surprises.

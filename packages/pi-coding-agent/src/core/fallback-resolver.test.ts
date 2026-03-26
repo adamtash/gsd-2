@@ -39,6 +39,7 @@ function createResolver(overrides?: {
 	enabled?: boolean;
 	isProviderAvailable?: (provider: string) => boolean;
 	hasAuth?: (provider: string) => boolean;
+	isProviderRequestReady?: (provider: string) => boolean;
 	find?: (provider: string, modelId: string) => Model<Api> | undefined;
 	getPreferredModelForProvider?: (provider: string, modelId?: string) => Model<Api> | undefined;
 }) {
@@ -72,6 +73,7 @@ function createResolver(overrides?: {
 				if (provider === "openai-codex") return openaiDefaultModel;
 				return undefined;
 			}),
+		isProviderRequestReady: overrides?.isProviderRequestReady ?? overrides?.hasAuth ?? (() => true),
 	} as unknown as ModelRegistry;
 
 	return { resolver: new FallbackResolver(settingsManager, authStorage, modelRegistry), authStorage };
@@ -134,9 +136,9 @@ describe("FallbackResolver — findFallback", () => {
 		assert.equal(result, null);
 	});
 
-	it("skips providers without auth", async () => {
+	it("skips providers that are not request-ready", async () => {
 		const { resolver } = createResolver({
-			hasAuth: (provider: string) => provider !== "alibaba",
+			isProviderRequestReady: (provider: string) => provider !== "alibaba",
 		});
 
 		const result = await resolver.findFallback(zaiModel, "quota_exhausted");
@@ -145,7 +147,18 @@ describe("FallbackResolver — findFallback", () => {
 		assert.equal(result!.model.provider, "openai");
 	});
 
-	it("falls back to the provider-preferred model when the chain model is missing", async () => {
+	it("allows fallback to external-cli style providers without stored auth", async () => {
+		const { resolver } = createResolver({
+			hasAuth: () => false,
+			isProviderRequestReady: (provider: string) => provider === "alibaba",
+		});
+
+		const result = await resolver.findFallback(zaiModel, "quota_exhausted");
+		assert.notEqual(result, null);
+		assert.equal(result!.model.provider, "alibaba");
+	});
+
+	it("skips providers with no model in registry", async () => {
 		const { resolver } = createResolver({
 			find: (provider: string, modelId: string) => {
 				if (provider === "alibaba") return undefined;

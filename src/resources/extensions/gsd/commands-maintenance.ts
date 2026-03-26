@@ -44,8 +44,10 @@ export async function handleCleanupBranches(ctx: ExtensionCommandContext, basePa
   try {
     const { listWorktrees } = await import("./worktree-manager.js");
     const { resolveMilestoneFile } = await import("./paths.js");
-    const { loadFile, parseRoadmap } = await import("./files.js");
+    const { loadFile } = await import("./files.js");
+    const { parseRoadmap } = await import("./parsers-legacy.js");
     const { isMilestoneComplete } = await import("./state.js");
+    const { isDbAvailable, getMilestone } = await import("./gsd-db.js");
 
     const attachedBranches = new Set(
       listWorktrees(basePath).map((wt) => wt.branch),
@@ -54,6 +56,22 @@ export async function handleCleanupBranches(ctx: ExtensionCommandContext, basePa
     for (const branch of milestoneBranches) {
       if (attachedBranches.has(branch)) continue;
       const milestoneId = branch.replace(/^milestone\//, "");
+
+      // DB-first: check milestone status directly
+      if (isDbAvailable()) {
+        const dbRow = getMilestone(milestoneId);
+        if (dbRow) {
+          if (dbRow.status !== "complete" && dbRow.status !== "done") continue;
+          // Milestone is complete per DB — proceed to delete branch
+          try {
+            nativeBranchDelete(basePath, branch, true);
+            deletedStaleMilestones++;
+          } catch { /* non-fatal */ }
+          continue;
+        }
+      }
+
+      // Filesystem fallback
       const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
       if (!roadmapPath) continue;
       let roadmapContent: string | null = null;
@@ -471,16 +489,14 @@ export async function handleRecover(ctx: ExtensionCommandContext, basePath: stri
   }
 
   try {
-    // 1. Delete hierarchy rows inside a transaction
+    // 1. Delete + re-populate inside a single transaction for atomicity
     const db = _getAdapter()!;
-    dbTransaction(() => {
+    const counts = dbTransaction(() => {
       db.exec("DELETE FROM tasks");
       db.exec("DELETE FROM slices");
       db.exec("DELETE FROM milestones");
+      return migrateHierarchyToDb(basePath);
     });
-
-    // 2. Re-populate from rendered markdown on disk
-    const counts = migrateHierarchyToDb(basePath);
 
     // 3. Invalidate state cache so deriveState() picks up fresh DB data
     invalidateStateCache();

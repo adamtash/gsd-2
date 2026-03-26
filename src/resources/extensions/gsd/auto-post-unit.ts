@@ -17,14 +17,13 @@ import { loadFile, parseSummary, resolveAllOverrides } from "./files.js";
 import { loadPrompt } from "./prompt-loader.js";
 import {
   resolveSliceFile,
-  resolveSlicePath,
   resolveTaskFile,
   resolveMilestoneFile,
   resolveTasksDir,
   buildTaskFileName,
-  gsdRoot,
 } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
+import { parseUnitId } from "./unit-id.js";
 import { closeoutUnit, type CloseoutOptions } from "./auto-unit-closeout.js";
 import {
   autoCommitCurrentBranch,
@@ -34,11 +33,9 @@ import {
   verifyExpectedArtifact,
   resolveExpectedArtifactPath,
 } from "./auto-recovery.js";
-import { writeUnitRuntimeRecord, clearUnitRuntimeRecord } from "./unit-runtime.js";
-import { runGSDDoctor, rebuildState, summarizeDoctorIssues } from "./doctor.js";
-import { recordHealthSnapshot, checkHealEscalation } from "./doctor-proactive.js";
-import { syncStateToProjectRoot } from "./auto-worktree-sync.js";
-import { isDbAvailable, getTask, getSlice, updateTaskStatus } from "./gsd-db.js";
+import { regenerateIfMissing } from "./workflow-projections.js";
+import { syncStateToProjectRoot } from "./auto-worktree.js";
+import { isDbAvailable, getTask, getSlice, getMilestone, updateTaskStatus, _getAdapter } from "./gsd-db.js";
 import { renderPlanCheckboxes } from "./markdown-renderer.js";
 import { consumeSignal } from "./session-status-io.js";
 import {
@@ -51,15 +48,24 @@ import {
 import { hasPendingCaptures, loadPendingCaptures } from "./captures.js";
 import { debugLog } from "./debug-logger.js";
 import type { AutoSession } from "./auto/session.js";
+
+/** Unit types that only touch `.gsd/` internal state files (no code changes).
+ *  Auto-commit is skipped for these — their state files are picked up by the
+ *  next actual task commit via `smartStage()`. */
+const LIFECYCLE_ONLY_UNITS = new Set([
+  "research-milestone", "discuss-milestone", "plan-milestone",
+  "validate-milestone", "research-slice", "plan-slice",
+  "replan-slice", "complete-slice", "run-uat",
+  "reassess-roadmap", "rewrite-docs",
+]);
 import {
   updateProgressWidget as _updateProgressWidget,
   updateSliceProgressCache,
   unitVerb,
   hideFooter,
 } from "./auto-dashboard.js";
-import { existsSync, unlinkSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWriteSync } from "./atomic-write.js";
 import { _resetHasChangesCache } from "./native-git-bridge.js";
 
 // ─── Rogue File Detection ──────────────────────────────────────────────────
@@ -79,6 +85,15 @@ export interface RogueFileWrite {
  * in postUnitPostVerification() eventually ingests rogue files, but explicit
  * detection provides immediate diagnostics so operators know the prompt failed.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function hasNonEmptyFields(row: Record<string, any> | null, fields: string[]): boolean {
+  if (!row) return false;
+  return fields.some(f => String(row[f] || "").trim().length > 0);
+}
+
+const MILESTONE_PLANNING_FIELDS = ["title", "vision", "requirement_coverage", "boundary_map_markdown"];
+const SLICE_PLANNING_FIELDS = ["title", "demo", "risk", "depends"];
+
 export function detectRogueFileWrites(
   unitType: string,
   unitId: string,
@@ -86,11 +101,10 @@ export function detectRogueFileWrites(
 ): RogueFileWrite[] {
   if (!isDbAvailable()) return [];
 
-  const parts = unitId.split("/");
+  const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
   const rogues: RogueFileWrite[] = [];
 
   if (unitType === "execute-task") {
-    const [mid, sid, tid] = parts;
     if (!mid || !sid || !tid) return [];
 
     const summaryPath = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
@@ -101,7 +115,6 @@ export function detectRogueFileWrites(
       rogues.push({ path: summaryPath, unitType, unitId });
     }
   } else if (unitType === "complete-slice") {
-    const [mid, sid] = parts;
     if (!mid || !sid) return [];
 
     const summaryPath = resolveSliceFile(basePath, mid, sid, "SUMMARY");
@@ -111,18 +124,69 @@ export function detectRogueFileWrites(
     if (!dbRow || dbRow.status !== "complete") {
       rogues.push({ path: summaryPath, unitType, unitId });
     }
+  } else if (unitType === "plan-milestone") {
+    if (!mid) return [];
+
+    const roadmapPath = resolveMilestoneFile(basePath, mid, "ROADMAP");
+    if (!roadmapPath || !existsSync(roadmapPath)) return [];
+
+    const dbRow = getMilestone(mid);
+    const hasPlanningState = hasNonEmptyFields(dbRow, MILESTONE_PLANNING_FIELDS);
+
+    if (!hasPlanningState) {
+      rogues.push({ path: roadmapPath, unitType, unitId });
+    }
+  } else if (unitType === "plan-slice" || unitType === "replan-slice") {
+    if (!mid || !sid) return [];
+
+    const planPath = resolveSliceFile(basePath, mid, sid, "PLAN");
+    if (!planPath || !existsSync(planPath)) return [];
+
+    const dbRow = getSlice(mid, sid);
+    const hasPlanningState = hasNonEmptyFields(dbRow, SLICE_PLANNING_FIELDS);
+
+    if (!hasPlanningState) {
+      rogues.push({ path: planPath, unitType, unitId });
+    }
+
+    // Also check for rogue REPLAN.md
+    const replanPath = resolveSliceFile(basePath, mid, sid, "REPLAN");
+    if (replanPath && existsSync(replanPath) && !hasPlanningState) {
+      rogues.push({ path: replanPath, unitType, unitId });
+    }
+  } else if (unitType === "reassess-roadmap") {
+    if (!mid || !sid) return [];
+
+    const assessPath = resolveSliceFile(basePath, mid, sid, "ASSESSMENT");
+    if (!assessPath || !existsSync(assessPath)) return [];
+
+    // Assessment file exists on disk — check if DB knows about it via the artifacts table
+    const adapter = _getAdapter();
+    if (adapter) {
+      const row = adapter.prepare(
+        `SELECT 1 FROM artifacts WHERE path LIKE :pattern AND artifact_type = 'ASSESSMENT' LIMIT 1`,
+      ).get({ ":pattern": `%${sid}-ASSESSMENT.md` });
+      if (!row) {
+        rogues.push({ path: assessPath, unitType, unitId });
+      }
+    }
+  } else if (unitType === "plan-task") {
+    if (!mid || !sid || !tid) return [];
+
+    const taskPlanPath = resolveTaskFile(basePath, mid, sid, tid, "PLAN");
+    if (!taskPlanPath || !existsSync(taskPlanPath)) return [];
+
+    const dbRow = getTask(mid, sid, tid);
+    if (!dbRow) {
+      rogues.push({ path: taskPlanPath, unitType, unitId });
+    }
   }
 
   return rogues;
 }
 
-/** Throttle STATE.md rebuilds — at most once per 30 seconds */
-const STATE_REBUILD_MIN_INTERVAL_MS = 30_000;
-
 export interface PreVerificationOpts {
   skipSettleDelay?: boolean;
-  skipDoctor?: boolean;
-  skipStateRebuild?: boolean;
   skipWorktreeSync?: boolean;
 }
 
@@ -179,8 +243,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       let taskContext: TaskCommitContext | undefined;
 
       if (s.currentUnit.type === "execute-task") {
-        const parts = s.currentUnit.id.split("/");
-        const [mid, sid, tid] = parts;
+        const { milestone: mid, slice: sid, task: tid } = parseUnitId(s.currentUnit.id);
         if (mid && sid && tid) {
           const summaryPath = resolveTaskFile(s.basePath, mid, sid, tid, "SUMMARY");
           if (summaryPath) {
@@ -219,9 +282,14 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       // `git worktree remove --force` during teardown.
       _resetHasChangesCache();
 
-      const commitMsg = autoCommitCurrentBranch(s.basePath, s.currentUnit.type, s.currentUnit.id, taskContext);
-      if (commitMsg) {
-        ctx.ui.notify(`Committed: ${commitMsg.split("\n")[0]}`, "info");
+      // Skip auto-commit for lifecycle-only units (#2553) — they only touch
+      // `.gsd/` internal state files. Those files are picked up by the next
+      // actual task commit via smartStage().
+      if (!LIFECYCLE_ONLY_UNITS.has(s.currentUnit.type)) {
+        const commitMsg = autoCommitCurrentBranch(s.basePath, s.currentUnit.type, s.currentUnit.id, taskContext);
+        if (commitMsg) {
+          ctx.ui.notify(`Committed: ${commitMsg.split("\n")[0]}`, "info");
+        }
       }
     } catch (e) {
       debugLog("postUnit", { phase: "auto-commit", error: String(e) });
@@ -234,78 +302,6 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       await runGitHubSync(s.basePath, s.currentUnit.type, s.currentUnit.id);
     } catch (e) {
       debugLog("postUnit", { phase: "github-sync", error: String(e) });
-    }
-
-    // Doctor: fix mechanical bookkeeping (skipped for lightweight sidecars)
-    if (!opts?.skipDoctor) try {
-      const scopeParts = s.currentUnit.id.split("/").slice(0, 2);
-      const doctorScope = scopeParts.join("/");
-      const sliceTerminalUnits = new Set(["complete-slice", "run-uat"]);
-      const effectiveFixLevel = sliceTerminalUnits.has(s.currentUnit.type) ? "all" as const : "task" as const;
-      const report = await runGSDDoctor(s.basePath, { fix: true, scope: doctorScope, fixLevel: effectiveFixLevel });
-      // Human-readable fix notification with details
-      if (report.fixesApplied.length > 0) {
-        const fixSummary = report.fixesApplied.length <= 2
-          ? report.fixesApplied.join("; ")
-          : `${report.fixesApplied[0]}; +${report.fixesApplied.length - 1} more`;
-        ctx.ui.notify(`Doctor: ${fixSummary}`, "info");
-      }
-
-      // Proactive health tracking — filter to current milestone to avoid
-      // cross-milestone stale errors inflating the escalation counter
-      const currentMilestoneId = s.currentUnit.id.split("/")[0];
-      const milestoneIssues = currentMilestoneId
-        ? report.issues.filter(i =>
-            i.unitId === currentMilestoneId ||
-            i.unitId.startsWith(`${currentMilestoneId}/`))
-        : report.issues;
-      const summary = summarizeDoctorIssues(milestoneIssues);
-      // Pass issue details + scope for real-time visibility in the progress widget
-      const issueDetails = milestoneIssues
-        .filter(i => i.severity === "error" || i.severity === "warning")
-        .map(i => ({ code: i.code, message: i.message, severity: i.severity, unitId: i.unitId }));
-      recordHealthSnapshot(summary.errors, summary.warnings, report.fixesApplied.length, issueDetails, report.fixesApplied, doctorScope);
-
-      // Check if we should escalate to LLM-assisted heal
-      if (summary.errors > 0) {
-        const unresolvedErrors = milestoneIssues
-          .filter(i => i.severity === "error" && !i.fixable)
-          .map(i => ({ code: i.code, message: i.message, unitId: i.unitId }));
-        const escalation = checkHealEscalation(summary.errors, unresolvedErrors);
-        if (escalation.shouldEscalate) {
-          ctx.ui.notify(
-            `Doctor heal escalation: ${escalation.reason}. Dispatching LLM-assisted heal.`,
-            "warning",
-          );
-          try {
-            const { formatDoctorIssuesForPrompt, formatDoctorReport } = await import("./doctor.js");
-            const { dispatchDoctorHeal } = await import("./commands-handlers.js");
-            const actionable = report.issues.filter(i => i.severity === "error");
-            const reportText = formatDoctorReport(report, { scope: doctorScope, includeWarnings: true });
-            const structuredIssues = formatDoctorIssuesForPrompt(actionable);
-            dispatchDoctorHeal(pi, doctorScope, reportText, structuredIssues);
-            return "dispatched";
-          } catch (e) {
-            debugLog("postUnit", { phase: "doctor-heal-dispatch", error: String(e) });
-          }
-        }
-      }
-    } catch (e) {
-      debugLog("postUnit", { phase: "doctor", error: String(e) });
-    }
-
-    // Throttled STATE.md rebuild (skipped for lightweight sidecars)
-    if (!opts?.skipStateRebuild) {
-      const now = Date.now();
-      if (now - s.lastStateRebuildAt >= STATE_REBUILD_MIN_INTERVAL_MS) {
-        try {
-          await rebuildState(s.basePath);
-          s.lastStateRebuildAt = now;
-          autoCommitCurrentBranch(s.basePath, "state-rebuild", s.currentUnit.id);
-        } catch (e) {
-          debugLog("postUnit", { phase: "state-rebuild", error: String(e) });
-        }
-      }
     }
 
     // Prune dead bg-shell processes
@@ -351,8 +347,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
     // Reactive state cleanup on slice completion
     if (s.currentUnit.type === "complete-slice") {
       try {
-        const parts = s.currentUnit.id.split("/");
-        const [mid, sid] = parts;
+        const { milestone: mid, slice: sid } = parseUnitId(s.currentUnit.id);
         if (mid && sid) {
           const { clearReactiveState } = await import("./reactive-graph.js");
           clearReactiveState(s.basePath, mid, sid);
@@ -433,6 +428,26 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         debugLog("postUnit", { phase: "artifact-verify", error: String(e) });
       }
 
+      // If verification failed, attempt to regenerate missing projection files
+      // from DB data before giving up (e.g. research-slice produces PLAN from engine).
+      if (!triggerArtifactVerified) {
+        try {
+          const { milestone: mid, slice: sid } = parseUnitId(s.currentUnit.id);
+          if (mid && sid) {
+            const regenerated = regenerateIfMissing(s.basePath, mid, sid, "PLAN");
+            if (regenerated) {
+              // Re-check after regeneration
+              triggerArtifactVerified = verifyExpectedArtifact(s.currentUnit.type, s.currentUnit.id, s.basePath);
+              if (triggerArtifactVerified) {
+                invalidateAllCaches();
+              }
+            }
+          }
+        } catch (e) {
+          debugLog("postUnit", { phase: "regenerate-projection", error: String(e) });
+        }
+      }
+
       // When artifact verification fails for a unit type that has a known expected
       // artifact, return "retry" so the caller re-dispatches with failure context
       // instead of blindly re-dispatching the same unit (#1571).
@@ -456,17 +471,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         }
       }
     } else {
-      // Hook unit completed — finalize its runtime record
-      try {
-        writeUnitRuntimeRecord(s.basePath, s.currentUnit.type, s.currentUnit.id, s.currentUnit.startedAt, {
-          phase: "finalized",
-          progressCount: 1,
-          lastProgressKind: "hook-completed",
-        });
-        clearUnitRuntimeRecord(s.basePath, s.currentUnit.type, s.currentUnit.id);
-      } catch (e) {
-        debugLog("postUnit", { phase: "hook-finalize", error: String(e) });
-      }
+      // Hook unit completed — no additional processing needed
     }
   }
 
@@ -487,16 +492,6 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
  */
 export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"continue" | "step-wizard" | "stopped"> {
   const { s, ctx, pi, buildSnapshotOpts, lockBase, stopAuto, pauseAuto, updateProgressWidget } = pctx;
-
-  // ── DB dual-write ──
-  if (isDbAvailable()) {
-    try {
-      const { migrateFromMarkdown } = await import("./md-importer.js");
-      migrateFromMarkdown(s.basePath);
-    } catch (err) {
-      process.stderr.write(`gsd-db: re-import failed: ${(err as Error).message}\n`);
-    }
-  }
 
   // ── Post-unit hooks ──
   if (s.currentUnit && !s.stepMode) {
@@ -537,33 +532,19 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
 
         // ── State reset: undo the completion so deriveState re-derives the unit ──
         try {
-          const parts = trigger.unitId.split("/");
-          const [mid, sid, tid] = parts;
+          const { milestone: mid, slice: sid, task: tid } = parseUnitId(trigger.unitId);
 
           // 1. Reset task status in DB and re-render plan checkboxes
           if (mid && sid && tid) {
             try {
               updateTaskStatus(mid, sid, tid, "pending");
               await renderPlanCheckboxes(s.basePath, mid, sid);
-            } catch {
-              // DB may be unavailable — fall back to direct file-based uncheck
-              try {
-                const slicePath = resolveSlicePath(s.basePath, mid, sid);
-                if (slicePath) {
-                  const { readdirSync } = await import("node:fs");
-                  const planCandidates = readdirSync(slicePath)
-                    .filter((f: string) => f.includes("PLAN") && (f.startsWith(sid) || f.startsWith(`${sid}-`)));
-                  if (planCandidates.length > 0) {
-                    const planFile = join(slicePath, planCandidates[0]);
-                    let content = readFileSync(planFile, "utf-8");
-                    const regex = new RegExp(`^(\\s*-\\s*)\\[x\\](\\s*\\**${tid}\\**[:\\s])`, "mi");
-                    if (regex.test(content)) {
-                      content = content.replace(regex, "$1[ ]$2");
-                      writeFileSync(planFile, content, "utf-8");
-                    }
-                  }
-                }
-              } catch { /* non-fatal: file-based fallback failure */ }
+            } catch (dbErr) {
+              // DB unavailable — fail explicitly rather than silently reverting to markdown mutation.
+              // Use 'gsd recover' to rebuild DB state from disk if needed.
+              process.stderr.write(
+                `gsd: retry state-reset failed (DB unavailable): ${(dbErr as Error).message}. Run 'gsd recover' to reconcile.\n`,
+              );
             }
           }
 
@@ -578,17 +559,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
             }
           }
 
-          // 3. Remove from s.completedUnits and flush to completed-units.json
-          s.completedUnits = s.completedUnits.filter(
-            u => !(u.type === trigger.unitType && u.id === trigger.unitId),
-          );
-          try {
-            const completedKeysPath = join(gsdRoot(s.basePath), "completed-units.json");
-            const keys = s.completedUnits.map(u => `${u.type}/${u.id}`);
-            atomicWriteSync(completedKeysPath, JSON.stringify(keys, null, 2));
-          } catch { /* non-fatal: disk flush failure */ }
-
-          // 4. Delete the retry_on artifact (e.g. NEEDS-REWORK.md)
+          // 3. Delete the retry_on artifact (e.g. NEEDS-REWORK.md)
           if (trigger.retryArtifact) {
             const retryArtifactPath = resolveHookArtifactPath(s.basePath, trigger.unitId, trigger.retryArtifact);
             if (existsSync(retryArtifactPath)) {

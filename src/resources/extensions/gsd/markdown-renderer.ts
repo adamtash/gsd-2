@@ -8,18 +8,22 @@
 // Critical invariant: rendered markdown must round-trip through
 // parseRoadmap(), parsePlan(), parseSummary() in files.ts.
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, relative } from "node:path";
+import { createRequire } from "node:module";
 import {
   getAllMilestones,
+  getMilestone,
   getMilestoneSlices,
   getSliceTasks,
   getTask,
   getSlice,
   getArtifact,
   insertArtifact,
+  getGateResults,
 } from "./gsd-db.js";
 import type { MilestoneRow, SliceRow, TaskRow, ArtifactRow } from "./gsd-db.js";
+import type { GateRow } from "./types.js";
 import {
   resolveMilestoneFile,
   resolveSliceFile,
@@ -29,7 +33,7 @@ import {
   buildTaskFileName,
   buildSliceFileName,
 } from "./paths.js";
-import { saveFile, clearParseCache, parseRoadmap, parsePlan } from "./files.js";
+import { saveFile, clearParseCache } from "./files.js";
 import { invalidateStateCache } from "./state.js";
 import { clearPathCache } from "./paths.js";
 
@@ -147,6 +151,308 @@ async function writeAndStore(
   }
 
   invalidateCaches();
+}
+
+function renderRoadmapMarkdown(milestone: MilestoneRow, slices: SliceRow[]): string {
+  const lines: string[] = [];
+
+  lines.push(`# ${milestone.id}: ${milestone.title || milestone.id}`);
+  lines.push("");
+  lines.push(`**Vision:** ${milestone.vision}`);
+  lines.push("");
+
+  if (milestone.success_criteria.length > 0) {
+    lines.push("## Success Criteria");
+    lines.push("");
+    for (const criterion of milestone.success_criteria) {
+      lines.push(`- ${criterion}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("## Slices");
+  lines.push("");
+  for (const slice of slices) {
+    const done = slice.status === "complete" ? "x" : " ";
+    const depends = `[${(slice.depends ?? []).join(",")}]`;
+    lines.push(`- [${done}] **${slice.id}: ${slice.title}** \`risk:${slice.risk}\` \`depends:${depends}\``);
+    lines.push(`  > After this: ${slice.demo}`);
+    lines.push("");
+  }
+
+  if (milestone.boundary_map_markdown.trim()) {
+    lines.push("## Boundary Map");
+    lines.push("");
+    lines.push(milestone.boundary_map_markdown.trim());
+    lines.push("");
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function renderTaskPlanMarkdown(task: TaskRow, taskGates: GateRow[] = []): string {
+  const estimatedSteps = Math.max(1, task.description.trim().split(/\n+/).filter(Boolean).length || 1);
+  const estimatedFiles = task.files.length > 0
+    ? task.files.length
+    : task.expected_output.length > 0
+      ? task.expected_output.length
+      : task.inputs.length > 0
+        ? task.inputs.length
+        : 1;
+
+  const lines: string[] = [];
+  lines.push("---");
+  lines.push(`estimated_steps: ${estimatedSteps}`);
+  lines.push(`estimated_files: ${estimatedFiles}`);
+  lines.push("skills_used: []");
+  lines.push("---");
+  lines.push("");
+  lines.push(`# ${task.id}: ${task.title || task.id}`);
+  lines.push("");
+
+  if (task.description.trim()) {
+    lines.push(task.description.trim());
+    lines.push("");
+  }
+
+  lines.push("## Inputs");
+  lines.push("");
+  if (task.inputs.length > 0) {
+    for (const input of task.inputs) {
+      lines.push(`- \`${input}\``);
+    }
+  } else {
+    lines.push("- None specified.");
+  }
+  lines.push("");
+
+  lines.push("## Expected Output");
+  lines.push("");
+  if (task.expected_output.length > 0) {
+    for (const output of task.expected_output) {
+      lines.push(`- \`${output}\``);
+    }
+  } else if (task.files.length > 0) {
+    for (const file of task.files) {
+      lines.push(`- \`${file}\``);
+    }
+  } else {
+    lines.push("- Update the implementation and proof artifacts needed for this task.");
+  }
+  lines.push("");
+
+  lines.push("## Verification");
+  lines.push("");
+  lines.push(task.verify.trim() || "- Verify the task outcome with the slice-level checks.");
+  lines.push("");
+
+  if (task.observability_impact.trim()) {
+    lines.push("## Observability Impact");
+    lines.push("");
+    lines.push(task.observability_impact.trim());
+    lines.push("");
+  }
+
+  // ── Quality Gate Sections (Q5/Q6/Q7) ──────────────────────────────────
+  const gateLabels: Record<string, string> = { Q5: "Failure Modes", Q6: "Load Profile", Q7: "Negative Tests" };
+  for (const [gid, label] of Object.entries(gateLabels)) {
+    const gate = taskGates.find(g => g.gate_id === gid && g.status === "complete");
+    if (gate && gate.verdict !== "omitted") {
+      lines.push(`## ${label}`);
+      lines.push("");
+      lines.push(gate.findings.trim() || `- **Verdict:** ${gate.verdict}\n- **Rationale:** ${gate.rationale}`);
+      lines.push("");
+    }
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function renderSlicePlanMarkdown(slice: SliceRow, tasks: TaskRow[], gates: GateRow[] = []): string {
+  const lines: string[] = [];
+
+  lines.push(`# ${slice.id}: ${slice.title || slice.id}`);
+  lines.push("");
+  lines.push(`**Goal:** ${slice.goal}`);
+  lines.push(`**Demo:** ${slice.demo}`);
+  lines.push("");
+
+  lines.push("## Must-Haves");
+  lines.push("");
+  if (slice.success_criteria.trim()) {
+    for (const line of slice.success_criteria.split(/\n+/).map((entry) => entry.trim()).filter(Boolean)) {
+      lines.push(line.startsWith("-") ? line : `- ${line}`);
+    }
+  } else {
+    lines.push("- Complete the planned slice outcomes.");
+  }
+  lines.push("");
+
+  // ── Quality Gate Sections (Q3/Q4) ────────────────────────────────────
+  const q3 = gates.find(g => g.gate_id === "Q3" && g.status === "complete");
+  if (q3 && q3.verdict !== "omitted") {
+    lines.push("## Threat Surface");
+    lines.push("");
+    lines.push(q3.findings.trim() || `- **Verdict:** ${q3.verdict}\n- **Rationale:** ${q3.rationale}`);
+    lines.push("");
+  }
+
+  const q4 = gates.find(g => g.gate_id === "Q4" && g.status === "complete");
+  if (q4 && q4.verdict !== "omitted") {
+    lines.push("## Requirement Impact");
+    lines.push("");
+    lines.push(q4.findings.trim() || `- **Verdict:** ${q4.verdict}\n- **Rationale:** ${q4.rationale}`);
+    lines.push("");
+  }
+
+  if (slice.proof_level.trim()) {
+    lines.push("## Proof Level");
+    lines.push("");
+    lines.push(`- This slice proves: ${slice.proof_level.trim()}`);
+    lines.push("");
+  }
+
+  if (slice.integration_closure.trim()) {
+    lines.push("## Integration Closure");
+    lines.push("");
+    lines.push(slice.integration_closure.trim());
+    lines.push("");
+  }
+
+  lines.push("## Verification");
+  lines.push("");
+  if (slice.observability_impact.trim()) {
+    const verificationLines = slice.observability_impact
+      .split(/\n+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    for (const line of verificationLines) {
+      lines.push(line.startsWith("-") ? line : `- ${line}`);
+    }
+  } else {
+    lines.push("- Run the task and slice verification checks for this slice.");
+  }
+  lines.push("");
+
+  lines.push("## Tasks");
+  lines.push("");
+  for (const task of tasks) {
+    const done = task.status === "done" || task.status === "complete" ? "x" : " ";
+    const estimate = task.estimate.trim() ? ` \`est:${task.estimate.trim()}\`` : "";
+    lines.push(`- [${done}] **${task.id}: ${task.title || task.id}**${estimate}`);
+    if (task.description.trim()) {
+      lines.push(`  ${task.description.trim()}`);
+    }
+    if (task.files.length > 0) {
+      lines.push(`  - Files: ${task.files.map((file) => `\`${file}\``).join(", ")}`);
+    }
+    if (task.verify.trim()) {
+      lines.push(`  - Verify: ${task.verify.trim()}`);
+    }
+    lines.push("");
+  }
+
+  const filesLikelyTouched = Array.from(new Set(tasks.flatMap((task) => task.files)));
+  if (filesLikelyTouched.length > 0) {
+    lines.push("## Files Likely Touched");
+    lines.push("");
+    for (const file of filesLikelyTouched) {
+      lines.push(`- ${file}`);
+    }
+    lines.push("");
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+export async function renderPlanFromDb(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+): Promise<{ planPath: string; taskPlanPaths: string[]; content: string }> {
+  const slice = getSlice(milestoneId, sliceId);
+  if (!slice) {
+    throw new Error(`slice ${milestoneId}/${sliceId} not found`);
+  }
+
+  const tasks = getSliceTasks(milestoneId, sliceId);
+  if (tasks.length === 0) {
+    throw new Error(`no tasks found for ${milestoneId}/${sliceId}`);
+  }
+
+  const slicePath = resolveSlicePath(basePath, milestoneId, sliceId)
+    ?? join(gsdRoot(basePath), "milestones", milestoneId, "slices", sliceId);
+  const absPath = resolveSliceFile(basePath, milestoneId, sliceId, "PLAN")
+    ?? join(slicePath, `${sliceId}-PLAN.md`);
+  const artifactPath = toArtifactPath(absPath, basePath);
+  const sliceGates = getGateResults(milestoneId, sliceId, "slice");
+  const content = renderSlicePlanMarkdown(slice, tasks, sliceGates);
+
+  await writeAndStore(absPath, artifactPath, content, {
+    artifact_type: "PLAN",
+    milestone_id: milestoneId,
+    slice_id: sliceId,
+  });
+
+  const taskPlanPaths: string[] = [];
+  for (const task of tasks) {
+    const rendered = await renderTaskPlanFromDb(basePath, milestoneId, sliceId, task.id);
+    taskPlanPaths.push(rendered.taskPlanPath);
+  }
+
+  return { planPath: absPath, taskPlanPaths, content };
+}
+
+export async function renderTaskPlanFromDb(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): Promise<{ taskPlanPath: string; content: string }> {
+  const task = getTask(milestoneId, sliceId, taskId);
+  if (!task) {
+    throw new Error(`task ${milestoneId}/${sliceId}/${taskId} not found`);
+  }
+
+  const tasksDir = resolveTasksDir(basePath, milestoneId, sliceId)
+    ?? join(gsdRoot(basePath), "milestones", milestoneId, "slices", sliceId, "tasks");
+  mkdirSync(tasksDir, { recursive: true });
+  const absPath = join(tasksDir, buildTaskFileName(taskId, "PLAN"));
+  const artifactPath = toArtifactPath(absPath, basePath);
+  const taskGates = getGateResults(milestoneId, sliceId, "task").filter(g => g.task_id === taskId);
+  const content = task.full_plan_md.trim() ? task.full_plan_md : renderTaskPlanMarkdown(task, taskGates);
+
+  await writeAndStore(absPath, artifactPath, content, {
+    artifact_type: "PLAN",
+    milestone_id: milestoneId,
+    slice_id: sliceId,
+    task_id: taskId,
+  });
+
+  return { taskPlanPath: absPath, content };
+}
+
+export async function renderRoadmapFromDb(
+  basePath: string,
+  milestoneId: string,
+): Promise<{ roadmapPath: string; content: string }> {
+  const milestone = getMilestone(milestoneId);
+  if (!milestone) {
+    throw new Error(`milestone ${milestoneId} not found`);
+  }
+
+  const slices = getMilestoneSlices(milestoneId);
+  const absPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP") ??
+    join(gsdRoot(basePath), "milestones", milestoneId, `${milestoneId}-ROADMAP.md`);
+  const artifactPath = toArtifactPath(absPath, basePath);
+  const content = renderRoadmapMarkdown(milestone, slices);
+
+  await writeAndStore(absPath, artifactPath, content, {
+    artifact_type: "ROADMAP",
+    milestone_id: milestoneId,
+  });
+
+  return { roadmapPath: absPath, content };
 }
 
 // ─── Roadmap Checkbox Rendering ───────────────────────────────────────────
@@ -493,6 +799,17 @@ export interface StaleEntry {
  * Logs to stderr when stale files are detected.
  */
 export function detectStaleRenders(basePath: string): StaleEntry[] {
+  // Lazy-load parsers — intentional disk-vs-DB comparison requires parsers
+  const _require = createRequire(import.meta.url);
+  let parseRoadmap: Function, parsePlan: Function;
+  try {
+    const m = _require("./parsers-legacy.ts");
+    parseRoadmap = m.parseRoadmap; parsePlan = m.parsePlan;
+  } catch {
+    const m = _require("./parsers-legacy.js");
+    parseRoadmap = m.parseRoadmap; parsePlan = m.parsePlan;
+  }
+
   const stale: StaleEntry[] = [];
   const milestones = getAllMilestones();
 
@@ -508,7 +825,7 @@ export function detectStaleRenders(basePath: string): StaleEntry[] {
 
         for (const slice of slices) {
           const isCompleteInDb = slice.status === "complete";
-          const roadmapSlice = parsed.slices.find(s => s.id === slice.id);
+          const roadmapSlice = parsed.slices.find((s: { id: string }) => s.id === slice.id);
           if (!roadmapSlice) continue;
 
           if (isCompleteInDb && !roadmapSlice.done) {
@@ -541,7 +858,7 @@ export function detectStaleRenders(basePath: string): StaleEntry[] {
 
           for (const task of tasks) {
             const isDoneInDb = task.status === "done" || task.status === "complete";
-            const planTask = parsed.tasks.find(t => t.id === task.id);
+            const planTask = parsed.tasks.find((t: { id: string }) => t.id === task.id);
             if (!planTask) continue;
 
             if (isDoneInDb && !planTask.done) {
@@ -649,12 +966,14 @@ export async function repairStaleRenders(basePath: string): Promise<number> {
 
   for (const entry of staleEntries) {
     if (repairedPaths.has(entry.path)) continue;
+    // Normalize path separators for cross-platform regex matching
+    const normPath = entry.path.replace(/\\/g, "/");
 
     try {
       // Determine repair action from the reason
       if (entry.reason.includes("in roadmap")) {
         // Roadmap checkbox mismatch — extract milestone ID from path
-        const milestoneMatch = entry.path.match(/milestones\/([^/]+)\//);
+        const milestoneMatch = normPath.match(/milestones\/([^/]+)\//);
         if (milestoneMatch) {
           const ok = await renderRoadmapCheckboxes(basePath, milestoneMatch[1]);
           if (ok) {
@@ -664,7 +983,7 @@ export async function repairStaleRenders(basePath: string): Promise<number> {
         }
       } else if (entry.reason.includes("in plan")) {
         // Plan checkbox mismatch — extract milestone + slice IDs from path
-        const pathMatch = entry.path.match(/milestones\/([^/]+)\/slices\/([^/]+)\//);
+        const pathMatch = normPath.match(/milestones\/([^/]+)\/slices\/([^/]+)\//);
         if (pathMatch) {
           const ok = await renderPlanCheckboxes(basePath, pathMatch[1], pathMatch[2]);
           if (ok) {
@@ -674,7 +993,7 @@ export async function repairStaleRenders(basePath: string): Promise<number> {
         }
       } else if (entry.reason.includes("SUMMARY.md missing") && entry.reason.match(/^T\d+/)) {
         // Missing task summary — extract IDs from path
-        const pathMatch = entry.path.match(/milestones\/([^/]+)\/slices\/([^/]+)\/tasks\//);
+        const pathMatch = normPath.match(/milestones\/([^/]+)\/slices\/([^/]+)\/tasks\//);
         const taskMatch = entry.reason.match(/^(T\d+)/);
         if (pathMatch && taskMatch) {
           const ok = await renderTaskSummary(basePath, pathMatch[1], pathMatch[2], taskMatch[1]);
@@ -685,7 +1004,7 @@ export async function repairStaleRenders(basePath: string): Promise<number> {
         }
       } else if (entry.reason.includes("SUMMARY.md missing") && entry.reason.match(/^S\d+/)) {
         // Missing slice summary — extract IDs from path
-        const pathMatch = entry.path.match(/milestones\/([^/]+)\/slices\/([^/]+)\//);
+        const pathMatch = normPath.match(/milestones\/([^/]+)\/slices\/([^/]+)\//);
         if (pathMatch) {
           const ok = await renderSliceSummary(basePath, pathMatch[1], pathMatch[2]);
           if (ok) {
@@ -695,7 +1014,7 @@ export async function repairStaleRenders(basePath: string): Promise<number> {
         }
       } else if (entry.reason.includes("UAT.md missing")) {
         // Missing slice UAT — renderSliceSummary handles both SUMMARY + UAT
-        const pathMatch = entry.path.match(/milestones\/([^/]+)\/slices\/([^/]+)\//);
+        const pathMatch = normPath.match(/milestones\/([^/]+)\/slices\/([^/]+)\//);
         if (pathMatch) {
           const ok = await renderSliceSummary(basePath, pathMatch[1], pathMatch[2]);
           if (ok) {
@@ -718,4 +1037,95 @@ export async function repairStaleRenders(basePath: string): Promise<number> {
   }
 
   return repairCount;
+}
+
+// ─── Replan & Assessment Renderers ────────────────────────────────────────
+
+export interface ReplanData {
+  blockerTaskId: string;
+  blockerDescription: string;
+  whatChanged: string;
+}
+
+export interface AssessmentData {
+  verdict: string;
+  assessment: string;
+  completedSliceId?: string;
+}
+
+export async function renderReplanFromDb(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  replanData: ReplanData,
+): Promise<{ replanPath: string; content: string }> {
+  const slicePath = resolveSlicePath(basePath, milestoneId, sliceId)
+    ?? join(gsdRoot(basePath), "milestones", milestoneId, "slices", sliceId);
+  const absPath = join(slicePath, `${sliceId}-REPLAN.md`);
+  const artifactPath = toArtifactPath(absPath, basePath);
+
+  const lines: string[] = [];
+  lines.push(`# ${sliceId} Replan`);
+  lines.push("");
+  lines.push(`**Milestone:** ${milestoneId}`);
+  lines.push(`**Slice:** ${sliceId}`);
+  lines.push(`**Blocker Task:** ${replanData.blockerTaskId}`);
+  lines.push(`**Created:** ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push("## Blocker Description");
+  lines.push("");
+  lines.push(replanData.blockerDescription);
+  lines.push("");
+  lines.push("## What Changed");
+  lines.push("");
+  lines.push(replanData.whatChanged);
+  lines.push("");
+
+  const content = `${lines.join("\n").trimEnd()}\n`;
+
+  await writeAndStore(absPath, artifactPath, content, {
+    artifact_type: "REPLAN",
+    milestone_id: milestoneId,
+    slice_id: sliceId,
+  });
+
+  return { replanPath: absPath, content };
+}
+
+export async function renderAssessmentFromDb(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  assessmentData: AssessmentData,
+): Promise<{ assessmentPath: string; content: string }> {
+  const slicePath = resolveSlicePath(basePath, milestoneId, sliceId)
+    ?? join(gsdRoot(basePath), "milestones", milestoneId, "slices", sliceId);
+  const absPath = join(slicePath, `${sliceId}-ASSESSMENT.md`);
+  const artifactPath = toArtifactPath(absPath, basePath);
+
+  const lines: string[] = [];
+  lines.push(`# ${sliceId} Assessment`);
+  lines.push("");
+  lines.push(`**Milestone:** ${milestoneId}`);
+  lines.push(`**Slice:** ${sliceId}`);
+  if (assessmentData.completedSliceId) {
+    lines.push(`**Completed Slice:** ${assessmentData.completedSliceId}`);
+  }
+  lines.push(`**Verdict:** ${assessmentData.verdict}`);
+  lines.push(`**Created:** ${new Date().toISOString()}`);
+  lines.push("");
+  lines.push("## Assessment");
+  lines.push("");
+  lines.push(assessmentData.assessment);
+  lines.push("");
+
+  const content = `${lines.join("\n").trimEnd()}\n`;
+
+  await writeAndStore(absPath, artifactPath, content, {
+    artifact_type: "ASSESSMENT",
+    milestone_id: milestoneId,
+    slice_id: sliceId,
+  });
+
+  return { assessmentPath: absPath, content };
 }

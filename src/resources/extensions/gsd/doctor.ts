@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadFile, parsePlan, parseRoadmap, parseSummary, saveFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
+import { loadFile, parseSummary, saveFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
+import { parseRoadmap as parseLegacyRoadmap, parsePlan as parseLegacyPlan } from "./parsers-legacy.js";
+import { isDbAvailable, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
 import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, milestonesDir, gsdRoot, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, resolveGsdRootFile, relMilestonePath } from "./paths.js";
 import { deriveState, isMilestoneComplete } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
@@ -10,7 +12,7 @@ import { loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.
 import type { DoctorIssue, DoctorIssueCode, DoctorReport } from "./doctor-types.js";
 import { GLOBAL_STATE_CODES } from "./doctor-types.js";
 import type { RoadmapSliceEntry } from "./types.js";
-import { checkGitHealth, checkRuntimeHealth, checkGlobalHealth } from "./doctor-checks.js";
+import { checkGitHealth, checkRuntimeHealth, checkGlobalHealth, checkEngineHealth } from "./doctor-checks.js";
 import { checkEnvironmentHealth } from "./doctor-environment.js";
 import { runProviderChecks } from "./doctor-providers.js";
 
@@ -213,8 +215,14 @@ export async function selectDoctorScope(basePath: string, requestedScope?: strin
     const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
     const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
     if (!roadmapContent) continue;
-    const roadmap = parseRoadmap(roadmapContent);
-    if (!isMilestoneComplete(roadmap)) return milestone.id;
+    if (isDbAvailable()) {
+      const dbSlices = getMilestoneSlices(milestone.id);
+      const allDone = dbSlices.length > 0 && dbSlices.every(s => s.status === "complete");
+      if (!allDone) return milestone.id;
+    } else {
+      const roadmap = parseLegacyRoadmap(roadmapContent);
+      if (!isMilestoneComplete(roadmap)) return milestone.id;
+    }
   }
 
   return state.registry[0]?.id;
@@ -352,8 +360,8 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
   // Git health checks — timed
   const t0git = Date.now();
   const isolationMode: "none" | "worktree" | "branch" = options?.isolationMode ??
-    (prefs?.preferences?.git?.isolation === "none" ? "none" :
-    prefs?.preferences?.git?.isolation === "branch" ? "branch" : "worktree");
+    (prefs?.preferences?.git?.isolation === "worktree" ? "worktree" :
+    prefs?.preferences?.git?.isolation === "branch" ? "branch" : "none");
   await checkGitHealth(basePath, issues, fixesApplied, shouldFix, isolationMode);
   const gitMs = Date.now() - t0git;
 
@@ -373,6 +381,9 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
     includeTests: options?.includeTests,
   });
   const envMs = Date.now() - t0env;
+
+  // Engine health checks — DB constraints and projection drift
+  await checkEngineHealth(basePath, issues, fixesApplied);
 
   const milestonesPath = milestonesDir(basePath);
   if (!existsSync(milestonesPath)) {
@@ -460,7 +471,34 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
     const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
     const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
     if (!roadmapContent) continue;
-    const roadmap = parseRoadmap(roadmapContent);
+
+    // Normalize slices: prefer DB, fall back to parser
+    type NormSlice = RoadmapSliceEntry & { pending?: boolean };
+    let slices: NormSlice[];
+    if (isDbAvailable()) {
+      const dbSlices = getMilestoneSlices(milestoneId);
+      slices = dbSlices.map(s => ({
+        id: s.id,
+        title: s.title,
+        done: s.status === "complete",
+        pending: s.status === "pending",
+        risk: (s.risk || "medium") as RoadmapSliceEntry["risk"],
+        depends: s.depends,
+        demo: s.demo,
+      }));
+    } else {
+      const activeMilestoneId = state.activeMilestone?.id;
+      const activeSliceId = state.activeSlice?.id;
+      slices = parseLegacyRoadmap(roadmapContent).slices.map(s => ({
+        ...s,
+        // Legacy roadmaps only encode done vs not-done. For doctor's
+        // missing-directory checks, treat every undone slice except the
+        // current active slice as effectively pending/unstarted.
+        pending: !s.done && (milestoneId !== activeMilestoneId || s.id !== activeSliceId),
+      }));
+    }
+    // Wrap in Roadmap-compatible shape for detectCircularDependencies
+    const roadmap = { slices };
 
     // ── Circular dependency detection ──────────────────────────────────────
     for (const cycle of detectCircularDependencies(roadmap.slices)) {
@@ -538,6 +576,9 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
 
       const slicePath = resolveSlicePath(basePath, milestoneId, slice.id);
       if (!slicePath) {
+        // Pending slices haven't been planned yet — directories are created
+        // lazily by ensurePreconditions() at dispatch time. Skip them.
+        if (slice.pending) continue;
         const expectedPath = relSlicePath(basePath, milestoneId, slice.id);
         issues.push({
           severity: slice.done ? "warning" : "error",
@@ -560,6 +601,8 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
 
       const tasksDir = resolveTasksDir(basePath, milestoneId, slice.id);
       if (!tasksDir) {
+        // Pending slices haven't been planned yet — tasks/ is created on demand.
+        if (slice.pending) continue;
         issues.push({
           severity: slice.done ? "warning" : "error",
           code: "missing_tasks_dir",
@@ -579,7 +622,17 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
 
       const planPath = resolveSliceFile(basePath, milestoneId, slice.id, "PLAN");
       const planContent = planPath ? await loadFile(planPath) : null;
-      const plan = planContent ? parsePlan(planContent) : null;
+      // Normalize plan tasks: prefer DB, fall back to parsers-legacy
+      let plan: { tasks: Array<{ id: string; done: boolean; title: string; estimate?: string }> } | null = null;
+      if (isDbAvailable()) {
+        const dbTasks = getSliceTasks(milestoneId, slice.id);
+        if (dbTasks.length > 0) {
+          plan = { tasks: dbTasks.map(t => ({ id: t.id, done: t.status === "complete" || t.status === "done", title: t.title, estimate: t.estimate || undefined })) };
+        }
+      }
+      if (!plan && planContent) {
+        plan = parseLegacyPlan(planContent);
+      }
       if (!plan) {
         if (!slice.done) {
           issues.push({
@@ -710,7 +763,8 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
     }
 
     // Milestone-level check: all slices done but no validation file
-    if (isMilestoneComplete(roadmap) && !resolveMilestoneFile(basePath, milestoneId, "VALIDATION") && !resolveMilestoneFile(basePath, milestoneId, "SUMMARY")) {
+    const milestoneComplete = roadmap.slices.length > 0 && roadmap.slices.every(s => s.done);
+    if (milestoneComplete && !resolveMilestoneFile(basePath, milestoneId, "VALIDATION") && !resolveMilestoneFile(basePath, milestoneId, "SUMMARY")) {
       issues.push({
         severity: "info",
         code: "all_slices_done_missing_milestone_validation",
@@ -723,7 +777,7 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
     }
 
     // Milestone-level check: all slices done but no milestone summary
-    if (isMilestoneComplete(roadmap) && !resolveMilestoneFile(basePath, milestoneId, "SUMMARY")) {
+    if (milestoneComplete && !resolveMilestoneFile(basePath, milestoneId, "SUMMARY")) {
       issues.push({
         severity: "warning",
         code: "all_slices_done_missing_milestone_summary",

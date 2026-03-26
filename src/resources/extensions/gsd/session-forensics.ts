@@ -25,7 +25,6 @@ import { truncateWithEllipsis } from "../shared/format-utils.js";
 import { nativeParseJsonlTail } from "./native-parser-bridge.js";
 import { MAX_JSONL_BYTES, parseJSONL } from "./jsonl-utils.js";
 import { nativeWorkingTreeStatus, nativeDiffStat } from "./native-git-bridge.js";
-import { getAutoWorktreePath } from "./auto-worktree.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -172,7 +171,17 @@ export function extractTrace(entries: unknown[]): ExecutionTrace {
       }
 
       if (isError && resultText) {
-        errors.push(resultText.slice(0, 300));
+        // Filter out benign "errors" that are normal during code exploration:
+        // - grep/rg/find returning exit code 1 (no matches) is expected POSIX behavior
+        // - User interrupts (Escape/skip) are intentional, not failures
+        const trimmed = resultText.trim();
+        const isBenignNoMatch = pending?.name === "bash" &&
+          /^\(no output\)\s*\n\s*Command exited with code 1$/m.test(trimmed);
+        const isUserSkip = /^Skipped due to queued user message/i.test(trimmed);
+
+        if (!isBenignNoMatch && !isUserSkip) {
+          errors.push(resultText.slice(0, 300));
+        }
       }
     }
   }
@@ -285,17 +294,13 @@ export function synthesizeCrashRecovery(
  * Deep diagnostic from any JSONL source (activity log or session file).
  * Replaces the old shallow getLastActivityDiagnostic().
  */
-export function getDeepDiagnostic(basePath: string): string | null {
-  // Try worktree activity logs first if an auto-worktree is active
+export function getDeepDiagnostic(basePath: string, worktreePath?: string): string | null {
+  // Try worktree activity logs first if a worktree path is provided
   let trace: ExecutionTrace | null = null;
   try {
-    const mid = readActiveMilestoneId(basePath);
-    if (mid) {
-      const wtPath = getAutoWorktreePath(basePath, mid);
-      if (wtPath) {
-        const wtActivityDir = join(gsdRoot(wtPath), "activity");
-        trace = readLastActivityLog(wtActivityDir);
-      }
+    if (worktreePath) {
+      const wtActivityDir = join(gsdRoot(worktreePath), "activity");
+      trace = readLastActivityLog(wtActivityDir);
     }
   } catch { /* non-fatal — fall through to root */ }
 
@@ -313,7 +318,7 @@ export function getDeepDiagnostic(basePath: string): string | null {
  * Read the active milestone ID directly from STATE.md without async deriveState().
  * Looks for `**Active Milestone:** M001` pattern.
  */
-function readActiveMilestoneId(basePath: string): string | null {
+export function readActiveMilestoneId(basePath: string): string | null {
   try {
     const statePath = join(gsdRoot(basePath), "STATE.md");
     if (!existsSync(statePath)) return null;

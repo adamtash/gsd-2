@@ -196,6 +196,13 @@ function loadPreferencesFile(path: string, scope: "global" | "project"): LoadedG
   };
 }
 
+let _warnedUnrecognizedFormat = false;
+
+/** @internal Reset the warn-once flag — exported for testing only. */
+export function _resetParseWarningFlag(): void {
+  _warnedUnrecognizedFormat = false;
+}
+
 /** @internal Exported for testing only */
 export function parsePreferencesMarkdown(content: string): GSDPreferences | null {
   // Use indexOf instead of [\s\S]*? regex to avoid backtracking (#468)
@@ -214,7 +221,10 @@ export function parsePreferencesMarkdown(content: string): GSDPreferences | null
     return parseHeadingListFormat(content);
   }
 
-  console.warn("[parsePreferencesMarkdown] preferences.md exists but uses an unrecognized format — skipping.");
+  if (!_warnedUnrecognizedFormat) {
+    _warnedUnrecognizedFormat = true;
+    console.warn("[parsePreferencesMarkdown] preferences.md exists but uses an unrecognized format — skipping.");
+  }
   return null;
 }
 
@@ -342,6 +352,7 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
       : undefined,
     service_tier: override.service_tier ?? base.service_tier,
     forensics_dedup: override.forensics_dedup ?? base.forensics_dedup,
+    show_token_cost: override.show_token_cost ?? base.show_token_cost,
   };
 }
 
@@ -486,13 +497,17 @@ export function resolvePreDispatchHooks(): PreDispatchHookConfig[] {
 
 /**
  * Resolve the effective git isolation mode from preferences.
- * Returns "worktree" (default), "branch", or "none".
+ * Returns "none" (default), "worktree", or "branch".
+ *
+ * Default is "none" so GSD works out of the box without preferences.md.
+ * Worktree isolation requires explicit opt-in because it depends on git
+ * branch infrastructure that must be set up before use.
  */
 export function getIsolationMode(): "none" | "worktree" | "branch" {
   const prefs = loadEffectiveGSDPreferences()?.preferences?.git;
-  if (prefs?.isolation === "none") return "none";
+  if (prefs?.isolation === "worktree") return "worktree";
   if (prefs?.isolation === "branch") return "branch";
-  return "worktree"; // default
+  return "none"; // default — no isolation, work on current branch
 }
 
 export function resolveParallelConfig(prefs: GSDPreferences | undefined): import("./types.js").ParallelConfig {

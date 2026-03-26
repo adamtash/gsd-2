@@ -29,7 +29,8 @@ import {
   resolveTaskFiles,
 } from './paths.js';
 import { findMilestoneIds } from './guided-flow.js';
-import { parseRoadmap, parsePlan, parseContextDependsOn } from './files.js';
+import { parseRoadmap, parsePlan } from './parsers-legacy.js';
+import { parseContextDependsOn } from './files.js';
 
 // ─── DECISIONS.md Parser ───────────────────────────────────────────────────
 
@@ -536,9 +537,10 @@ export function migrateHierarchyToDb(basePath: string): {
     // Determine milestone title from roadmap H1 or CONTEXT heading
     let milestoneTitle = '';
     let roadmapContent: string | null = null;
+    let roadmap: ReturnType<typeof parseRoadmap> | null = null;
     if (hasRoadmap) {
       roadmapContent = readFileSync(roadmapPath!, 'utf-8');
-      const roadmap = parseRoadmap(roadmapContent);
+      roadmap = parseRoadmap(roadmapContent);
       milestoneTitle = roadmap.title;
     }
     if (!milestoneTitle && hasContext) {
@@ -554,22 +556,46 @@ export function migrateHierarchyToDb(basePath: string): {
       dependsOn = parseContextDependsOn(contextContent);
     }
 
+    // Extract raw "## Boundary Map" section from roadmap markdown for planning column
+    let boundaryMapSection = '';
+    if (roadmapContent) {
+      const bmIdx = roadmapContent.indexOf('## Boundary Map');
+      if (bmIdx >= 0) {
+        const afterBm = roadmapContent.slice(bmIdx);
+        // Take content until next ## heading or EOF
+        const nextHeading = afterBm.indexOf('\n## ', 1);
+        boundaryMapSection = nextHeading >= 0 ? afterBm.slice(0, nextHeading).trim() : afterBm.trim();
+      }
+    }
+
     // Insert milestone (FK parent — must come first)
     insertMilestone({
       id: milestoneId,
       title: milestoneTitle,
       status: milestoneStatus,
       depends_on: dependsOn,
+      planning: {
+        vision: roadmap?.vision ?? '',
+        successCriteria: roadmap?.successCriteria ?? [],
+        boundaryMapMarkdown: boundaryMapSection,
+      },
     });
     counts.milestones++;
 
     // Parse roadmap for slices
-    if (!roadmapContent) continue;
-    const roadmap = parseRoadmap(roadmapContent);
+    if (!roadmap) continue;
 
     for (const sliceEntry of roadmap.slices) {
       // Per K002: use 'complete' not 'done'
       const sliceStatus = sliceEntry.done ? 'complete' : 'pending';
+
+      // Parse slice plan early so goal is available for insertSlice planning column
+      const planPath = resolveSliceFile(basePath, milestoneId, sliceEntry.id, 'PLAN');
+      let plan: ReturnType<typeof parsePlan> | null = null;
+      if (planPath && existsSync(planPath)) {
+        const planContent = readFileSync(planPath, 'utf-8');
+        plan = parsePlan(planContent);
+      }
 
       insertSlice({
         id: sliceEntry.id,
@@ -579,15 +605,14 @@ export function migrateHierarchyToDb(basePath: string): {
         risk: sliceEntry.risk,
         depends: sliceEntry.depends,
         demo: sliceEntry.demo,
+        planning: {
+          goal: plan?.goal ?? '',
+        },
       });
       counts.slices++;
 
-      // Parse slice plan for tasks
-      const planPath = resolveSliceFile(basePath, milestoneId, sliceEntry.id, 'PLAN');
-      if (!planPath || !existsSync(planPath)) continue;
-
-      const planContent = readFileSync(planPath, 'utf-8');
-      const plan = parsePlan(planContent);
+      // Insert tasks from parsed plan
+      if (!plan) continue;
 
       for (const taskEntry of plan.tasks) {
         // Per K002: use 'complete' not 'done'
@@ -615,6 +640,10 @@ export function migrateHierarchyToDb(basePath: string): {
           milestoneId: milestoneId,
           title: taskEntry.title,
           status: taskStatus,
+          planning: {
+            files: taskEntry.files ?? [],
+            verify: taskEntry.verify ?? '',
+          },
         });
         counts.tasks++;
       }

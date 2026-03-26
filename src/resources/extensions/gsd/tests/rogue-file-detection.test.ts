@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { detectRogueFileWrites } from "../auto-post-unit.ts";
-import { openDatabase, closeDatabase, isDbAvailable, insertMilestone, insertSlice, insertTask, updateSliceStatus } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, isDbAvailable, insertMilestone, insertSlice, insertTask, updateSliceStatus, upsertMilestonePlanning } from "../gsd-db.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +40,23 @@ function createSliceSummaryOnDisk(basePath: string, mid: string, sid: string): s
   writeFileSync(summaryFile, `---\nid: ${sid}\nmilestone: ${mid}\n---\n# ${sid}: Test Slice\n`, "utf-8");
   return summaryFile;
 }
+
+function createRoadmapOnDisk(basePath: string, mid: string): string {
+  const milestoneDir = join(basePath, ".gsd", "milestones", mid);
+  mkdirSync(milestoneDir, { recursive: true });
+  const roadmapFile = join(milestoneDir, `${mid}-ROADMAP.md`);
+  writeFileSync(roadmapFile, `# ${mid}: Test Roadmap\n`, "utf-8");
+  return roadmapFile;
+}
+
+function createSlicePlanOnDisk(basePath: string, mid: string, sid: string): string {
+  const sliceDir = join(basePath, ".gsd", "milestones", mid, "slices", sid);
+  mkdirSync(sliceDir, { recursive: true });
+  const planFile = join(sliceDir, `${sid}-PLAN.md`);
+  writeFileSync(planFile, `# ${sid}: Test Plan\n`, "utf-8");
+  return planFile;
+}
+
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -178,6 +195,100 @@ test("rogue detection: slice summary on disk, DB row with status 'complete' → 
 
     const rogues = detectRogueFileWrites("complete-slice", "M001/S01", basePath);
     assert.equal(rogues.length, 0, "Should NOT detect rogue when slice DB row is complete");
+  } finally {
+    closeDatabase();
+    rmSync(basePath, { recursive: true, force: true });
+  }
+});
+
+test("rogue detection: plan milestone roadmap on disk, no milestone planning row → detected as rogue", () => {
+  const basePath = createTmpBase();
+  const dbPath = join(basePath, ".gsd", "gsd.db");
+  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+
+  try {
+    openDatabase(dbPath);
+
+    const roadmapPath = createRoadmapOnDisk(basePath, "M001");
+    assert.ok(existsSync(roadmapPath), "Roadmap file should exist on disk");
+
+    const rogues = detectRogueFileWrites("plan-milestone", "M001", basePath);
+    assert.equal(rogues.length, 1, "Should detect one rogue roadmap file");
+    assert.equal(rogues[0].path, roadmapPath);
+    assert.equal(rogues[0].unitType, "plan-milestone");
+    assert.equal(rogues[0].unitId, "M001");
+  } finally {
+    closeDatabase();
+    rmSync(basePath, { recursive: true, force: true });
+  }
+});
+
+test("rogue detection: plan milestone roadmap on disk, DB milestone planning row exists → NOT rogue", () => {
+  const basePath = createTmpBase();
+  const dbPath = join(basePath, ".gsd", "gsd.db");
+  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+
+  try {
+    openDatabase(dbPath);
+
+    createRoadmapOnDisk(basePath, "M001");
+    insertMilestone({ id: "M001", title: "Planned Milestone" });
+    upsertMilestonePlanning("M001", {
+      vision: "Real planning state",
+      requirementCoverage: "R001 → S01",
+      boundaryMapMarkdown: "- planner → db",
+    });
+
+    const rogues = detectRogueFileWrites("plan-milestone", "M001", basePath);
+    assert.equal(rogues.length, 0, "Should NOT detect rogue when milestone planning state exists");
+  } finally {
+    closeDatabase();
+    rmSync(basePath, { recursive: true, force: true });
+  }
+});
+
+test("rogue detection: slice plan on disk, no slice planning row → detected as rogue", () => {
+  const basePath = createTmpBase();
+  const dbPath = join(basePath, ".gsd", "gsd.db");
+  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+
+  try {
+    openDatabase(dbPath);
+
+    const planPath = createSlicePlanOnDisk(basePath, "M001", "S01");
+    assert.ok(existsSync(planPath), "Slice plan file should exist on disk");
+
+    const rogues = detectRogueFileWrites("plan-slice", "M001/S01", basePath);
+    assert.equal(rogues.length, 1, "Should detect one rogue slice plan file");
+    assert.equal(rogues[0].path, planPath);
+    assert.equal(rogues[0].unitType, "plan-slice");
+    assert.equal(rogues[0].unitId, "M001/S01");
+  } finally {
+    closeDatabase();
+    rmSync(basePath, { recursive: true, force: true });
+  }
+});
+
+test("rogue detection: slice plan on disk, DB slice planning row exists → NOT rogue", () => {
+  const basePath = createTmpBase();
+  const dbPath = join(basePath, ".gsd", "gsd.db");
+  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+
+  try {
+    openDatabase(dbPath);
+
+    createSlicePlanOnDisk(basePath, "M001", "S01");
+    insertMilestone({ id: "M001" });
+    insertSlice({
+      milestoneId: "M001",
+      id: "S01",
+      title: "Planned Slice",
+      status: "pending",
+      demo: "Observable plan",
+    });
+
+    const rogues = detectRogueFileWrites("plan-slice", "M001/S01", basePath);
+    assert.equal(rogues.length, 0, "Should NOT detect rogue when slice planning state exists");
   } finally {
     closeDatabase();
     rmSync(basePath, { recursive: true, force: true });

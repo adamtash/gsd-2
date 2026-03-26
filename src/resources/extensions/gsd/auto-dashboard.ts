@@ -15,7 +15,7 @@ import {
   resolveMilestoneFile,
   resolveSliceFile,
 } from "./paths.js";
-import { parseRoadmap, parsePlan } from "./files.js";
+import { isDbAvailable, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { truncateToWidth, visibleWidth } from "@gsd/pi-tui";
@@ -25,6 +25,7 @@ import { computeProgressScore } from "./progress-score.js";
 import { getActiveWorktreeName } from "./worktree-command.js";
 import { loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath } from "./preferences.js";
 import { resolveServiceTierIcon, getEffectiveServiceTier } from "./service-tier.js";
+import { parseUnitId } from "./unit-id.js";
 
 // ─── UAT Slice Extraction ─────────────────────────────────────────────────────
 
@@ -33,8 +34,8 @@ import { resolveServiceTierIcon, getEffectiveServiceTier } from "./service-tier.
  * Returns null if the format doesn't match.
  */
 export function extractUatSliceId(unitId: string): string | null {
-  const parts = unitId.split("/");
-  if (parts.length >= 2 && parts[1]!.startsWith("S")) return parts[1]!;
+  const { slice } = parseUnitId(unitId);
+  if (slice?.startsWith("S")) return slice;
   return null;
 }
 
@@ -48,7 +49,6 @@ export interface AutoDashboardData {
   startTime: number;
   elapsed: number;
   currentUnit: { type: string; id: string; startedAt: number } | null;
-  completedUnits: { type: string; id: string; startedAt: number; finishedAt: number }[];
   basePath: string;
   /** Running cost and token totals from metrics ledger */
   totalCost: number;
@@ -152,6 +152,8 @@ export function describeNextUnit(state: GSDState): { label: string; description:
       return { label: `Replan ${sid}: ${sTitle}`, description: "Blocker found — replan the slice." };
     case "completing-milestone":
       return { label: "Complete milestone", description: "Write milestone summary." };
+    case "evaluating-gates":
+      return { label: `Evaluate gates for ${sid}: ${sTitle}`, description: "Parallel quality gate assessment before execution." };
     default:
       return { label: "Continue", description: "Execute the next step." };
   }
@@ -248,24 +250,28 @@ let cachedSliceProgress: {
 
 export function updateSliceProgressCache(base: string, mid: string, activeSid?: string): void {
   try {
-    const roadmapFile = resolveMilestoneFile(base, mid, "ROADMAP");
-    if (!roadmapFile) return;
-    const content = readFileSync(roadmapFile, "utf-8");
-    const roadmap = parseRoadmap(content);
+    // Normalize slices: prefer DB, fall back to parser
+    type NormSlice = { id: string; done: boolean; title: string };
+    let normSlices: NormSlice[];
+    if (isDbAvailable()) {
+      normSlices = getMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete", title: s.title }));
+    } else {
+      normSlices = [];
+    }
 
     let activeSliceTasks: { done: number; total: number } | null = null;
     let taskDetails: CachedTaskDetail[] | null = null;
     if (activeSid) {
       try {
-        const planFile = resolveSliceFile(base, mid, activeSid, "PLAN");
-        if (planFile && existsSync(planFile)) {
-          const planContent = readFileSync(planFile, "utf-8");
-          const plan = parsePlan(planContent);
-          activeSliceTasks = {
-            done: plan.tasks.filter(t => t.done).length,
-            total: plan.tasks.length,
-          };
-          taskDetails = plan.tasks.map(t => ({ id: t.id, title: t.title, done: t.done }));
+        if (isDbAvailable()) {
+          const dbTasks = getSliceTasks(mid, activeSid);
+          if (dbTasks.length > 0) {
+            activeSliceTasks = {
+              done: dbTasks.filter(t => t.status === "complete" || t.status === "done").length,
+              total: dbTasks.length,
+            };
+            taskDetails = dbTasks.map(t => ({ id: t.id, title: t.title, done: t.status === "complete" || t.status === "done" }));
+          }
         }
       } catch {
         // Non-fatal — just omit task count
@@ -273,8 +279,8 @@ export function updateSliceProgressCache(base: string, mid: string, activeSid?: 
     }
 
     cachedSliceProgress = {
-      done: roadmap.slices.filter(s => s.done).length,
-      total: roadmap.slices.length,
+      done: normSlices.filter(s => s.done).length,
+      total: normSlices.length,
       milestoneId: mid,
       activeSliceTasks,
       taskDetails,
