@@ -157,6 +157,8 @@ export interface Summary {
   whatHappened: string;
   deviations: string;
   filesModified: FileModified[];
+  followUps: string;
+  knownLimitations: string;
 }
 
 // ─── Continue-Here ─────────────────────────────────────────────────────────

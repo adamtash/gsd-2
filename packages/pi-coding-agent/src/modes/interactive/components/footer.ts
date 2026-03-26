@@ -235,9 +235,11 @@ export class FooterComponent implements Component {
 				.filter(([key]) => key !== "rate-limits")
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
-			if (sortedStatuses.length > 0) {
-				const statusLine = theme.fg("dim", sortedStatuses.join("  "));
-				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+		if (sortedStatuses.length > 0) {
+				const statusLine = sortedStatuses.join(" ");
+				// Match the rest of the footer styling: extension statuses should render
+				// in the same dim color as pwd/stats, with a dim ellipsis on truncation.
+				lines.push(truncateToWidth(theme.fg("dim", statusLine), width, theme.fg("dim", "...")));
 			}
 		}
 

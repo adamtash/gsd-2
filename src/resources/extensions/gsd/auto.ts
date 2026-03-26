@@ -17,6 +17,7 @@ import type {
 } from "@gsd/pi-coding-agent";
 
 import { deriveState } from "./state.js";
+import { parseUnitId } from "./unit-id.js";
 import type { GSDState } from "./types.js";
 import { getManifestStatus } from "./files.js";
 export { inlinePriorMilestoneSummary } from "./files.js";
@@ -104,6 +105,7 @@ import {
   captureAvailableSkills,
   resetSkillTelemetry,
 } from "./skill-telemetry.js";
+import { getRtkSessionSavings } from "../shared/rtk-session-stats.js";
 import {
   initMetrics,
   resetMetrics,
@@ -301,6 +303,11 @@ export { type AutoDashboardData } from "./auto-dashboard.js";
 export function getAutoDashboardData(): AutoDashboardData {
   const ledger = getLedger();
   const totals = ledger ? getProjectTotals(ledger.units) : null;
+  const sessionId = s.cmdCtx?.sessionManager?.getSessionId?.() ?? null;
+  const rtkSavings = sessionId && s.basePath
+    ? getRtkSessionSavings(s.basePath, sessionId)
+    : null;
+  const rtkEnabled = loadEffectiveGSDPreferences()?.preferences.experimental?.rtk === true;
   // Pending capture count — lazy check, non-fatal
   let pendingCaptureCount = 0;
   try {
@@ -323,6 +330,8 @@ export function getAutoDashboardData(): AutoDashboardData {
     totalCost: totals?.cost ?? 0,
     totalTokens: totals?.tokens.total ?? 0,
     pendingCaptureCount,
+    rtkSavings,
+    rtkEnabled,
   };
 }
 
@@ -590,8 +599,11 @@ export async function stopAuto(
     // When the milestone is complete (has a SUMMARY), merge the worktree branch
     // back to main so code isn't stranded on the worktree branch (#2317).
     // For incomplete milestones, preserve the branch for later resumption.
+    //
+    // Skip if phases.ts already merged this milestone — avoids the double
+    // mergeAndExit that fails because the branch was already deleted (#2645).
     try {
-      if (s.currentMilestoneId) {
+      if (s.currentMilestoneId && !s.milestoneMergedInPhases) {
         const notifyCtx = ctx
           ? { notify: ctx.ui.notify.bind(ctx.ui) }
           : { notify: () => {} };
@@ -1277,8 +1289,7 @@ function ensurePreconditions(
   base: string,
   state: GSDState,
 ): void {
-  const parts = unitId.split("/");
-  const mid = parts[0]!;
+  const { milestone: mid, slice: sid } = parseUnitId(unitId);
 
   const mDir = resolveMilestonePath(base, mid);
   if (!mDir) {
@@ -1286,8 +1297,7 @@ function ensurePreconditions(
     mkdirSync(join(newDir, "slices"), { recursive: true });
   }
 
-  if (parts.length >= 2) {
-    const sid = parts[1]!;
+  if (sid !== undefined) {
 
     const mDirResolved = resolveMilestonePath(base, mid);
     if (mDirResolved) {

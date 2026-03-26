@@ -784,6 +784,14 @@ export async function checkNeedsRunUat(
         if (!uatContent) return null;
         // If the UAT file already contains a verdict, UAT has been run — skip
         if (hasVerdict(uatContent)) return null;
+        // Also check the ASSESSMENT file — the run-uat prompt writes the verdict
+        // there (via gsd_summary_save artifact_type:"ASSESSMENT"), not into the
+        // UAT spec file. Without this check the unit re-dispatches indefinitely.
+        const assessmentFile = resolveSliceFile(base, mid, sid, "ASSESSMENT");
+        if (assessmentFile) {
+          const assessmentContent = await loadFile(assessmentFile);
+          if (assessmentContent && hasVerdict(assessmentContent)) return null;
+        }
         const uatType = getUatType(uatContent);
         return { sliceId: sid, uatType };
       }
@@ -808,6 +816,13 @@ export async function checkNeedsRunUat(
   if (!uatContentFb) return null;
   // If the UAT file already contains a verdict, UAT has been run — skip
   if (hasVerdict(uatContentFb)) return null;
+  // Also check the ASSESSMENT file for the file-based fallback path (same
+  // reason as the DB path above — verdict lives in ASSESSMENT, not UAT).
+  const assessmentFileFb = resolveSliceFile(base, mid, uatSid, "ASSESSMENT");
+  if (assessmentFileFb) {
+    const assessmentContentFb = await loadFile(assessmentFileFb);
+    if (assessmentContentFb && hasVerdict(assessmentContentFb)) return null;
+  }
   const uatTypeFb = getUatType(uatContentFb);
   return { sliceId: uatSid, uatType: uatTypeFb };
 }
@@ -1330,6 +1345,24 @@ export async function buildValidateMilestonePrompt(
   const inlined: string[] = [];
   inlined.push(await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap"));
 
+  // Inline verification classes from planning (if available in DB)
+  try {
+    const { isDbAvailable, getMilestone } = await import("./gsd-db.js");
+    if (isDbAvailable()) {
+      const milestone = getMilestone(mid);
+      if (milestone) {
+        const classes: string[] = [];
+        if (milestone.verification_contract) classes.push(`- **Contract:** ${milestone.verification_contract}`);
+        if (milestone.verification_integration) classes.push(`- **Integration:** ${milestone.verification_integration}`);
+        if (milestone.verification_operational) classes.push(`- **Operational:** ${milestone.verification_operational}`);
+        if (milestone.verification_uat) classes.push(`- **UAT:** ${milestone.verification_uat}`);
+        if (classes.length > 0) {
+          inlined.push(`### Verification Classes (from planning)\n\nThese verification tiers were defined during milestone planning. Each non-empty class must be checked for evidence during validation.\n\n${classes.join("\n")}`);
+        }
+      }
+    }
+  } catch { /* fall through */ }
+
   // Inline all slice summaries and UAT results
   let valSliceIds: string[] = [];
   try {
@@ -1357,6 +1390,21 @@ export async function buildValidateMilestonePrompt(
     const uatRel = relSliceFile(base, mid, sid, "UAT");
     const uatInline = await inlineFileOptional(uatPath, uatRel, `${sid} UAT Result`);
     if (uatInline) inlined.push(uatInline);
+  }
+
+  // Aggregate unresolved follow-ups and known limitations across slices
+  const outstandingItems: string[] = [];
+  for (const sid of valSliceIds) {
+    const summaryPath = resolveSliceFile(base, mid, sid, "SUMMARY");
+    if (!summaryPath) continue;
+    const content = await loadFile(summaryPath);
+    if (!content) continue;
+    const summary = parseSummary(content);
+    if (summary.followUps) outstandingItems.push(`- **${sid} Follow-ups:** ${summary.followUps.trim()}`);
+    if (summary.knownLimitations) outstandingItems.push(`- **${sid} Known Limitations:** ${summary.knownLimitations.trim()}`);
+  }
+  if (outstandingItems.length > 0) {
+    inlined.push(`### Outstanding Items (aggregated from slice summaries)\n\nThese follow-ups and known limitations were documented during slice completion but have not been resolved.\n\n${outstandingItems.join('\n')}`);
   }
 
   // Inline existing VALIDATION file if this is a re-validation round
