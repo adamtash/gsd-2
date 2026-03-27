@@ -45,7 +45,7 @@ test("getIsolationMode defaults to none when preferences have no isolation setti
   // Validate the default via validatePreferences: when no isolation is set,
   // preferences.git.isolation is undefined, and getIsolationMode returns "none".
   // Default changed from "worktree" to "none" so GSD works out of the box
-  // without preferences.md (#2480).
+  // without PREFERENCES.md (#2480).
   const { preferences } = validatePreferences({});
   assert.equal(preferences.git?.isolation, undefined, "no isolation in empty prefs");
   const isolation = preferences.git?.isolation;
@@ -59,7 +59,7 @@ test("solo mode applies correct defaults", () => {
   const result = applyModeDefaults("solo", { mode: "solo" });
   assert.equal(result.git?.auto_push, true);
   assert.equal(result.git?.push_branches, false);
-  assert.equal(result.git?.pre_merge_check, false);
+  assert.equal(result.git?.pre_merge_check, "auto");
   assert.equal(result.git?.merge_strategy, "squash");
   assert.equal(result.git?.isolation, "none");
   assert.equal(result.unique_milestone_ids, false);

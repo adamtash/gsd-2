@@ -6,9 +6,10 @@
  * progress to stderr.
  *
  * Exit codes:
- *   0 — complete (command finished successfully)
- *   1 — error or timeout
- *   2 — blocked (command reported a blocker)
+ *   0  — complete (command finished successfully)
+ *   1  — error or timeout
+ *   10 — blocked (command reported a blocker)
+ *   11 — cancelled (SIGINT/SIGTERM received)
  */
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -16,7 +17,9 @@ import { join } from 'node:path'
 import { resolve } from 'node:path'
 import { ChildProcess } from 'node:child_process'
 
-import { RpcClient } from '@gsd/pi-coding-agent'
+import { RpcClient, SessionManager } from '@gsd/pi-coding-agent'
+import type { SessionInfo } from '@gsd/pi-coding-agent'
+import { getProjectSessionsDir } from './project-sessions.js'
 import { loadAndValidateAnswerFile, AnswerInjector } from './headless-answers.js'
 
 import {
@@ -27,7 +30,15 @@ import {
   FIRE_AND_FORGET_METHODS,
   IDLE_TIMEOUT_MS,
   NEW_MILESTONE_IDLE_TIMEOUT_MS,
+  EXIT_SUCCESS,
+  EXIT_ERROR,
+  EXIT_BLOCKED,
+  EXIT_CANCELLED,
+  mapStatusToExitCode,
 } from './headless-events.js'
+
+import type { OutputFormat, HeadlessJsonResult } from './headless-types.js'
+import { VALID_OUTPUT_FORMATS } from './headless-types.js'
 
 import {
   handleExtensionUIRequest,
@@ -48,6 +59,7 @@ import {
 export interface HeadlessOptions {
   timeout: number
   json: boolean
+  outputFormat: OutputFormat
   model?: string
   command: string
   commandArgs: string[]
@@ -60,12 +72,47 @@ export interface HeadlessOptions {
   responseTimeout?: number // timeout for orchestrator response (default 30000ms)
   answers?: string       // path to answers JSON file
   eventFilter?: Set<string>  // filter JSONL output to specific event types
+  resumeSession?: string // session ID to resume (--resume <id>)
+  bare?: boolean         // --bare: suppress CLAUDE.md/AGENTS.md, user skills, project preferences
 }
 
 interface TrackedEvent {
   type: string
   timestamp: number
   detail?: string
+}
+
+// ---------------------------------------------------------------------------
+// Resume Session Resolution
+// ---------------------------------------------------------------------------
+
+export interface ResumeSessionResult {
+  session?: SessionInfo
+  error?: string
+}
+
+/**
+ * Resolve a session prefix to a single session.
+ * Exact id match is preferred over prefix match.
+ * Returns `{ session }` on unique match or `{ error }` on 0/ambiguous matches.
+ */
+export function resolveResumeSession(sessions: SessionInfo[], prefix: string): ResumeSessionResult {
+  // Exact match takes priority
+  const exact = sessions.find(s => s.id === prefix)
+  if (exact) {
+    return { session: exact }
+  }
+
+  // Prefix match
+  const matches = sessions.filter(s => s.id.startsWith(prefix))
+  if (matches.length === 0) {
+    return { error: `No session matching '${prefix}' found` }
+  }
+  if (matches.length > 1) {
+    const list = matches.map(s => `  ${s.id}`).join('\n')
+    return { error: `Ambiguous session prefix '${prefix}' matches ${matches.length} sessions:\n${list}` }
+  }
+  return { session: matches[0] }
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +123,7 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
   const options: HeadlessOptions = {
     timeout: 300_000,
     json: false,
+    outputFormat: 'text',
     command: 'auto',
     commandArgs: [],
   }
@@ -96,6 +144,17 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
         }
       } else if (arg === '--json') {
         options.json = true
+        options.outputFormat = 'stream-json'
+      } else if (arg === '--output-format' && i + 1 < args.length) {
+        const fmt = args[++i]
+        if (!VALID_OUTPUT_FORMATS.has(fmt)) {
+          process.stderr.write(`[headless] Error: --output-format must be one of: text, json, stream-json (got '${fmt}')\n`)
+          process.exit(1)
+        }
+        options.outputFormat = fmt as OutputFormat
+        if (fmt === 'stream-json' || fmt === 'json') {
+          options.json = true
+        }
       } else if (arg === '--model' && i + 1 < args.length) {
         // --model can also be passed from the main CLI; headless-specific takes precedence
         options.model = args[++i]
@@ -118,15 +177,25 @@ export function parseHeadlessArgs(argv: string[]): HeadlessOptions {
       } else if (arg === '--events' && i + 1 < args.length) {
         options.eventFilter = new Set(args[++i].split(','))
         options.json = true  // --events implies --json
+        if (options.outputFormat === 'text') {
+          options.outputFormat = 'stream-json'
+        }
       } else if (arg === '--supervised') {
         options.supervised = true
         options.json = true  // supervised implies json
+        if (options.outputFormat === 'text') {
+          options.outputFormat = 'stream-json'
+        }
       } else if (arg === '--response-timeout' && i + 1 < args.length) {
         options.responseTimeout = parseInt(args[++i], 10)
         if (Number.isNaN(options.responseTimeout) || options.responseTimeout <= 0) {
           process.stderr.write('[headless] Error: --response-timeout must be a positive integer (milliseconds)\n')
           process.exit(1)
         }
+      } else if (arg === '--resume' && i + 1 < args.length) {
+        options.resumeSession = args[++i]
+      } else if (arg === '--bare') {
+        options.bare = true
       }
     } else if (!positionalStarted) {
       positionalStarted = true
@@ -151,7 +220,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<void> {
     const result = await runHeadlessOnce(options, restartCount)
 
     // Success or blocked — exit normally
-    if (result.exitCode === 0 || result.exitCode === 2) {
+    if (result.exitCode === EXIT_SUCCESS || result.exitCode === EXIT_BLOCKED) {
       process.exit(result.exitCode)
     }
 
@@ -275,6 +344,10 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   if (injector) {
     clientOptions.env = injector.getSecretEnvVars()
   }
+  // Propagate --bare to the child process
+  if (options.bare) {
+    clientOptions.args = [...((clientOptions.args as string[]) || []), '--bare']
+  }
 
   const client = new RpcClient(clientOptions)
 
@@ -286,6 +359,40 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   let exitCode = 0
   let milestoneReady = false  // tracks "Milestone X ready." for auto-chaining
   const recentEvents: TrackedEvent[] = []
+
+  // JSON batch mode: cost aggregation (cumulative-max pattern per K004)
+  let cumulativeCostUsd = 0
+  let cumulativeInputTokens = 0
+  let cumulativeOutputTokens = 0
+  let cumulativeCacheReadTokens = 0
+  let cumulativeCacheWriteTokens = 0
+  let lastSessionId: string | undefined
+
+  // Emit HeadlessJsonResult to stdout for --output-format json batch mode
+  function emitBatchJsonResult(): void {
+    if (options.outputFormat !== 'json') return
+    const duration = Date.now() - startTime
+    const status: HeadlessJsonResult['status'] = blocked ? 'blocked'
+      : exitCode === EXIT_CANCELLED ? 'cancelled'
+      : exitCode === EXIT_ERROR ? (totalEvents === 0 ? 'error' : 'timeout')
+      : 'success'
+    const result: HeadlessJsonResult = {
+      status,
+      exitCode,
+      sessionId: lastSessionId,
+      duration,
+      cost: {
+        total: cumulativeCostUsd,
+        input_tokens: cumulativeInputTokens,
+        output_tokens: cumulativeOutputTokens,
+        cache_read_tokens: cumulativeCacheReadTokens,
+        cache_write_tokens: cumulativeCacheWriteTokens,
+      },
+      toolCalls: toolCallCount,
+      events: totalEvents,
+    }
+    process.stdout.write(JSON.stringify(result) + '\n')
+  }
 
   function trackEvent(event: Record<string, unknown>): void {
     totalEvents++
@@ -307,8 +414,11 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     if (recentEvents.length > 20) recentEvents.shift()
   }
 
-  // Stdin writer for sending extension_ui_response to child
-  let stdinWriter: ((data: string) => void) | null = null
+  // Client started flag — replaces old stdinWriter null-check
+  let clientStarted = false
+  // Adapter for AnswerInjector — wraps client.sendUIResponse in a writeToStdin-compatible callback
+  // Initialized after client.start(); events won't fire before then
+  let injectorStdinAdapter: (data: string) => void = () => {}
 
   // Supervised mode state
   const pendingResponseTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -349,7 +459,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   const timeoutTimer = options.timeout > 0
     ? setTimeout(() => {
         process.stderr.write(`[headless] Timeout after ${options.timeout / 1000}s\n`)
-        exitCode = 1
+        exitCode = EXIT_ERROR
         resolveCompletion()
       }, options.timeout)
     : null
@@ -363,20 +473,52 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     // Answer injector: observe events for question metadata
     injector?.observeEvent(eventObj)
 
-    // --json mode: forward events as JSONL to stdout (filtered if --events)
-    if (options.json) {
+    // --json / --output-format stream-json: forward events as JSONL to stdout (filtered if --events)
+    // --output-format json (batch mode): suppress streaming, track cost for final result
+    if (options.json && options.outputFormat === 'stream-json') {
       const eventType = String(eventObj.type ?? '')
       if (!options.eventFilter || options.eventFilter.has(eventType)) {
         process.stdout.write(JSON.stringify(eventObj) + '\n')
       }
-    } else {
+    } else if (options.outputFormat === 'json') {
+      // Batch mode: silently track cost_update events (cumulative-max per K004)
+      const eventType = String(eventObj.type ?? '')
+      if (eventType === 'cost_update') {
+        const data = eventObj as Record<string, unknown>
+        const cumCost = data.cumulativeCost as Record<string, unknown> | undefined
+        if (cumCost) {
+          cumulativeCostUsd = Math.max(cumulativeCostUsd, Number(cumCost.costUsd ?? 0))
+          const tokens = data.tokens as Record<string, number> | undefined
+          if (tokens) {
+            cumulativeInputTokens = Math.max(cumulativeInputTokens, tokens.input ?? 0)
+            cumulativeOutputTokens = Math.max(cumulativeOutputTokens, tokens.output ?? 0)
+            cumulativeCacheReadTokens = Math.max(cumulativeCacheReadTokens, tokens.cacheRead ?? 0)
+            cumulativeCacheWriteTokens = Math.max(cumulativeCacheWriteTokens, tokens.cacheWrite ?? 0)
+          }
+        }
+      }
+      // Track sessionId from init_result
+      if (eventType === 'init_result') {
+        lastSessionId = String((eventObj as Record<string, unknown>).sessionId ?? '')
+      }
+    } else if (!options.json) {
       // Progress output to stderr
       const line = formatProgress(eventObj, !!options.verbose)
       if (line) process.stderr.write(line + '\n')
     }
 
+    // Handle execution_complete (v2 structured completion)
+    if (eventObj.type === 'execution_complete' && !completed) {
+      completed = true
+      const status = String(eventObj.status ?? 'success')
+      exitCode = mapStatusToExitCode(status)
+      if (eventObj.status === 'blocked') blocked = true
+      resolveCompletion()
+      return
+    }
+
     // Handle extension_ui_request
-    if (eventObj.type === 'extension_ui_request' && stdinWriter) {
+    if (eventObj.type === 'extension_ui_request' && clientStarted) {
       // Check for terminal notification before auto-responding
       if (isBlockedNotification(eventObj)) {
         blocked = true
@@ -393,9 +535,9 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
 
       // Answer injection: try to handle with pre-supplied answers before supervised/auto
       if (injector && !FIRE_AND_FORGET_METHODS.has(String(eventObj.method ?? ''))) {
-        if (injector.tryHandle(eventObj, stdinWriter)) {
+        if (injector.tryHandle(eventObj, injectorStdinAdapter)) {
           if (completed) {
-            exitCode = blocked ? 2 : 0
+            exitCode = blocked ? EXIT_BLOCKED : EXIT_SUCCESS
             resolveCompletion()
           }
           return
@@ -411,17 +553,17 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
         const eventId = String(eventObj.id ?? '')
         const timer = setTimeout(() => {
           pendingResponseTimers.delete(eventId)
-          handleExtensionUIRequest(eventObj as unknown as ExtensionUIRequest, stdinWriter!)
+          handleExtensionUIRequest(eventObj as unknown as ExtensionUIRequest, client)
           process.stdout.write(JSON.stringify({ type: 'supervised_timeout', id: eventId, method }) + '\n')
         }, responseTimeout)
         pendingResponseTimers.set(eventId, timer)
       } else {
-        handleExtensionUIRequest(eventObj as unknown as ExtensionUIRequest, stdinWriter)
+        handleExtensionUIRequest(eventObj as unknown as ExtensionUIRequest, client)
       }
 
       // If we detected a terminal notification, resolve after responding
       if (completed) {
-        exitCode = blocked ? 2 : 0
+        exitCode = blocked ? EXIT_BLOCKED : EXIT_SUCCESS
         resolveCompletion()
         return
       }
@@ -442,12 +584,18 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
   const signalHandler = () => {
     process.stderr.write('\n[headless] Interrupted, stopping child process...\n')
     interrupted = true
-    exitCode = 1
-    client.stop().finally(() => {
-      if (timeoutTimer) clearTimeout(timeoutTimer)
-      if (idleTimer) clearTimeout(idleTimer)
-      process.exit(exitCode)
-    })
+    exitCode = EXIT_CANCELLED
+    // Kill child process — don't await, just fire and exit.
+    // The main flow may be awaiting a promise that resolves when the child dies,
+    // which would race with this handler. Exit synchronously to ensure correct exit code.
+    try { client.stop().catch(() => {}) } catch {}
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    if (idleTimer) clearTimeout(idleTimer)
+    // Emit batch JSON result if in json mode before exiting
+    if (options.outputFormat === 'json') {
+      emitBatchJsonResult()
+    }
+    process.exit(exitCode)
   }
   process.on('SIGINT', signalHandler)
   process.on('SIGTERM', signalHandler)
@@ -461,22 +609,55 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     process.exit(1)
   }
 
-  // Access stdin writer from the internal process
-  const internalProcess = (client as any).process as ChildProcess
-  if (!internalProcess?.stdin) {
-    process.stderr.write('[headless] Error: Cannot access child process stdin\n')
-    await client.stop()
-    if (timeoutTimer) clearTimeout(timeoutTimer)
-    process.exit(1)
+  // v2 protocol negotiation — attempt init for structured completion events
+  let v2Enabled = false
+  try {
+    await client.init({ clientId: 'gsd-headless' })
+    v2Enabled = true
+  } catch {
+    process.stderr.write('[headless] Warning: v2 init failed, falling back to v1 string-matching\n')
   }
 
-  stdinWriter = (data: string) => {
-    internalProcess.stdin!.write(data)
+  clientStarted = true
+
+  // --resume: resolve session ID and switch to it
+  if (options.resumeSession) {
+    const projectSessionsDir = getProjectSessionsDir(process.cwd())
+    const sessions = await SessionManager.list(process.cwd(), projectSessionsDir)
+    const result = resolveResumeSession(sessions, options.resumeSession)
+    if (result.error) {
+      process.stderr.write(`[headless] Error: ${result.error}\n`)
+      await client.stop()
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+      process.exit(1)
+    }
+    const matched = result.session!
+    const switchResult = await client.switchSession(matched.path)
+    if (switchResult.cancelled) {
+      process.stderr.write(`[headless] Error: Session switch to '${matched.id}' was cancelled by an extension\n`)
+      await client.stop()
+      if (timeoutTimer) clearTimeout(timeoutTimer)
+      process.exit(1)
+    }
+    process.stderr.write(`[headless] Resuming session ${matched.id}\n`)
+  }
+
+  // Build injector adapter — wraps client.sendUIResponse for AnswerInjector's writeToStdin interface
+  injectorStdinAdapter = (data: string) => {
+    try {
+      const parsed = JSON.parse(data.trim())
+      if (parsed.type === 'extension_ui_response' && parsed.id) {
+        const { id, value, values, confirmed, cancelled } = parsed
+        client.sendUIResponse(id, { value, values, confirmed, cancelled })
+      }
+    } catch {
+      process.stderr.write('[headless] Warning: injector adapter received unparseable data\n')
+    }
   }
 
   // Start supervised stdin reader for orchestrator commands
   if (options.supervised) {
-    stopSupervisedReader = startSupervisedStdinReader(stdinWriter, client, (id) => {
+    stopSupervisedReader = startSupervisedStdinReader(client, (id) => {
       const timer = pendingResponseTimers.get(id)
       if (timer) {
         clearTimeout(timer)
@@ -487,15 +668,18 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     process.stdin.resume()
   }
 
-  // Detect child process crash
-  internalProcess.on('exit', (code) => {
-    if (!completed) {
-      const msg = `[headless] Child process exited unexpectedly with code ${code ?? 'null'}\n`
-      process.stderr.write(msg)
-      exitCode = 1
-      resolveCompletion()
-    }
-  })
+  // Detect child process crash (read-only exit event subscription — not stdin access)
+  const internalProcess = (client as any).process as ChildProcess
+  if (internalProcess) {
+    internalProcess.on('exit', (code) => {
+      if (!completed) {
+        const msg = `[headless] Child process exited unexpectedly with code ${code ?? 'null'}\n`
+        process.stderr.write(msg)
+        exitCode = EXIT_ERROR
+        resolveCompletion()
+      }
+    })
+  }
 
   if (!options.json) {
     process.stderr.write(`[headless] Running /gsd ${options.command}${options.commandArgs.length > 0 ? ' ' + options.commandArgs.join(' ') : ''}...\n`)
@@ -507,16 +691,16 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     await client.prompt(command)
   } catch (err) {
     process.stderr.write(`[headless] Error: Failed to send prompt: ${err instanceof Error ? err.message : String(err)}\n`)
-    exitCode = 1
+    exitCode = EXIT_ERROR
   }
 
   // Wait for completion
-  if (exitCode === 0 || exitCode === 2) {
+  if (exitCode === EXIT_SUCCESS || exitCode === EXIT_BLOCKED) {
     await completionPromise
   }
 
   // Auto-mode chaining: if --auto and milestone creation succeeded, send /gsd auto
-  if (isNewMilestone && options.auto && milestoneReady && !blocked && exitCode === 0) {
+  if (isNewMilestone && options.auto && milestoneReady && !blocked && exitCode === EXIT_SUCCESS) {
     if (!options.json) {
       process.stderr.write('[headless] Milestone ready — chaining into auto-mode...\n')
     }
@@ -535,10 +719,10 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       await client.prompt('/gsd auto')
     } catch (err) {
       process.stderr.write(`[headless] Error: Failed to start auto-mode: ${err instanceof Error ? err.message : String(err)}\n`)
-      exitCode = 1
+      exitCode = EXIT_ERROR
     }
 
-    if (exitCode === 0 || exitCode === 2) {
+    if (exitCode === EXIT_SUCCESS || exitCode === EXIT_BLOCKED) {
       await autoCompletionPromise
     }
   }
@@ -557,7 +741,7 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
 
   // Summary
   const duration = ((Date.now() - startTime) / 1000).toFixed(1)
-  const status = blocked ? 'blocked' : exitCode === 1 ? (totalEvents === 0 ? 'error' : 'timeout') : 'complete'
+  const status = blocked ? 'blocked' : exitCode === EXIT_CANCELLED ? 'cancelled' : exitCode === EXIT_ERROR ? (totalEvents === 0 ? 'error' : 'timeout') : 'complete'
 
   process.stderr.write(`[headless] Status: ${status}\n`)
   process.stderr.write(`[headless] Duration: ${duration}s\n`)
@@ -588,6 +772,9 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
       }
     }
   }
+
+  // Emit structured JSON result in batch mode
+  emitBatchJsonResult()
 
   return { exitCode, interrupted }
 }

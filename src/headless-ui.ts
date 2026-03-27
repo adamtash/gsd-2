@@ -8,7 +8,7 @@
 
 import type { Readable } from 'node:stream'
 
-import { RpcClient, attachJsonlLineReader, serializeJsonLine } from '@gsd/pi-coding-agent'
+import { RpcClient, attachJsonlLineReader } from '@gsd/pi-coding-agent'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,10 +34,9 @@ export type { ExtensionUIRequest }
 
 export function handleExtensionUIRequest(
   event: ExtensionUIRequest,
-  writeToStdin: (data: string) => void,
+  client: RpcClient,
 ): void {
   const { id, method } = event
-  let response: Record<string, unknown>
 
   switch (method) {
     case 'select': {
@@ -49,32 +48,30 @@ export function handleExtensionUIRequest(
         const forceOption = event.options.find(o => o.toLowerCase().includes('force start'))
         if (forceOption) selected = forceOption
       }
-      response = { type: 'extension_ui_response', id, value: selected }
+      client.sendUIResponse(id, { value: selected })
       break
     }
     case 'confirm':
-      response = { type: 'extension_ui_response', id, confirmed: true }
+      client.sendUIResponse(id, { confirmed: true })
       break
     case 'input':
-      response = { type: 'extension_ui_response', id, value: '' }
+      client.sendUIResponse(id, { value: '' })
       break
     case 'editor':
-      response = { type: 'extension_ui_response', id, value: event.prefill ?? '' }
+      client.sendUIResponse(id, { value: event.prefill ?? '' })
       break
     case 'notify':
     case 'setStatus':
     case 'setWidget':
     case 'setTitle':
     case 'set_editor_text':
-      response = { type: 'extension_ui_response', id, value: '' }
+      client.sendUIResponse(id, { value: '' })
       break
     default:
       process.stderr.write(`[headless] Warning: unknown extension_ui_request method "${method}", cancelling\n`)
-      response = { type: 'extension_ui_response', id, cancelled: true }
+      client.sendUIResponse(id, { cancelled: true })
       break
   }
-
-  writeToStdin(serializeJsonLine(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +111,6 @@ export function formatProgress(event: Record<string, unknown>, verbose: boolean)
 // ---------------------------------------------------------------------------
 
 export function startSupervisedStdinReader(
-  stdinWriter: (data: string) => void,
   client: RpcClient,
   onResponse: (id: string) => void,
 ): () => void {
@@ -130,12 +126,17 @@ export function startSupervisedStdinReader(
     const type = String(msg.type ?? '')
 
     switch (type) {
-      case 'extension_ui_response':
-        stdinWriter(line + '\n')
-        if (typeof msg.id === 'string') {
-          onResponse(msg.id)
+      case 'extension_ui_response': {
+        const id = String(msg.id ?? '')
+        const value = msg.value !== undefined ? String(msg.value) : undefined
+        const confirmed = typeof msg.confirmed === 'boolean' ? msg.confirmed : undefined
+        const cancelled = typeof msg.cancelled === 'boolean' ? msg.cancelled : undefined
+        client.sendUIResponse(id, { value, confirmed, cancelled })
+        if (id) {
+          onResponse(id)
         }
         break
+      }
       case 'prompt':
         client.prompt(String(msg.message ?? ''))
         break
