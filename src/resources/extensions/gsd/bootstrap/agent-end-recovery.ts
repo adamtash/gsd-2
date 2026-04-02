@@ -19,6 +19,9 @@ import {
 const retryState = createRetryState();
 const MAX_NETWORK_RETRIES = 2;
 const MAX_TRANSIENT_AUTO_RESUMES = 3;
+/** Credentials-backed-off errors should retry a limited number of times before giving up. */
+const MAX_CREDENTIAL_WAIT_RESUMES = 5;
+const CREDENTIAL_BACKED_OFF_RE = /all credentials.*temporarily backed off|temporarily backed off.*rate limiting/i;
 
 async function pauseTransientWithBackoff(
   cls: ErrorClass,
@@ -28,11 +31,43 @@ async function pauseTransientWithBackoff(
   isRateLimit: boolean,
 ): Promise<void> {
   retryState.consecutiveTransientCount += 1;
-  const baseRetryAfterMs = "retryAfterMs" in cls ? cls.retryAfterMs : 15_000;
-  const retryAfterMs = baseRetryAfterMs * 2 ** Math.max(0, retryState.consecutiveTransientCount - 1);
-  const allowAutoResume = retryState.consecutiveTransientCount <= MAX_TRANSIENT_AUTO_RESUMES;
+
+  // Detect "all credentials backed off" — these should wait for the actual
+  // credential recovery window and never stop retrying.
+  const isCredentialBackedOff = CREDENTIAL_BACKED_OFF_RE.test(errorDetail);
+  const maxResumes = isCredentialBackedOff ? MAX_CREDENTIAL_WAIT_RESUMES : MAX_TRANSIENT_AUTO_RESUMES;
+
+  // Determine retry delay: prefer actual credential recovery time, fall back
+  // to exponential backoff from the error class.
+  let retryAfterMs: number;
+  if (isCredentialBackedOff && ctx.modelRegistry?.authStorage) {
+    const provider = ctx.model?.provider ?? "anthropic";
+    const sessionId = ctx.sessionManager.getSessionId();
+    try {
+      await ctx.modelRegistry.authStorage.refreshProviderRateLimitInfo(provider, sessionId);
+    } catch { /* use cached info */ }
+    const recovery = ctx.modelRegistry.authStorage.getEarliestCredentialRecovery(provider, sessionId);
+    // Use server-reported recovery time, or escalating backoff (min 30s)
+    const escalated = Math.min(30_000 * 2 ** Math.max(0, retryState.consecutiveTransientCount - 1), 600_000);
+    retryAfterMs = recovery?.waitMs ? Math.max(recovery.waitMs, 30_000) : escalated;
+
+    // Show credential status in the notification
+    const pool = ctx.modelRegistry.authStorage.getCredentialPool(provider, sessionId);
+    const statusLines = pool.map((c) => {
+      const status = c.isBackedOff ? `backed off (${Math.ceil(c.backoffRemainingMs / 1000)}s)` : "available";
+      return `${c.label}: ${status}`;
+    }).join(", ");
+    if (statusLines) {
+      ctx.ui.notify(`Credential status: ${statusLines}`, "info");
+    }
+  } else {
+    const baseRetryAfterMs = "retryAfterMs" in cls ? cls.retryAfterMs : 15_000;
+    retryAfterMs = baseRetryAfterMs * 2 ** Math.max(0, retryState.consecutiveTransientCount - 1);
+  }
+
+  const allowAutoResume = retryState.consecutiveTransientCount <= maxResumes;
   if (!allowAutoResume) {
-    ctx.ui.notify(`Transient provider errors persisted after ${MAX_TRANSIENT_AUTO_RESUMES} auto-resume attempts. Pausing for manual review.`, "warning");
+    ctx.ui.notify(`Transient provider errors persisted after ${maxResumes} auto-resume attempts. Pausing for manual review.`, "warning");
   }
   await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi, {
     message: `Provider error: ${errorDetail}`,

@@ -6,7 +6,7 @@
  * Toggled with Ctrl+Alt+G (⌃⌥G on macOS) or opened from /gsd status.
  */
 
-import type { Theme } from "@gsd/pi-coding-agent";
+import { AuthStorage, type Theme } from "@gsd/pi-coding-agent";
 import { truncateToWidth, visibleWidth, matchesKey, Key } from "@gsd/pi-tui";
 import { deriveState } from "./state.js";
 import { loadFile } from "./files.js";
@@ -47,6 +47,41 @@ function unitLabel(type: string): string {
 }
 
 
+function formatResetTime(resetAt: number | null | undefined): string {
+  if (!resetAt) return "unknown";
+  return new Date(resetAt).toLocaleString("en-US", {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatLimitWindow(label: string, window: { utilization: number | null; resetsAt: number | null } | null): string {
+  if (!window) return `${label} n/a`;
+  const utilization = window.utilization == null ? "n/a" : `${Math.round(window.utilization)}%`;
+  return `${label} ${utilization} reset ${formatResetTime(window.resetsAt)}`;
+}
+
+type DashboardAccountRow = {
+  provider: string;
+  label: string;
+  email?: string;
+  displayName?: string;
+  accountId?: string;
+  organizationName?: string;
+  subscriptionType?: string;
+  rateLimitTier?: string;
+  isActive: boolean;
+  isPreferred: boolean;
+  isBackedOff: boolean;
+  isRateLimited: boolean;
+  availableAt?: number | null;
+  hasRateLimits: boolean;
+  rateLimitSummary?: string;
+  status: string;
+};
+
 export class GSDDashboardOverlay {
   private tui: { requestRender: () => void };
   private theme: Theme;
@@ -57,6 +92,7 @@ export class GSDDashboardOverlay {
   private scrollOffset = 0;
   private dashData: AutoDashboardData;
   private milestoneData: MilestoneView | null = null;
+  private accountRows: DashboardAccountRow[] = [];
   private loading = true;
   private loadedDashboardIdentity?: string;
   private refreshInFlight: Promise<void> | null = null;
@@ -67,6 +103,9 @@ export class GSDDashboardOverlay {
     tui: { requestRender: () => void },
     theme: Theme,
     onClose: () => void,
+    private authStorage?: AuthStorage,
+    private sessionId?: string,
+    private currentProvider?: string,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -133,6 +172,8 @@ export class GSDDashboardOverlay {
   private async loadData(): Promise<boolean> {
     const base = this.dashData.basePath || process.cwd();
     try {
+      await this.loadAccountRows();
+
       const state = await deriveState(base);
       if (!state.activeMilestone) {
         this.milestoneData = null;
@@ -200,6 +241,216 @@ export class GSDDashboardOverlay {
       // Don't crash the overlay
       return false;
     }
+  }
+
+  private async loadAccountRows(): Promise<void> {
+    const authStorage = this.authStorage ?? AuthStorage.create();
+
+    const providers = authStorage.list().sort((left, right) => left.localeCompare(right));
+    await Promise.all(providers.map(async (provider) => {
+      if (provider === "anthropic" || provider === "openai-codex") {
+        try {
+          await authStorage.refreshProviderRateLimitInfo(provider, this.sessionId);
+        } catch {
+          // Non-fatal: show account info even if live limit fetch fails.
+        }
+      }
+    }));
+
+    const rows: DashboardAccountRow[] = [];
+    for (const provider of providers) {
+      const credentialPool = authStorage.getCredentialPool(provider, this.sessionId);
+      const credentials = authStorage.getCredentialsForProvider(provider);
+      const rateLimitById = new Map(authStorage.getProviderRateLimitInfo(provider, this.sessionId).map((info) => [info.credentialId, info]));
+
+      for (let index = 0; index < credentialPool.length; index++) {
+        const poolEntry = credentialPool[index]!;
+        const credential = credentials[index];
+        const oauth = credential?.type === "oauth"
+          ? credential as typeof credential & {
+              email?: string;
+              displayName?: string;
+              accountId?: string;
+              organizationName?: string;
+              subscriptionType?: string;
+              rateLimitTier?: string;
+            }
+          : undefined;
+        const limitInfo = rateLimitById.get(poolEntry.id);
+
+        rows.push({
+          provider,
+          label: poolEntry.label,
+          email: typeof oauth?.email === "string" ? oauth.email : undefined,
+          displayName: typeof oauth?.displayName === "string" ? oauth.displayName : undefined,
+          accountId: typeof oauth?.accountId === "string" ? oauth.accountId : undefined,
+          organizationName: typeof oauth?.organizationName === "string" ? oauth.organizationName : undefined,
+          subscriptionType: typeof oauth?.subscriptionType === "string" ? oauth.subscriptionType : undefined,
+          rateLimitTier: typeof oauth?.rateLimitTier === "string" ? oauth.rateLimitTier : undefined,
+          isActive: poolEntry.isActive,
+          isPreferred: poolEntry.isPreferred,
+          isBackedOff: poolEntry.isBackedOff,
+          isRateLimited: Boolean(limitInfo?.isRateLimited),
+          availableAt: limitInfo?.availableAt ?? null,
+          hasRateLimits: Boolean(limitInfo),
+          rateLimitSummary: limitInfo
+            ? `${formatLimitWindow("5h", limitInfo.fiveHour)} · ${formatLimitWindow("7d", limitInfo.weekly)}`
+            : undefined,
+          status: limitInfo?.error
+            ? "usage unavailable"
+            : poolEntry.isBackedOff
+              ? "cooling down"
+              : limitInfo?.isRateLimited
+                ? "rate limited"
+              : "ready",
+        });
+      }
+    }
+
+    this.accountRows = rows.sort((left, right) => {
+      if ((left.provider === this.currentProvider) !== (right.provider === this.currentProvider)) {
+        return left.provider === this.currentProvider ? -1 : 1;
+      }
+      const providerCompare = left.provider.localeCompare(right.provider);
+      if (providerCompare !== 0) return providerCompare;
+      if (left.isActive !== right.isActive) return left.isActive ? -1 : 1;
+      if (left.isPreferred !== right.isPreferred) return left.isPreferred ? -1 : 1;
+      if (left.isBackedOff !== right.isBackedOff) return left.isBackedOff ? 1 : -1;
+      return left.label.localeCompare(right.label);
+    });
+  }
+
+  private buildAccountSection(
+    row: (content?: string) => string,
+    blank: () => string,
+    hr: () => string,
+    contentWidth: number,
+  ): string[] {
+    if (this.accountRows.length === 0) {
+      return [];
+    }
+
+    const th = this.theme;
+    const lines: string[] = [];
+    const providerGroups = new Map<string, DashboardAccountRow[]>();
+    for (const account of this.accountRows) {
+      const existing = providerGroups.get(account.provider);
+      if (existing) {
+        existing.push(account);
+      } else {
+        providerGroups.set(account.provider, [account]);
+      }
+    }
+
+    const currentRow =
+      (this.currentProvider
+        ? providerGroups.get(this.currentProvider)?.find((account) => account.isActive)
+        : undefined) ?? this.accountRows.find((account) => account.isActive);
+    const totalCooling = this.accountRows.filter((account) => account.isBackedOff).length;
+    const totalBlocked = this.accountRows.filter((account) => !account.isBackedOff && account.isRateLimited).length;
+    const totalUnavailable = this.accountRows.filter((account) => account.status === "usage unavailable").length;
+
+    lines.push(hr());
+    lines.push(row(th.fg("text", th.bold("Accounts"))));
+    lines.push(blank());
+
+    const summaryParts = [
+      `${this.accountRows.length} account${this.accountRows.length === 1 ? "" : "s"}`,
+      `${providerGroups.size} provider${providerGroups.size === 1 ? "" : "s"}`,
+    ];
+    if (currentRow) {
+      summaryParts.push(`current ${currentRow.provider}/${currentRow.label}`);
+    }
+    if (totalCooling > 0) {
+      summaryParts.push(th.fg("warning", `${totalCooling} cooling`));
+    }
+    if (totalBlocked > 0) {
+      summaryParts.push(th.fg("warning", `${totalBlocked} blocked`));
+    }
+    if (totalUnavailable > 0) {
+      summaryParts.push(th.fg("dim", `${totalUnavailable} usage n/a`));
+    }
+    lines.push(row(summaryParts.join(`  ${th.fg("dim", "·")}  `)));
+
+    if (currentRow?.rateLimitSummary) {
+      lines.push(row(th.fg("dim", `  ${currentRow.rateLimitSummary}`)));
+    } else if (currentRow?.availableAt) {
+      lines.push(row(th.fg("dim", `  resumes ${formatResetTime(currentRow.availableAt)}`)));
+    }
+
+    lines.push(blank());
+
+    for (const [provider, accounts] of providerGroups) {
+      const readyCount = accounts.filter((account) => !account.isBackedOff && !account.isRateLimited && account.status !== "usage unavailable").length;
+      const coolingCount = accounts.filter((account) => account.isBackedOff).length;
+      const blockedCount = accounts.filter((account) => !account.isBackedOff && account.isRateLimited).length;
+      const unavailableCount = accounts.filter((account) => account.status === "usage unavailable").length;
+      const providerStateParts = [`${readyCount}/${accounts.length} ready`];
+      if (coolingCount > 0) providerStateParts.push(`${coolingCount} cooling`);
+      if (blockedCount > 0) providerStateParts.push(`${blockedCount} blocked`);
+      if (unavailableCount > 0) providerStateParts.push(`${unavailableCount} usage n/a`);
+      const providerMarker = provider === this.currentProvider ? th.fg("accent", "▶") : th.fg("dim", "•");
+      lines.push(row(joinColumns(
+        `${providerMarker} ${th.fg(provider === this.currentProvider ? "accent" : "text", provider)}`,
+        th.fg("dim", providerStateParts.join(" · ")),
+        contentWidth,
+      )));
+
+      for (const account of accounts) {
+        const marker = provider === this.currentProvider && account.isActive
+          ? th.fg("success", "●")
+          : account.isActive
+            ? th.fg("accent", "○")
+            : th.fg("dim", "·");
+        const stateParts: string[] = [];
+        if (provider === this.currentProvider && account.isActive) {
+          stateParts.push(th.fg("success", "current"));
+        } else if (account.isActive) {
+          stateParts.push(th.fg("accent", "selected"));
+        }
+        if (account.isPreferred) {
+          stateParts.push(th.fg("accent", "default"));
+        }
+        if (account.isBackedOff) {
+          stateParts.push(th.fg("warning", "cooling"));
+        } else if (account.isRateLimited) {
+          stateParts.push(th.fg("warning", "blocked"));
+        } else if (account.status === "usage unavailable") {
+          stateParts.push(th.fg("dim", "usage n/a"));
+        } else {
+          stateParts.push(th.fg("success", "ready"));
+        }
+        if (account.subscriptionType) {
+          stateParts.push(th.fg("dim", account.subscriptionType));
+        }
+        if (account.rateLimitTier) {
+          stateParts.push(th.fg("dim", account.rateLimitTier));
+        }
+
+        lines.push(row(joinColumns(
+          `  ${marker} ${th.fg("text", account.label)}`,
+          stateParts.join(` ${th.fg("dim", "·")} `),
+          contentWidth,
+        )));
+
+        const detailParts = [
+          account.displayName && account.displayName !== account.label ? account.displayName : undefined,
+          account.email && account.email !== account.label ? account.email : undefined,
+          account.organizationName,
+          account.accountId ? `acct ${account.accountId.slice(0, 8)}` : undefined,
+        ].filter((value): value is string => Boolean(value));
+        if (detailParts.length > 0) {
+          lines.push(row(th.fg("dim", `     ${detailParts.join(" · ")}`)));
+        }
+        if (account.rateLimitSummary) {
+          lines.push(row(th.fg("dim", `     ${account.rateLimitSummary}`)));
+        }
+      }
+
+      lines.push(blank());
+    }
+
+    return lines;
   }
 
   handleInput(data: string): void {
@@ -360,6 +611,8 @@ export class GSDDashboardOverlay {
       lines.push(row(th.fg("dim", "No unit running · /gsd auto to start")));
       lines.push(blank());
     }
+
+    lines.push(...this.buildAccountSection(row, blank, hr, contentWidth));
 
     // Parallel workers section — shows active subagent sessions
     if (hasActiveWorkers()) {

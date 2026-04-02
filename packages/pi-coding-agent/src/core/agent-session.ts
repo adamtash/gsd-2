@@ -84,6 +84,8 @@ import { createAllTools } from "./tools/index.js";
 // ============================================================================
 // Skill Block Parsing
 // ============================================================================
+// Skill Block Parsing
+// ============================================================================
 
 /** Parsed skill block from a user message */
 export interface ParsedSkillBlock {
@@ -138,11 +140,23 @@ export type AgentSessionEvent =
 	| { type: "fallback_provider_switch"; from: string; to: string; reason: string }
 	| { type: "fallback_provider_restored"; provider: string; reason: string }
 	| { type: "fallback_chain_exhausted"; reason: string }
+	| {
+			type: "credential_wait_start";
+			provider: string;
+			waitMs: number;
+			availableAt: number;
+			credentialSummary: string[];
+			reason: string;
+	  }
+	| { type: "credential_wait_tick"; provider: string; remainingMs: number; credentialSummary: string[] }
+	| { type: "credential_wait_end"; provider: string; resumeCredential?: string }
 	| { type: "image_overflow_recovery"; strippedCount: number; imageCount: number };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
+// ============================================================================
+// Types
 // ============================================================================
 // Types
 // ============================================================================
@@ -217,6 +231,8 @@ export interface SessionStats {
 // ============================================================================
 // Constants
 // ============================================================================
+// Constants
+// ============================================================================
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
@@ -224,6 +240,8 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 /** Thinking levels including xhigh (for supported models) */
 const THINKING_LEVELS_WITH_XHIGH: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
+// ============================================================================
+// AgentSession Class
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -427,7 +445,23 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
+		// ── Retry check BEFORE emitting agent_end to extensions ──────────
+		// If the retry handler takes over (credential rotation, wait, etc.)
+		// we suppress the agent_end event so auto-mode / extensions don't
+		// see it and create competing recovery flows.
+		if (event.type === "agent_end" && this._lastAssistantMessage) {
+			const msg = this._lastAssistantMessage;
+
+			if (this._retryHandler.isRetryableError(msg)) {
+				this._lastAssistantMessage = undefined;
+				const didRetry = await this._retryHandler.handleRetryableError(msg);
+				if (didRetry) return; // Retry handler owns recovery — skip extension emit entirely
+				// Retry handler declined — fall through to emit agent_end to extensions
+				this._lastAssistantMessage = msg; // Restore for compaction check below
+			}
+		}
+
+		// Emit to extensions (agent_end only reaches here if retry handler didn't take over)
 		await this._emitExtensionEvent(event);
 
 		// Notify all listeners
@@ -478,7 +512,7 @@ export class AgentSession {
 			}
 		}
 
-		// Check auto-retry and auto-compaction after agent completes
+		// Auto-compaction after agent completes (retry already handled above)
 		if (event.type === "agent_end" && this._lastAssistantMessage) {
 			const msg = this._lastAssistantMessage;
 			this._lastAssistantMessage = undefined;
@@ -518,7 +552,6 @@ export class AgentSession {
 					return;
 				}
 			}
-
 			await this._compactionOrchestrator.checkCompaction(msg);
 		}
 	}

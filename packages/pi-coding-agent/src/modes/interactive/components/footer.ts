@@ -72,6 +72,14 @@ export class FooterComponent implements Component {
 
 	render(width: number): string[] {
 		const state = this.session.state;
+		// Use activeInferenceModel during streaming to show the model actually
+		// being used, not the configured model which may have been switched mid-turn.
+		const displayModel = state.activeInferenceModel ?? state.model;
+		const activeProvider = displayModel?.provider;
+		const activeCredentialPool = activeProvider
+			? this.session.modelRegistry.authStorage.getCredentialPool(activeProvider, this.session.sessionId)
+			: [];
+		const backedOffCredentialCount = activeCredentialPool.filter((credential) => credential.isBackedOff).length;
 
 		const usageTotals = this.session.sessionManager.getUsageTotals();
 		const totalInput = usageTotals.input;
@@ -79,10 +87,6 @@ export class FooterComponent implements Component {
 		const totalCacheRead = usageTotals.cacheRead;
 		const totalCacheWrite = usageTotals.cacheWrite;
 		const totalCost = usageTotals.cost;
-
-		// Use activeInferenceModel during streaming to show the model actually
-		// being used, not the configured model which may have been switched mid-turn.
-		const displayModel = state.activeInferenceModel ?? state.model;
 
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.
@@ -125,10 +129,18 @@ export class FooterComponent implements Component {
 
 		// Group 3: cost
 		const costGroup: string[] = [];
-		const usingSubscription = displayModel ? this.session.modelRegistry.isUsingOAuth(displayModel) : false;
+		const usingSubscription = displayModel
+			? this.session.modelRegistry.isUsingOAuth(displayModel, this.session.sessionId)
+			: false;
 		if (totalCost || usingSubscription) {
 			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
 			costGroup.push(costStr);
+		}
+
+		// Group 4: credential status
+		const statusGroup: string[] = [];
+		if (backedOffCredentialCount > 0) {
+			statusGroup.push(theme.fg("warning", `${backedOffCredentialCount} cooling`));
 		}
 
 		// Per-prompt cost annotation (opt-in via show_token_cost preference, #1515)
@@ -160,6 +172,7 @@ export class FooterComponent implements Component {
 		if (tokenGroup.length > 0) groups.push(tokenGroup.join(" "));
 		if (cacheGroup.length > 0) groups.push(cacheGroup.join(" "));
 		if (costGroup.length > 0) groups.push(costGroup.join(" "));
+		if (statusGroup.length > 0) groups.push(statusGroup.join(" "));
 		groups.push(contextPercentStr);
 
 		let statsLeft = groups.join(sep);
@@ -228,16 +241,77 @@ export class FooterComponent implements Component {
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 		const lines = [pwdLine, dimStatsLeft + dimRemainder];
 
-		// Add extension statuses on a single line, sorted by key alphabetically
+		const activeAccount = activeCredentialPool.find((credential) => credential.isActive);
+		if (activeProvider && activeAccount) {
+			const standbyAccounts = activeCredentialPool.filter((credential) => !credential.isActive && !credential.isBackedOff).length;
+			const coolingAccounts = activeCredentialPool.filter((credential) => !credential.isActive && credential.isBackedOff).length;
+			const activeAccountLine = [
+				theme.fg("dim", `acct ${activeProvider}`),
+				theme.fg("accent", `current ${activeAccount.label}`),
+				...(standbyAccounts > 0 ? [theme.fg("dim", `${standbyAccounts} standby`)] : []),
+				...(coolingAccounts > 0 ? [theme.fg("warning", `${coolingAccounts} cooling`)] : []),
+			].join(theme.fg("dim", " • "));
+			lines.push(truncateToWidth(activeAccountLine, width, theme.fg("dim", "...")));
+
+			const activeRateLimitSummary = this.session.modelRegistry.authStorage.formatActiveCredentialRateLimitSummary(
+				activeProvider,
+				this.session.sessionId,
+			);
+			if (activeRateLimitSummary) {
+				lines.push(
+					truncateToWidth(
+						theme.fg("dim", `usage ${sanitizeStatusText(activeRateLimitSummary)}`),
+						width,
+						theme.fg("dim", "..."),
+					),
+				);
+			}
+		}
+
+		// Account status summary line
+		const allProviders = this.session.modelRegistry.authStorage.list();
+		if (allProviders.length > 0) {
+			let totalAccounts = 0;
+			let totalBacked = 0;
+			let configuredProviders = 0;
+			for (const provider of allProviders) {
+				const pool = this.session.modelRegistry.authStorage.getCredentialPool(provider, this.session.sessionId);
+				if (pool.length > 0) {
+					configuredProviders++;
+					totalAccounts += pool.length;
+					totalBacked += pool.filter((c) => c.isBackedOff).length;
+				}
+			}
+			if (totalAccounts > 1 || totalBacked > 0) {
+				const accountParts: string[] = [];
+				accountParts.push(`${totalAccounts} account${totalAccounts === 1 ? "" : "s"}`);
+				accountParts.push(`${configuredProviders} provider${configuredProviders === 1 ? "" : "s"}`);
+				if (totalBacked > 0) {
+					accountParts.push(theme.fg("warning", `${totalBacked} cooling`));
+				}
+				const accountLine = accountParts.join(theme.fg("dim", " • "));
+				lines.push(truncateToWidth(theme.fg("dim", accountLine), width, theme.fg("dim", "...")));
+			}
+		}
+
 		const extensionStatuses = this.footerData.getExtensionStatuses();
+		const rateLimitStatus = extensionStatuses.get("rate-limits");
+		if (rateLimitStatus) {
+			const rateLimitLine = `${theme.fg("warning", "rate")} ${sanitizeStatusText(rateLimitStatus)}`;
+			lines.push(truncateToWidth(rateLimitLine, width, theme.fg("dim", "...")));
+		}
+
 		if (extensionStatuses.size > 0) {
 			const sortedStatuses = Array.from(extensionStatuses.entries())
+				.filter(([key]) => key !== "rate-limits")
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			// Match the rest of the footer styling: extension statuses should render
-			// in the same dim color as pwd/stats, with a dim ellipsis on truncation.
-			lines.push(truncateToWidth(theme.fg("dim", statusLine), width, theme.fg("dim", "...")));
+		if (sortedStatuses.length > 0) {
+				const statusLine = sortedStatuses.join(" ");
+				// Match the rest of the footer styling: extension statuses should render
+				// in the same dim color as pwd/stats, with a dim ellipsis on truncation.
+				lines.push(truncateToWidth(theme.fg("dim", statusLine), width, theme.fg("dim", "...")));
+			}
 		}
 
 		return lines;

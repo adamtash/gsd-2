@@ -29,8 +29,9 @@ export class FallbackResolver {
 
 	/**
 	 * Find the next available fallback for a model that just failed.
-	 * Searches all chains for entries matching the current model's provider+id,
-	 * then returns the next available entry with lower priority (higher number).
+	 * First searches explicit chains (when fallback.enabled = true in settings).
+	 * If no chain match is found, auto-discovers any other provider that has
+	 * non-exhausted credentials in auth storage (zero-config fallback).
 	 *
 	 * @returns FallbackResult if a fallback is available, null otherwise
 	 */
@@ -39,29 +40,29 @@ export class FallbackResolver {
 		errorType: UsageLimitErrorType,
 	): Promise<FallbackResult | null> {
 		const { enabled, chains } = this.settingsManager.getFallbackSettings();
-		if (!enabled) return null;
 
 		// Mark the current provider as exhausted at the provider level
 		this.authStorage.markProviderExhausted(currentModel.provider, errorType);
 
-		// Search all chains for one containing the current model
-		for (const [chainName, entries] of Object.entries(chains)) {
-			const currentIndex = entries.findIndex(
-				(e) => e.provider === currentModel.provider && e.model === currentModel.id,
-			);
+		// If explicit chains are configured and enabled, search them first
+		if (enabled) {
+			for (const [chainName, entries] of Object.entries(chains)) {
+				const currentIndex = this._findChainIndex(entries, currentModel);
 
-			if (currentIndex === -1) continue;
+				if (currentIndex === -1) continue;
 
-			// Try entries after the current one (already sorted by priority)
-			const result = await this._findAvailableInChain(chainName, entries, currentIndex + 1);
-			if (result) return result;
+				// Try entries after the current one (already sorted by priority)
+				const result = await this._findAvailableInChain(chainName, entries, currentIndex + 1);
+				if (result) return result;
 
-			// Wrap around: try entries before the current one
-			const wrapResult = await this._findAvailableInChain(chainName, entries, 0, currentIndex);
-			if (wrapResult) return wrapResult;
+				// Wrap around: try entries before the current one
+				const wrapResult = await this._findAvailableInChain(chainName, entries, 0, currentIndex);
+				if (wrapResult) return wrapResult;
+			}
 		}
 
-		return null;
+		// Auto-discover: try any other provider with available credentials
+		return this._autoDiscoverFallback(currentModel);
 	}
 
 	/**
@@ -75,9 +76,7 @@ export class FallbackResolver {
 		if (!enabled) return null;
 
 		for (const [chainName, entries] of Object.entries(chains)) {
-			const currentIndex = entries.findIndex(
-				(e) => e.provider === currentModel.provider && e.model === currentModel.id,
-			);
+			const currentIndex = this._findChainIndex(entries, currentModel);
 
 			if (currentIndex === -1) continue;
 
@@ -118,12 +117,116 @@ export class FallbackResolver {
 		const result: string[] = [];
 
 		for (const [chainName, entries] of Object.entries(chains)) {
-			if (entries.some((e) => e.provider === provider && e.model === modelId)) {
+			if (entries.some((e) => e.provider === provider)) {
 				result.push(chainName);
 			}
 		}
 
 		return result;
+	}
+
+	/**
+	 * Return the ordered provider set that should participate in recovery.
+	 * Starts with the current provider, then follows any matching fallback chain,
+	 * and finally includes any additional configured providers for zero-config fallback.
+	 */
+	getRecoveryCandidateProviders(currentModel: Model<Api>): string[] {
+		const { enabled, chains } = this.settingsManager.getFallbackSettings();
+		const orderedProviders: string[] = [];
+		const seen = new Set<string>();
+		const push = (provider: string) => {
+			if (seen.has(provider)) return;
+			seen.add(provider);
+			orderedProviders.push(provider);
+		};
+
+		push(currentModel.provider);
+
+		if (enabled) {
+			for (const entries of Object.values(chains)) {
+				const currentIndex = this._findChainIndex(entries, currentModel);
+				if (currentIndex === -1) continue;
+
+				push(entries[currentIndex].provider);
+				for (let i = currentIndex + 1; i < entries.length; i++) {
+					push(entries[i].provider);
+				}
+				for (let i = 0; i < currentIndex; i++) {
+					push(entries[i].provider);
+				}
+			}
+		}
+
+		for (const provider of Object.keys(this.authStorage.getAll())) {
+			push(provider);
+		}
+
+		return orderedProviders;
+	}
+
+	/**
+	 * Resolve the model that should be used when resuming with a recovered provider.
+	 * Prefers any explicit model configured in the matching fallback chain, then
+	 * falls back to the provider's preferred/default model.
+	 */
+	resolveRecoveryModel(currentModel: Model<Api>, provider: string): Model<Api> | undefined {
+		if (provider === currentModel.provider) {
+			return currentModel;
+		}
+
+		const { enabled, chains } = this.settingsManager.getFallbackSettings();
+		if (enabled) {
+			for (const entries of Object.values(chains)) {
+				const currentIndex = this._findChainIndex(entries, currentModel);
+				if (currentIndex === -1) continue;
+				const entry = entries.find((candidate) => candidate.provider === provider);
+				if (!entry) continue;
+				const model = this.modelRegistry.getPreferredModelForProvider(provider, entry.model);
+				if (model) return model;
+			}
+		}
+
+		return this.modelRegistry.getPreferredModelForProvider(provider);
+	}
+
+	/**
+	 * Auto-discover a fallback provider by scanning all providers in auth storage.
+	 * Returns the first provider (other than the current one) that has available
+	 * credentials and a resolvable model in the model registry.
+	 * This enables zero-config cross-provider fallback when no explicit chains
+	 * are configured.
+	 */
+	private async _autoDiscoverFallback(currentModel: Model<Api>): Promise<FallbackResult | null> {
+		const allProviders = Object.keys(this.authStorage.getAll());
+		for (const provider of allProviders) {
+			if (provider === currentModel.provider) continue;
+			if (!this.authStorage.isProviderAvailable(provider)) continue;
+			if (!this.authStorage.hasAuth(provider)) continue;
+
+			// Only consider providers that have registered models (skip utility-only
+			// providers like brave, jina, search_provider, discord_bot, etc.)
+			const model = this.modelRegistry.getPreferredModelForProvider(provider);
+			if (!model) continue;
+
+			// Double-check request-readiness (auth mode, external CLI, etc.)
+			if (!this.modelRegistry.isProviderRequestReady(provider)) continue;
+
+			return {
+				model,
+				chainName: "auto",
+				reason: `auto-fallback to ${provider}/${model.id}`,
+			};
+		}
+		return null;
+	}
+
+	private _findChainIndex(entries: FallbackChainEntry[], currentModel: Model<Api>): number {
+		const exactIndex = entries.findIndex(
+			(entry) => entry.provider === currentModel.provider && entry.model === currentModel.id,
+		);
+		if (exactIndex !== -1) return exactIndex;
+
+		return entries.findIndex((entry) => entry.provider === currentModel.provider);
 	}
 
 	/**
@@ -145,8 +248,9 @@ export class FallbackResolver {
 				continue;
 			}
 
-			// Check if model exists in registry
-			const model = this.modelRegistry.find(entry.provider, entry.model);
+			// Resolve an appropriate model for the target provider.
+			// Prefer the chain's explicit model, then fall back to the provider default.
+			const model = this.modelRegistry.getPreferredModelForProvider(entry.provider, entry.model);
 			if (!model) continue;
 
 			// Check if provider is request-ready for fallback (authMode-aware)
@@ -155,7 +259,7 @@ export class FallbackResolver {
 			return {
 				model,
 				chainName,
-				reason: `falling back to ${entry.provider}/${entry.model}`,
+				reason: `falling back to ${entry.provider}/${model.id}`,
 			};
 		}
 

@@ -39,7 +39,13 @@ const SUCCESS_HTML = `<!doctype html>
 </body>
 </html>`;
 
-type TokenSuccess = { type: "success"; access: string; refresh: string; expires: number };
+type TokenSuccess = {
+	type: "success";
+	access: string;
+	refresh: string;
+	expires: number;
+	idToken?: string;
+};
 type TokenFailure = { type: "failed" };
 type TokenResult = TokenSuccess | TokenFailure;
 
@@ -47,7 +53,17 @@ type JwtPayload = {
 	[JWT_CLAIM_PATH]?: {
 		chatgpt_account_id?: string;
 	};
+	email?: string;
+	preferred_username?: string;
+	upn?: string;
+	name?: string;
 	[key: string]: unknown;
+};
+
+type OpenAICodexIdentity = {
+	accountId?: string;
+	email?: string;
+	displayName?: string;
 };
 
 function createState(): string {
@@ -127,6 +143,7 @@ async function exchangeAuthorizationCode(
 		access_token?: string;
 		refresh_token?: string;
 		expires_in?: number;
+		id_token?: string;
 	};
 
 	if (!json.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
@@ -139,6 +156,7 @@ async function exchangeAuthorizationCode(
 		access: json.access_token,
 		refresh: json.refresh_token,
 		expires: Date.now() + json.expires_in * 1000,
+		...(typeof json.id_token === "string" && json.id_token.length > 0 ? { idToken: json.id_token } : {}),
 	};
 }
 
@@ -165,6 +183,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 			access_token?: string;
 			refresh_token?: string;
 			expires_in?: number;
+			id_token?: string;
 		};
 
 		if (!json.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
@@ -177,6 +196,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 			access: json.access_token,
 			refresh: json.refresh_token,
 			expires: Date.now() + json.expires_in * 1000,
+			...(typeof json.id_token === "string" && json.id_token.length > 0 ? { idToken: json.id_token } : {}),
 		};
 	} catch (error) {
 		console.error("[openai-codex] Token refresh error:", error);
@@ -293,6 +313,31 @@ function getAccountId(accessToken: string): string | null {
 	return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
 }
 
+function getTokenString(payload: JwtPayload | null, key: "email" | "preferred_username" | "upn" | "name"): string | undefined {
+	const value = payload?.[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+export function extractOpenAICodexIdentity(accessToken: string, idToken?: string): OpenAICodexIdentity {
+	const accessPayload = decodeJwt(accessToken);
+	const idPayload = typeof idToken === "string" && idToken.length > 0 ? decodeJwt(idToken) : null;
+	const accountId = getAccountId(accessToken) ?? undefined;
+	const email =
+		getTokenString(idPayload, "email") ??
+		getTokenString(accessPayload, "email") ??
+		getTokenString(idPayload, "preferred_username") ??
+		getTokenString(accessPayload, "preferred_username") ??
+		getTokenString(idPayload, "upn") ??
+		getTokenString(accessPayload, "upn");
+	const displayName = getTokenString(idPayload, "name") ?? getTokenString(accessPayload, "name");
+
+	return {
+		...(accountId ? { accountId } : {}),
+		...(email ? { email } : {}),
+		...(displayName ? { displayName } : {}),
+	};
+}
+
 /**
  * Login with OpenAI Codex OAuth
  *
@@ -395,7 +440,8 @@ export async function loginOpenAICodex(options: {
 			throw new Error("Token exchange failed");
 		}
 
-		const accountId = getAccountId(tokenResult.access);
+		const identity = extractOpenAICodexIdentity(tokenResult.access, tokenResult.idToken);
+		const accountId = identity.accountId;
 		if (!accountId) {
 			throw new Error("Failed to extract accountId from token");
 		}
@@ -405,6 +451,9 @@ export async function loginOpenAICodex(options: {
 			refresh: tokenResult.refresh,
 			expires: tokenResult.expires,
 			accountId,
+			...(identity.email ? { email: identity.email } : {}),
+			...(identity.displayName ? { displayName: identity.displayName } : {}),
+			...(tokenResult.idToken ? { idToken: tokenResult.idToken } : {}),
 		};
 	} finally {
 		server.close();
@@ -420,7 +469,8 @@ export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAu
 		throw new Error("Failed to refresh OpenAI Codex token");
 	}
 
-	const accountId = getAccountId(result.access);
+	const identity = extractOpenAICodexIdentity(result.access, result.idToken);
+	const accountId = identity.accountId;
 	if (!accountId) {
 		throw new Error("Failed to extract accountId from token");
 	}
@@ -430,6 +480,9 @@ export async function refreshOpenAICodexToken(refreshToken: string): Promise<OAu
 		refresh: result.refresh,
 		expires: result.expires,
 		accountId,
+		...(identity.email ? { email: identity.email } : {}),
+		...(identity.displayName ? { displayName: identity.displayName } : {}),
+		...(result.idToken ? { idToken: result.idToken } : {}),
 	};
 }
 

@@ -19,13 +19,6 @@ function createTempModelsJsonPath(): string {
   return join(dir, "models.json");
 }
 
-function readProviders(modelsJsonPath: string): string[] {
-  const config = JSON.parse(readFileSync(modelsJsonPath, "utf-8")) as {
-    providers?: Record<string, unknown>;
-  };
-  return Object.keys(config.providers ?? {}).sort();
-}
-
 function createComponent(options: {
   modelsJsonPath: string;
   authProviders?: string[];
@@ -51,6 +44,12 @@ function createComponent(options: {
       removedProviders.push(provider);
       authProviders.delete(provider);
     },
+    getCredentialPool(provider: string) {
+      if (authProviders.has(provider)) {
+        return [{ id: "cred-1", label: provider, type: "api_key", isActive: true, isPreferred: false, isBackedOff: false, backoffRemainingMs: 0 }];
+      }
+      return [];
+    },
   } as any;
 
   const modelRegistry = {
@@ -75,9 +74,23 @@ function createComponent(options: {
     requestRender() {
       renderCalls += 1;
     },
+    terminal: { rows: 40 },
   } as any;
 
-  const component = new ProviderManagerComponent(tui, authStorage, modelRegistry, () => {}, () => {});
+  const removedCredentials: Array<{ provider: string; credentialId: string }> = [];
+
+  const component = new ProviderManagerComponent(tui, authStorage, modelRegistry, {
+    onDone: () => {},
+    onDiscover: () => {},
+    onSetActive: () => {},
+    onRemoveAccount: (provider: string, credentialId: string) => {
+      removedCredentials.push({ provider, credentialId });
+      removedProviders.push(provider);
+    },
+    onAddAccount: () => {},
+    onAddApiKey: () => {},
+    onSetupToken: () => {},
+  });
   return {
     component,
     removedProviders,
@@ -86,54 +99,39 @@ function createComponent(options: {
   };
 }
 
-test("provider manager skips remove when provider has no auth", (t) => {
+test("provider manager does not fire onRemoveAccount when no credentials exist", (t) => {
   const modelsJsonPath = createTempModelsJsonPath();
   const rootDir = join(modelsJsonPath, "..");
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { component, removedProviders, getRefreshCalls, getRenderCalls } = createComponent({
+  const { component, removedProviders } = createComponent({
     modelsJsonPath,
     providers: [{ name: "custom", modelIds: ["local-model"] }],
   });
 
   component.handleInput("r");
 
-  // No auth means remove is a no-op
+  // No credentials, so onRemoveAccount should not be called
   assert.deepEqual(removedProviders, []);
-  assert.deepEqual(readProviders(modelsJsonPath), ["custom"]);
-  assert.equal(getRefreshCalls(), 0);
-  assert.equal(getRenderCalls(), 0);
 });
 
-test("provider manager removes provider models with confirmation when auth is stored", (t) => {
+test("provider manager fires onRemoveAccount for provider with auth", (t) => {
   const modelsJsonPath = createTempModelsJsonPath();
   const rootDir = join(modelsJsonPath, "..");
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
 
-  const { component, removedProviders, getRefreshCalls, getRenderCalls } = createComponent({
+  const { component, removedProviders } = createComponent({
     modelsJsonPath,
     authProviders: ["custom"],
     providers: [{ name: "custom", modelIds: ["local-model"] }],
   });
 
-  // First press enters confirmation mode
   component.handleInput("r");
-  assert.deepEqual(removedProviders, []);
-  assert.equal((component as any).confirmingRemove, true);
 
-  // Second press confirms removal
-  component.handleInput("r");
   assert.deepEqual(removedProviders, ["custom"]);
-  assert.deepEqual(readProviders(modelsJsonPath), []);
-  assert.equal(getRefreshCalls(), 1);
-  assert.ok(getRenderCalls() >= 2);
-  assert.ok(!(component as any).providers.some((provider: { name: string; modelCount: number }) =>
-    provider.name === "custom" || provider.modelCount > 0,
-  ));
-  assert.equal((component as any).selectedIndex, 0);
 });
 
-test("provider manager clamps selection after removing the selected provider", (t) => {
+test("provider manager navigation wraps around provider list", (t) => {
   const modelsJsonPath = createTempModelsJsonPath();
   const rootDir = join(modelsJsonPath, "..");
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
@@ -147,16 +145,16 @@ test("provider manager clamps selection after removing the selected provider", (
     ],
   });
 
-  (component as any).selectedIndex = (component as any).providers.findIndex(
-    (provider: { name: string }) => provider.name === "zeta",
-  );
+  const providers = (component as any).providers as Array<{ name: string }>;
+  const lastIndex = providers.length - 1;
 
-  // Double-press r to confirm removal
-  component.handleInput("r");
-  component.handleInput("r");
+  (component as any).selectedIndex = lastIndex;
 
-  assert.deepEqual(readProviders(modelsJsonPath), ["alpha"]);
-  assert.ok(!(component as any).providers.some((provider: { name: string }) => provider.name === "zeta"));
-  assert.ok((component as any).selectedIndex >= 0);
-  assert.ok((component as any).selectedIndex < (component as any).providers.length);
+  // Down from the last item should wrap to the first.
+  component.handleInput("\x1b[B"); // down arrow
+  assert.equal((component as any).selectedIndex, 0);
+
+  // Up from the first item should wrap to the last.
+  component.handleInput("\x1b[A"); // up arrow
+  assert.equal((component as any).selectedIndex, lastIndex);
 });

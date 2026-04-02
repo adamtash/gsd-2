@@ -17,7 +17,7 @@ export function setupEditorSubmitHandler(host: InteractiveModeStateHost & {
 		text = text.trim();
 		if (!text) return;
 
-		if (text.startsWith("/")) {
+		if (text.startsWith("/") && !host.isExtensionCommand(text)) {
 			const handled = await dispatchSlashCommand(text, host.getSlashCommandContext());
 			if (handled) {
 				host.editor.setText("");

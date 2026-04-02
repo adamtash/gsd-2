@@ -79,7 +79,15 @@ export async function handleStatus(ctx: ExtensionCommandContext): Promise<void> 
 
   const { GSDDashboardOverlay } = await import("../../dashboard-overlay.js");
   const result = await ctx.ui.custom<void>(
-    (tui, theme, _kb, done) => new GSDDashboardOverlay(tui, theme, () => done()),
+    (tui, theme, _kb, done) =>
+      new GSDDashboardOverlay(
+        tui,
+        theme,
+        () => done(),
+        ctx.modelRegistry.authStorage,
+        ctx.sessionManager.getSessionId(),
+        ctx.model?.provider,
+      ),
     {
       overlay: true,
       overlayOptions: {

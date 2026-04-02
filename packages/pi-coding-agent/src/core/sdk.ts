@@ -299,6 +299,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const sessionId = sessionManager.getSessionId();
 
 	agent = new Agent({
 		initialState: {
@@ -315,7 +316,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			return runner.emitBeforeProviderRequest(payload, currentModel);
 		},
-		sessionId: sessionManager.getSessionId(),
+		sessionId,
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner) return messages;
@@ -331,6 +332,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Use the provider argument from the in-flight request;
 			// agent.state.model may already be switched mid-turn.
 			const resolvedProvider = provider || agent.state.model?.provider;
+			const currentSessionId = agent.sessionId ?? sessionManager.getSessionId();
 			if (!resolvedProvider) {
 				throw new Error("No model selected");
 			}
@@ -344,7 +346,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const maxAttempts = 3;
 			const baseDelayMs = 2000;
 			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-				const key = await modelRegistry.getApiKeyForProvider(resolvedProvider);
+				const key = await modelRegistry.getApiKeyForProvider(resolvedProvider, currentSessionId);
 				if (key) return key;
 
 				// On the last attempt, fall through to error handling below
@@ -354,30 +356,46 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// when there are genuinely no credentials configured.
 				const hasAuth = modelRegistry.authStorage.hasAuth(resolvedProvider);
 				const model = agent.state.model;
-				const isOAuth = model && modelRegistry.isUsingOAuth(model);
+				const isOAuth = model && modelRegistry.isUsingOAuth(model, currentSessionId);
 				if (!hasAuth && !isOAuth) break;
 
 				// Wait with exponential backoff before retrying
 				await new Promise(resolve => setTimeout(resolve, baseDelayMs * attempt));
 			}
 
-			// All retries exhausted — throw descriptive error
-			// Check if credentials exist but are temporarily backed off
-			// (e.g., after a 429 quota exhaustion). Provide a specific error
-			// so the retry handler knows this is transient, not a permanent
-			// auth failure.
+			// All retries exhausted — throw descriptive error.
+			// Only say "backed off" when credentials are ACTUALLY backed off.
+			// Otherwise the retry handler misclassifies it and enters a wait loop.
 			const hasAuth = modelRegistry.authStorage.hasAuth(resolvedProvider);
-			if (hasAuth) {
+			const actuallyBackedOff = hasAuth && modelRegistry.authStorage.areAllCredentialsBackedOff(resolvedProvider);
+			if (actuallyBackedOff) {
+				// Include per-account details so the user can see which accounts are affected
+				const pool = modelRegistry.authStorage.getCredentialPool(resolvedProvider, currentSessionId);
+				const accountLines = pool.map((c) => {
+					const status = c.isBackedOff
+						? `backed off (${Math.ceil(c.backoffRemainingMs / 1000)}s remaining)`
+						: "available";
+					return `  ${c.label}: ${status}`;
+				}).join("\n");
 				throw new Error(
 					`All credentials for "${resolvedProvider}" are temporarily backed off due to rate limiting. ` +
-						`The request will be retried automatically when backoff expires.`,
+						`The request will be retried automatically when backoff expires.\n` +
+						`Account status:\n${accountLines}`,
+				);
+			}
+			if (hasAuth) {
+				// Credentials exist but aren't backed off — key resolution failed
+				// for another reason (e.g., unresolvable credential type).
+				// Use a message that does NOT match the "temporarily backed off" regex
+				// so the retry handler treats this as a normal retryable error.
+				throw new Error(
+					`API key for "${resolvedProvider}" could not be resolved. ` +
+						`Check your credential configuration or run '/login ${resolvedProvider}'.`,
 				);
 			}
 			const model = agent.state.model;
-			const isOAuth = model && modelRegistry.isUsingOAuth(model);
+			const isOAuth = model && modelRegistry.isUsingOAuth(model, currentSessionId);
 			if (isOAuth) {
-				// If credentials exist but are all in a backoff window (quota / rate-limit),
-				// surface a specific message instead of the misleading "Authentication failed".
 				if (modelRegistry.authStorage.areAllCredentialsBackedOff(resolvedProvider)) {
 					throw new Error(
 						`Rate limit in effect for "${resolvedProvider}". ` +

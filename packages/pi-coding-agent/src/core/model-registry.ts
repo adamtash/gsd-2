@@ -29,6 +29,7 @@ import type { AuthStorage } from "./auth-storage.js";
 import { ModelDiscoveryCache } from "./discovery-cache.js";
 import type { DiscoveredModel, DiscoveryResult } from "./model-discovery.js";
 import { getDefaultTTL, getDiscoverableProviders, getDiscoveryAdapter } from "./model-discovery.js";
+import { defaultModelPerProvider } from "./model-resolver.js";
 import { clearConfigValueCache, resolveConfigValue, resolveHeaders } from "./resolve-config-value.js";
 import { isLocalModel } from "./local-model-check.js";
 
@@ -299,7 +300,7 @@ export class ModelRegistry {
 
 		// Let OAuth providers modify their models (e.g., update baseUrl)
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
-			const cred = this.authStorage.get(oauthProvider.id);
+			const cred = this.authStorage.getPrimaryOAuthCredential(oauthProvider.id);
 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
 				combined = oauthProvider.modifyModels(combined, cred);
 			}
@@ -555,6 +556,24 @@ export class ModelRegistry {
 		return this.models.find((m) => m.provider === provider && m.id === modelId);
 	}
 
+	getPreferredModelForProvider(provider: string, preferredModelId?: string): Model<Api> | undefined {
+		const providerModels = this.models.filter((model) => model.provider === provider);
+		if (providerModels.length === 0) return undefined;
+
+		if (preferredModelId) {
+			const preferred = providerModels.find((model) => model.id === preferredModelId);
+			if (preferred) return preferred;
+		}
+
+		const defaultId = defaultModelPerProvider[provider as KnownProvider];
+		if (defaultId) {
+			const preferredDefault = providerModels.find((model) => model.id === defaultId);
+			if (preferredDefault) return preferredDefault;
+		}
+
+		return providerModels[0];
+	}
+
 	/**
 	 * Get API key for a model.
 	 * Returns undefined for externalCli/none providers (no key needed).
@@ -580,9 +599,12 @@ export class ModelRegistry {
 	/**
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
-	isUsingOAuth(model: Model<Api>): boolean {
-		const cred = this.authStorage.get(model.provider);
-		return cred?.type === "oauth";
+	isUsingOAuth(model: Model<Api>, sessionId?: string): boolean {
+		const selected = this.authStorage.getSelectedCredential(model.provider, sessionId);
+		if (selected) {
+			return selected.type === "oauth";
+		}
+		return this.authStorage.hasOAuth(model.provider);
 	}
 
 	/**
@@ -747,7 +769,7 @@ export class ModelRegistry {
 
 			// Apply OAuth modifyModels if credentials exist (e.g., to update baseUrl)
 			if (config.oauth?.modifyModels) {
-				const cred = this.authStorage.get(providerName);
+				const cred = this.authStorage.getPrimaryOAuthCredential(providerName);
 				if (cred?.type === "oauth") {
 					this.models = config.oauth.modifyModels(this.models, cred);
 				}

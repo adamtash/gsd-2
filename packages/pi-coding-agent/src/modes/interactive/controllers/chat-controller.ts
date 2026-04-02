@@ -354,6 +354,66 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 			host.ui.requestRender();
 			break;
 
+		case "credential_wait_start": {
+			// Override Escape to cancel the wait
+			host.retryEscapeHandler = host.defaultEditor.onEscape;
+			host.defaultEditor.onEscape = () => host.session.abortRetry();
+			host.statusContainer.clear();
+
+			host.retryLoader = new Loader(
+				host.ui,
+				(spinner) => theme.fg("warning", spinner),
+				(text) => theme.fg("muted", text),
+				`${event.reason}  (${appKey(host.keybindings, "interrupt")} to cancel)`,
+			);
+			host.statusContainer.addChild(host.retryLoader);
+
+			// Show per-account breakdown
+			for (const line of event.credentialSummary) {
+				host.statusContainer.addChild(new Text(theme.fg("muted", `  ${line}`), 1, 0));
+			}
+			host.ui.requestRender();
+			break;
+		}
+
+		case "credential_wait_tick": {
+			// Update the status with current countdown
+			host.statusContainer.clear();
+			const tickRemainStr = _formatMs(event.remainingMs);
+			if (host.retryLoader) {
+				host.retryLoader.stop();
+			}
+			host.retryLoader = new Loader(
+				host.ui,
+				(spinner) => theme.fg("warning", spinner),
+				(text) => theme.fg("muted", text),
+				`Waiting for ${event.provider} account (~${tickRemainStr} remaining)  (${appKey(host.keybindings, "interrupt")} to cancel)`,
+			);
+			host.statusContainer.addChild(host.retryLoader);
+			for (const line of event.credentialSummary) {
+				host.statusContainer.addChild(new Text(theme.fg("muted", `  ${line}`), 1, 0));
+			}
+			host.ui.requestRender();
+			break;
+		}
+
+		case "credential_wait_end": {
+			if (host.retryEscapeHandler) {
+				host.defaultEditor.onEscape = host.retryEscapeHandler;
+				host.retryEscapeHandler = undefined;
+			}
+			if (host.retryLoader) {
+				host.retryLoader.stop();
+				host.retryLoader = undefined;
+				host.statusContainer.clear();
+			}
+			if (event.resumeCredential) {
+				host.showStatus(`Resuming with account: ${event.resumeCredential}`);
+			}
+			host.ui.requestRender();
+			break;
+		}
+
 		case "image_overflow_recovery":
 			host.showStatus(
 				`Removed ${event.strippedCount} older image(s) to comply with API limits. Retrying...`,
@@ -361,4 +421,16 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 			host.ui.requestRender();
 			break;
 	}
+}
+
+/** Format milliseconds into a human‑readable duration string (e.g. "2m 30s") */
+function _formatMs(ms: number): string {
+	const totalSeconds = Math.ceil(ms / 1000);
+	if (totalSeconds < 60) return `${totalSeconds}s`;
+	const mins = Math.floor(totalSeconds / 60);
+	const secs = totalSeconds % 60;
+	if (mins < 60) return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
+	const hours = Math.floor(mins / 60);
+	const remainMins = mins % 60;
+	return remainMins > 0 ? `${hours}h ${remainMins}m` : `${hours}h`;
 }

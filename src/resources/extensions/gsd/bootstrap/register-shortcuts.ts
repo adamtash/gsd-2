@@ -17,7 +17,15 @@ export function registerShortcuts(pi: ExtensionAPI): void {
         return;
       }
       await ctx.ui.custom<void>(
-        (tui, theme, _kb, done) => new GSDDashboardOverlay(tui, theme, () => done()),
+        (tui, theme, _kb, done) =>
+          new GSDDashboardOverlay(
+            tui,
+            theme,
+            () => done(),
+            ctx.modelRegistry.authStorage,
+            ctx.sessionManager.getSessionId(),
+            ctx.model?.provider,
+          ),
         {
           overlay: true,
           overlayOptions: {

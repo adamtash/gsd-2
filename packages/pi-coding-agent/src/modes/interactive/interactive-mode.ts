@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@gsd/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId } from "@gsd/pi-ai";
+import { setupAnthropicToken } from "@gsd/pi-ai";
 import type {
 	AutocompleteItem,
 	EditorComponent,
@@ -24,6 +25,7 @@ import {
 	type Component,
 	Container,
 	fuzzyFilter,
+	Input,
 	Loader,
 	Markdown,
 	matchesKey,
@@ -31,11 +33,12 @@ import {
 	Spacer,
 	type Terminal as TuiTerminal,
 	Text,
+	truncateToWidth,
 	TruncatedText,
 	TUI,
 	visibleWidth,
 } from "@gsd/pi-tui";
-import { spawn, spawnSync } from "child_process";
+import { execFile, spawn, spawnSync } from "child_process";
 import {
 	APP_NAME,
 	getAuthPath,
@@ -3315,34 +3318,320 @@ export class InteractiveMode {
 	}
 
 	private showProviderManager(): void {
+		let component: ProviderManagerComponent;
+
 		this.showSelector((done) => {
-			const component = new ProviderManagerComponent(
+			component = new ProviderManagerComponent(
 				this.ui,
 				this.session.modelRegistry.authStorage,
 				this.session.modelRegistry,
-				() => {
-					done();
-					this.ui.requestRender();
-				},
-				async (provider: string) => {
-					this.showStatus(`Discovering models for ${provider}...`);
-					try {
-						const results = await this.session.modelRegistry.discoverModels([provider]);
-						const result = results[0];
-						if (result?.error) {
-							this.showError(`Discovery failed: ${result.error}`);
-						} else {
-							this.showStatus(`Discovered ${result?.models.length ?? 0} models from ${provider}`);
+				{
+					onDone: () => {
+						done();
+						this.ui.requestRender();
+					},
+					onDiscover: async (provider: string) => {
+						this.showStatus(`Discovering models for ${provider}...`);
+						try {
+							const results = await this.session.modelRegistry.discoverModels([provider]);
+							const result = results[0];
+							if (result?.error) {
+								this.showError(`Discovery failed: ${result.error}`);
+							} else {
+								this.showStatus(`Discovered ${result?.models.length ?? 0} models from ${provider}`);
+							}
+						} catch (error) {
+							this.showError(error instanceof Error ? error.message : String(error));
 						}
-					} catch (error) {
-						this.showError(error instanceof Error ? error.message : String(error));
-					}
-					done();
-					this.ui.requestRender();
+						component.refresh();
+						this.ui.requestRender();
+					},
+					onSetActive: (provider: string, credentialId: string) => {
+						const result = this.session.modelRegistry.authStorage.setPreferredCredential(provider, credentialId);
+						if (result) {
+							this.showStatus(`Set ${result.label ?? credentialId} as default for ${provider}`);
+						} else {
+							this.showError(`Credential not found`);
+						}
+						component.refresh();
+						this.ui.requestRender();
+					},
+					onRemoveAccount: (provider: string, credentialId: string) => {
+						const removed = this.session.modelRegistry.authStorage.removeCredential(provider, credentialId);
+						if (removed) {
+							this.showStatus(`Removed ${removed.label ?? credentialId} from ${provider}`);
+							this.session.modelRegistry.refresh();
+							this.updateAvailableProviderCount().catch(() => {});
+						} else {
+							this.showError(`Credential not found`);
+						}
+						component.refresh();
+						this.ui.requestRender();
+					},
+					onAddAccount: (provider: string) => {
+						// Close provider manager and launch OAuth login flow
+						done();
+						const handleLogin = async () => {
+							const oauthProvider = this.session.modelRegistry.authStorage
+								.getOAuthProviders()
+								.find((p) => p.id === provider);
+							if (oauthProvider) {
+								await this.showLoginDialog(provider);
+								// Back to provider manager after login
+								this.showProviderManager();
+							} else {
+								this.showError(`No OAuth provider found for ${provider}. Use 'k' to add an API key instead.`);
+								this.showProviderManager();
+							}
+						};
+						handleLogin().catch(() => {
+							this.showProviderManager();
+						});
+					},
+					onAddApiKey: (provider: string) => {
+						// Close provider manager and show API key input
+						done();
+						this.showApiKeyInput(provider);
+					},
+					onSetupToken: (provider: string) => {
+						// Close provider manager and launch setup-token flow
+						done();
+						this.showSetupTokenFlow(provider);
+					},
 				},
 			);
 			return { component, focus: component };
 		});
+	}
+
+	/** Dashboard URLs where users can create/manage API keys */
+	private static readonly API_KEY_DASHBOARD_URLS: Record<string, { url: string; hint: string; placeholder: string }> = {
+		"anthropic": {
+			url: "https://console.anthropic.com/settings/keys",
+			hint: "Create a new API key in the Anthropic Console and paste it below.",
+			placeholder: "sk-ant-...",
+		},
+		"openai": {
+			url: "https://platform.openai.com/api-keys",
+			hint: "Create a new API key in the OpenAI dashboard and paste it below.",
+			placeholder: "sk-...",
+		},
+		"google": {
+			url: "https://aistudio.google.com/apikey",
+			hint: "Create an API key in Google AI Studio and paste it below.",
+			placeholder: "AIza...",
+		},
+		"groq": {
+			url: "https://console.groq.com/keys",
+			hint: "Create a new API key in the Groq Console and paste it below.",
+			placeholder: "gsk_...",
+		},
+		"xai": {
+			url: "https://console.x.ai",
+			hint: "Create a new API key in the xAI Console and paste it below.",
+			placeholder: "xai-...",
+		},
+		"openrouter": {
+			url: "https://openrouter.ai/keys",
+			hint: "Create a new API key in OpenRouter and paste it below.",
+			placeholder: "sk-or-...",
+		},
+		"mistral": {
+			url: "https://console.mistral.ai/api-keys",
+			hint: "Create a new API key in the Mistral Console and paste it below.",
+			placeholder: "",
+		},
+	};
+
+	private showApiKeyInput(provider: string): void {
+		const dashboardInfo = InteractiveMode.API_KEY_DASHBOARD_URLS[provider];
+
+		const container = new Container();
+		container.addChild(new DynamicBorder());
+		container.addChild(new Spacer(1));
+		container.addChild(new TruncatedText(theme.bold(`Add API Key for ${provider}`), 0, 0));
+
+		if (dashboardInfo) {
+			// Show clickable dashboard URL (OSC 8 hyperlink)
+			container.addChild(new Spacer(1));
+			const maxUrlWidth = Math.max(20, this.ui.terminal.columns - 4);
+			const displayUrl = truncateToWidth(dashboardInfo.url, maxUrlWidth);
+			const urlLink = `\x1b]8;;${dashboardInfo.url}\x07${theme.fg("accent", displayUrl)}\x1b]8;;\x07`;
+			container.addChild(new Text(urlLink, 1, 0));
+			const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
+			container.addChild(new Text(theme.fg("dim", clickHint), 1, 0));
+			container.addChild(new Spacer(1));
+			container.addChild(new TruncatedText(theme.fg("muted", dashboardInfo.hint), 0, 0));
+
+			// Auto-open browser to the dashboard
+			if (process.platform === "win32") {
+				execFile("powershell", ["-c", `Start-Process '${dashboardInfo.url.replace(/'/g, "''")}'`], () => {});
+			} else {
+				const openCmd = process.platform === "darwin" ? "open" : "xdg-open";
+				execFile(openCmd, [dashboardInfo.url], () => {});
+			}
+		} else {
+			container.addChild(new TruncatedText(theme.fg("muted", "Paste your API key below."), 0, 0));
+		}
+
+		container.addChild(new Spacer(1));
+		container.addChild(new TruncatedText(theme.fg("dim", "Press Enter to save, Esc to cancel."), 0, 0));
+
+		const input = new Input();
+		input.placeholder = dashboardInfo?.placeholder || "sk-...";
+		input.onSubmit = (value: string) => {
+			const trimmed = value.trim();
+			if (!trimmed) {
+				this.showError("API key cannot be empty");
+				this.editorContainer.clear();
+				this.editorContainer.addChild(this.editor);
+				this.ui.setFocus(this.editor);
+				this.showProviderManager();
+				return;
+			}
+			this.session.modelRegistry.authStorage.set(provider, {
+				type: "api_key",
+				key: trimmed,
+			});
+			this.session.modelRegistry.refresh();
+			this.updateAvailableProviderCount().catch(() => {});
+			this.showStatus(`Added API key for ${provider}. Saved to ${getAuthPath()}`);
+
+			// Return to provider manager
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.showProviderManager();
+		};
+		input.onEscape = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.showProviderManager();
+		};
+
+		container.addChild(input);
+		container.addChild(new Spacer(1));
+		container.addChild(new DynamicBorder());
+
+		this.editorContainer.clear();
+		this.editorContainer.addChild(container);
+		this.ui.setFocus(input);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Setup a long-lived OAuth token (1 year) for Anthropic, similar to
+	 * `claude setup-token`. Uses inference-only scope.
+	 */
+	private showSetupTokenFlow(provider: string): void {
+		if (provider !== "anthropic") {
+			this.showError("Setup token is only supported for Anthropic.");
+			this.showProviderManager();
+			return;
+		}
+
+		const container = new Container();
+		container.addChild(new DynamicBorder());
+		container.addChild(new Spacer(1));
+		container.addChild(new TruncatedText(theme.bold("Setup Long-Lived Token (1 year)"), 0, 0));
+		container.addChild(new Spacer(1));
+		container.addChild(new TruncatedText(theme.fg("muted", "Opening browser for Anthropic OAuth login..."), 0, 0));
+		container.addChild(new TruncatedText(theme.fg("muted", "This creates an inference-only token valid for 1 year."), 0, 0));
+		container.addChild(new Spacer(1));
+		container.addChild(new TruncatedText(theme.fg("dim", "Paste the authorization code below, then press Enter."), 0, 0));
+		container.addChild(new TruncatedText(theme.fg("dim", "Press Esc to cancel."), 0, 0));
+		container.addChild(new Spacer(1));
+
+		const statusLine = new Text("", 0, 0);
+		container.addChild(statusLine);
+
+		const input = new Input();
+		input.placeholder = "code#state";
+		container.addChild(input);
+		container.addChild(new Spacer(1));
+		container.addChild(new DynamicBorder());
+
+		this.editorContainer.clear();
+		this.editorContainer.addChild(container);
+		this.ui.setFocus(input);
+		this.ui.requestRender();
+
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		// Resolve function for the code prompt
+		let resolveCode: ((code: string) => void) | undefined;
+		let rejectCode: ((err: Error) => void) | undefined;
+
+		input.onSubmit = (value: string) => {
+			const trimmed = value.trim();
+			if (!trimmed) return;
+			if (resolveCode) {
+				resolveCode(trimmed);
+				resolveCode = undefined;
+			}
+		};
+		input.onEscape = () => {
+			if (rejectCode) {
+				rejectCode(new Error("Setup token cancelled"));
+				rejectCode = undefined;
+			}
+			restoreEditor();
+			this.showProviderManager();
+		};
+
+		// Launch the OAuth flow
+		const runFlow = async () => {
+			try {
+				const result = await setupAnthropicToken(
+					(url: string) => {
+						// Open browser
+						if (process.platform === "win32") {
+							execFile("powershell", ["-c", `Start-Process '${url.replace(/'/g, "''")}'`], () => {});
+						} else {
+							const openCmd = process.platform === "darwin" ? "open" : "xdg-open";
+							execFile(openCmd, [url], () => {});
+						}
+						const maxUrlWidth = Math.max(20, this.ui.terminal.columns - 4);
+						const displayUrl = truncateToWidth(url, maxUrlWidth);
+						const urlLink = `\x1b]8;;${url}\x07${theme.fg("accent", displayUrl)}\x1b]8;;\x07`;
+						statusLine.setText(urlLink);
+						this.ui.requestRender();
+					},
+					() => new Promise<string>((resolve, reject) => {
+						resolveCode = resolve;
+						rejectCode = reject;
+					}),
+				);
+
+				// Store credentials as OAuth so refresh works normally
+				this.session.modelRegistry.authStorage.set(provider, {
+					type: "oauth",
+					...result.credentials,
+				});
+				this.session.modelRegistry.refresh();
+				await this.updateAvailableProviderCount();
+
+				restoreEditor();
+				this.showStatus(
+					`Setup token created for Anthropic (valid ~1 year). Saved to ${getAuthPath()}`,
+				);
+				this.showProviderManager();
+			} catch (error: unknown) {
+				const msg = error instanceof Error ? error.message : String(error);
+				if (!msg.includes("cancelled")) {
+					restoreEditor();
+					this.showError(`Setup token failed: ${msg}`);
+				}
+				this.showProviderManager();
+			}
+		};
+		runFlow().catch(() => {});
 	}
 
 	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {

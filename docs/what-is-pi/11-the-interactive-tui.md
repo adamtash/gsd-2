@@ -24,7 +24,7 @@ Pi's terminal interface is built with a custom TUI framework (`@mariozechner/pi-
 │  [Widgets below editor - from extensions]                    │
 ├─────────────────────────────────────────────────────────────┤
 │  Footer: cwd │ session name │ tokens │ cost │ context │ model│
-│  [Extension status indicators]                               │
+│  [Rate-limit summary and extension status indicators]        │
 └─────────────────────────────────────────────────────────────┘
 ```
 

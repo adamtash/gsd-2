@@ -25,6 +25,7 @@ export type {
 	OAuthProviderId,
 	OAuthProviderInterface,
 } from "./utils/oauth/types.js";
+export { setupAnthropicToken } from "./utils/oauth/anthropic.js";
 export * from "./utils/overflow.js";
 export * from "./utils/typebox-helpers.js";
 export * from "./utils/repair-tool-json.js";
