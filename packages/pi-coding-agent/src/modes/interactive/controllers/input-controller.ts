@@ -8,6 +8,7 @@ export function setupEditorSubmitHandler(host: InteractiveModeStateHost & {
 	showError: (message: string) => void;
 	updateEditorBorderColor: () => void;
 	isExtensionCommand: (text: string) => boolean;
+	isKnownSlashCommand: (text: string) => boolean;
 	queueCompactionMessage: (text: string, mode: "steer" | "followUp") => void;
 	updatePendingMessagesDisplay: () => void;
 	flushPendingBashComponents: () => void;
@@ -20,6 +21,12 @@ export function setupEditorSubmitHandler(host: InteractiveModeStateHost & {
 		if (text.startsWith("/") && !host.isExtensionCommand(text)) {
 			const handled = await dispatchSlashCommand(text, host.getSlashCommandContext());
 			if (handled) {
+				host.editor.setText("");
+				return;
+			}
+			if (!host.isKnownSlashCommand(text)) {
+				const command = text.split(/\s/)[0];
+				host.showError(`Unknown command: ${command}. Use slash autocomplete to see available commands.`);
 				host.editor.setText("");
 				return;
 			}

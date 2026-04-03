@@ -136,7 +136,7 @@ export async function dispatchSlashCommand(
 		await ctx.handleModelCommand(searchTerm);
 		return true;
 	}
-	if (text.startsWith("/export")) {
+	if (text === "/export" || text.startsWith("/export ")) {
 		await handleExportCommand(text, ctx);
 		return true;
 	}
@@ -233,13 +233,6 @@ export async function dispatchSlashCommand(
 		// and env vars from shell profiles (.zprofile/.profile) are available.
 		// Note: shell aliases are not loaded (requires -i which has side effects).
 		await ctx.handleBashCommand(command, { loginShell: true });
-		return true;
-	}
-
-	// If input starts with "/" but no command matched, show unknown command feedback
-	if (text.startsWith("/")) {
-		const command = text.split(/\s/)[0];
-		ctx.showError(`Unknown command: ${command}. Type /help for available commands.`);
 		return true;
 	}
 

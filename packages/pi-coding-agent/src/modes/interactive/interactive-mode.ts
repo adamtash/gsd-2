@@ -2374,6 +2374,12 @@ export class InteractiveMode {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
 
+		if (text.startsWith("/") && !this.isKnownSlashCommand(text)) {
+			const command = text.split(/\s/)[0];
+			this.showError(`Unknown command: ${command}. Use slash autocomplete to see available commands.`);
+			return;
+		}
+
 		// Queue input during compaction (extension commands execute immediately)
 		if (this.session.isCompacting) {
 			if (this.isExtensionCommand(text)) {
@@ -2656,6 +2662,12 @@ export class InteractiveMode {
 	}
 
 	private queueCompactionMessage(text: string, mode: "steer" | "followUp"): void {
+		if (text.startsWith("/") && !this.isKnownSlashCommand(text)) {
+			const command = text.split(/\s/)[0];
+			this.showError(`Unknown command: ${command}. Use slash autocomplete to see available commands.`);
+			return;
+		}
+
 		this.compactionQueuedMessages.push({ text, mode });
 		this.editor.addToHistory?.(text);
 		this.editor.setText("");
@@ -2672,6 +2684,32 @@ export class InteractiveMode {
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		return !!extensionRunner.getCommand(commandName);
+	}
+
+	private isKnownSlashCommand(text: string): boolean {
+		if (!text.startsWith("/")) return false;
+
+		const spaceIndex = text.indexOf(" ");
+		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+
+		if (BUILTIN_SLASH_COMMANDS.some((command) => command.name === commandName)) {
+			return true;
+		}
+
+		if (this.isExtensionCommand(text)) {
+			return true;
+		}
+
+		if (this.session.promptTemplates.some((template) => template.name === commandName)) {
+			return true;
+		}
+
+		if (commandName.startsWith("skill:") && this.settingsManager.getEnableSkillCommands()) {
+			const skillName = commandName.slice("skill:".length);
+			return this.session.resourceLoader.getSkills().skills.some((skill) => skill.name === skillName);
+		}
+
+		return false;
 	}
 
 	private async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
