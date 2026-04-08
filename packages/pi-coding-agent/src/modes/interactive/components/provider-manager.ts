@@ -500,6 +500,12 @@ export class ProviderManagerComponent extends Container implements Focusable {
 			if (providerName) {
 				this.callbacks.onSetupToken(providerName);
 			}
+		} else if (kb.matches(keyData, "selectConfirm")) {
+			// Enter key → initiate auth setup for the selected provider (#3579)
+			const provider = this.providers[this.selectedIndex];
+			if (provider) {
+				this.onSetupAuth(provider.name);
+			}
 		}
 	}
 }

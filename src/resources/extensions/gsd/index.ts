@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
 export {
+  isDepthConfirmationAnswer,
   isDepthVerified,
   isQueuePhaseActive,
   setQueuePhaseActive,

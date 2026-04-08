@@ -7,6 +7,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { listDescendants } from "@gsd/native";
 import type { AgentMessage } from "@gsd/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, OAuthProviderId } from "@gsd/pi-ai";
 import { setupAnthropicToken } from "@gsd/pi-ai";
@@ -160,6 +161,10 @@ export interface InteractiveModeOptions {
 }
 
 export class InteractiveMode {
+	// Cap rendered chat components to prevent unbounded memory/CPU growth.
+	// Only render-components are removed — session transcript stays on disk.
+	private static readonly MAX_CHAT_COMPONENTS = 100;
+
 	private session: AgentSession;
 	private ui: TUI;
 	private chatContainer: Container;
@@ -2141,6 +2146,18 @@ export class InteractiveMode {
 				const _exhaustive: never = message;
 			}
 		}
+		this.trimChatHistory();
+	}
+
+	/**
+	 * Remove oldest components when chat exceeds MAX_CHAT_COMPONENTS.
+	 * Only render-components are removed — session data stays in SessionManager.
+	 */
+	private trimChatHistory(): void {
+		while (this.chatContainer.children.length > InteractiveMode.MAX_CHAT_COMPONENTS) {
+			const oldest = this.chatContainer.children[0];
+			this.chatContainer.removeChild(oldest);
+		}
 	}
 
 	/**
@@ -2235,6 +2252,7 @@ export class InteractiveMode {
 		}
 
 		this.pendingTools.clear();
+		this.trimChatHistory();
 		this.ui.requestRender();
 	}
 
@@ -2328,6 +2346,21 @@ export class InteractiveMode {
 		if (shutdownBehavior === "stop_ui") {
 			return;
 		}
+
+		// Kill ALL descendant processes to prevent orphans (next-server, pnpm dev, etc.)
+		try {
+			const descendants = listDescendants(process.pid);
+			for (const childPid of descendants) {
+				try { process.kill(childPid, "SIGTERM"); } catch {}
+			}
+			if (descendants.length > 0) {
+				await new Promise(resolve => setTimeout(resolve, 500));
+				for (const childPid of descendants) {
+					try { process.kill(childPid, "SIGKILL"); } catch {}
+				}
+			}
+		} catch {}
+
 		process.exit(0);
 	}
 
@@ -3436,6 +3469,11 @@ export class InteractiveMode {
 						done();
 						this.showSetupTokenFlow(provider);
 					},
+				},
+				async (provider: string) => {
+					// Enter key → auth setup for selected provider (#3579)
+					done();
+					await this.showLoginDialog(provider);
 				},
 			);
 			return { component, focus: component };

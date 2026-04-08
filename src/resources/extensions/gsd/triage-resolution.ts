@@ -10,7 +10,8 @@
  * Also provides detectFileOverlap() for surfacing downstream impact on quick tasks.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { atomicWriteSync } from "./atomic-write.js";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { gsdRoot, milestonesDir } from "./paths.js";
@@ -65,10 +66,10 @@ export function executeInject(
     const filesSection = content.indexOf("## Files Likely Touched");
     if (filesSection !== -1) {
       const updated = content.slice(0, filesSection) + newTask + "\n\n" + content.slice(filesSection);
-      writeFileSync(planPath, updated, "utf-8");
+      atomicWriteSync(planPath, updated, "utf-8");
     } else {
       // No Files section — append at end
-      writeFileSync(planPath, content.trimEnd() + "\n\n" + newTask + "\n", "utf-8");
+      atomicWriteSync(planPath, content.trimEnd() + "\n\n" + newTask + "\n", "utf-8");
     }
 
     return newId;
@@ -105,7 +106,7 @@ export function executeReplan(
       `will detect it and enter the replanning-slice phase.`,
     ].join("\n");
 
-    writeFileSync(triggerPath, content, "utf-8");
+    atomicWriteSync(triggerPath, content, "utf-8");
 
     // Also write replan_triggered_at column for DB-backed detection
     try {
@@ -148,10 +149,17 @@ export function executeBacktrack(
   capture: CaptureEntry,
 ): string | null {
   try {
-    // Extract target milestone from capture text or resolution
-    const targetMatch = (capture.resolution ?? capture.text)
-      .match(/\b(M\d{3}(?:-[a-z0-9]{6})?)\b/);
-    const targetMilestoneId = targetMatch?.[1] ?? null;
+    // Extract target milestone from capture text or resolution.
+    // Filter out the current milestone ID to avoid picking it as the backtrack target
+    // when the text mentions both current and target milestones (e.g. "backtrack from M004 to M003").
+    const sourceText = capture.resolution ?? capture.text;
+    const allMatches = [...sourceText.matchAll(/\b(M\d{3}(?:-[a-z0-9]{6})?)\b/g)]
+      .map(m => m[1])
+      .filter(id => id !== currentMilestoneId);
+    // Reject ambiguous multi-target strings — if more than one distinct target remains,
+    // don't guess; let the user clarify.
+    const uniqueTargets = [...new Set(allMatches)];
+    const targetMilestoneId = uniqueTargets.length === 1 ? uniqueTargets[0] : null;
 
     const ts = new Date().toISOString();
     const triggerPath = join(gsdRoot(basePath), "BACKTRACK-TRIGGER.md");
@@ -176,7 +184,7 @@ export function executeBacktrack(
       `3. Resume auto-mode — the state machine will re-enter discussion for the target`,
     ].join("\n");
 
-    writeFileSync(triggerPath, content, "utf-8");
+    atomicWriteSync(triggerPath, content, "utf-8");
 
     // If we have a valid target, also reset that milestone's completion status
     // so deriveState() will re-enter it as the active milestone.
@@ -187,7 +195,7 @@ export function executeBacktrack(
           // Write a regression marker so the state machine knows this milestone
           // needs re-discussion, not just re-execution
           const regressionPath = join(targetDir, `${targetMilestoneId}-REGRESSION.md`);
-          writeFileSync(regressionPath, [
+          atomicWriteSync(regressionPath, [
             `# Milestone Regression`,
             ``,
             `**From:** ${currentMilestoneId}`,
@@ -354,7 +362,7 @@ export function ensureDeferMilestoneDir(
       ``,
     ].join("\n");
 
-    writeFileSync(
+    atomicWriteSync(
       join(msDir, `${targetMilestone}-CONTEXT-DRAFT.md`),
       draftContent,
       "utf-8",
@@ -472,15 +480,18 @@ export function executeTriageResolutions(
     }
   }
 
-  // Also process deferred captures that target milestone IDs — create
-  // milestone directories so deriveState() discovers them.
-  const deferred = loadAllCaptures(basePath).filter(
-    c => c.status === "resolved" && !c.executed && c.classification === "defer",
+  // Also process deferred and milestone-class captures (#3542).
+  // A defer/milestone capture's "action" is the triage decision itself —
+  // once classified and resolved, the capture is done. The target milestone
+  // picks up the work naturally from its planning context.
+  const deferrable = loadAllCaptures(basePath).filter(
+    c => c.status === "resolved" && !c.executed &&
+      (c.classification === "defer" || (c.classification as string) === "milestone"),
   );
-  if (deferred.length > 0) {
-    // Group deferred captures by target milestone
+  if (deferrable.length > 0) {
+    // Group captures that reference a specific milestone — create dirs as needed.
     const byMilestone = new Map<string, CaptureEntry[]>();
-    for (const cap of deferred) {
+    for (const cap of deferrable) {
       const target = cap.resolution?.match(/\b(M\d{3}(?:-[a-z0-9]{6})?)\b/)?.[1];
       if (target) {
         const list = byMilestone.get(target) ?? [];
@@ -495,12 +506,28 @@ export function executeTriageResolutions(
         if (created) {
           result.deferredMilestones++;
           result.actions.push(`Created milestone ${milestoneId} for ${captures.length} deferred capture(s)`);
-          for (const cap of captures) {
-            markCaptureExecuted(basePath, cap.id);
-          }
         }
       }
     }
+    // Stamp ALL defer/milestone captures as executed (#3542 gaps 1-3).
+    // Previously only captures that triggered dir creation were stamped.
+    // Captures without a milestone ID in resolution text, or targeting an
+    // existing directory, were silently dropped — never stamped.
+    for (const cap of deferrable) {
+      if (!cap.executed) {
+        markCaptureExecuted(basePath, cap.id);
+      }
+    }
+  }
+
+  // Mark note captures as executed — they're informational only, no action
+  // needed. Without this they stay in "resolved but not executed" limbo (#3578).
+  const notes = loadAllCaptures(basePath).filter(
+    c => c.status === "resolved" && !c.executed && c.classification === "note",
+  );
+  for (const cap of notes) {
+    markCaptureExecuted(basePath, cap.id);
+    result.actions.push(`Note acknowledged: ${cap.id} — "${cap.text}"`);
   }
 
   if (actionable.length === 0) return result;

@@ -413,8 +413,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
     try {
       const { insertMilestone } = await import("../gsd-db.js");
       insertMilestone({ id: milestoneId, status: "queued" });
-    } catch {
-      // Non-fatal — the safety-net in deriveStateFromDb will catch this
+    } catch (e) {
+      logError("tool", `insertMilestone failed for ${milestoneId}: ${(e as Error).message}`);
     }
   }
 
@@ -501,28 +501,10 @@ export function registerDbTools(pi: ExtensionAPI): void {
       "Use the canonical name gsd_plan_milestone; gsd_milestone_plan is only an alias.",
     ],
     parameters: Type.Object({
+      // ── Core identification + content (required) ──────────────────────
       milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
       title: Type.String({ description: "Milestone title" }),
-      status: Type.Optional(Type.String({ description: "Milestone status (defaults to active)" })),
-      dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Milestone dependencies" })),
       vision: Type.String({ description: "Milestone vision" }),
-      successCriteria: Type.Array(Type.String(), { description: "Top-level success criteria bullets" }),
-      keyRisks: Type.Array(Type.Object({
-        risk: Type.String({ description: "Risk statement" }),
-        whyItMatters: Type.String({ description: "Why the risk matters" }),
-      }), { description: "Structured risk entries" }),
-      proofStrategy: Type.Array(Type.Object({
-        riskOrUnknown: Type.String({ description: "Risk or unknown to retire" }),
-        retireIn: Type.String({ description: "Where it will be retired" }),
-        whatWillBeProven: Type.String({ description: "What proof will be produced" }),
-      }), { description: "Structured proof strategy entries" }),
-      verificationContract: Type.String({ description: "Verification contract text" }),
-      verificationIntegration: Type.String({ description: "Integration verification text" }),
-      verificationOperational: Type.String({ description: "Operational verification text" }),
-      verificationUat: Type.String({ description: "UAT verification text" }),
-      definitionOfDone: Type.Array(Type.String(), { description: "Definition of done bullets" }),
-      requirementCoverage: Type.String({ description: "Requirement coverage text" }),
-      boundaryMapMarkdown: Type.String({ description: "Boundary map markdown block" }),
       slices: Type.Array(Type.Object({
         sliceId: Type.String({ description: "Slice ID (e.g. S01)" }),
         title: Type.String({ description: "Slice title" }),
@@ -535,6 +517,26 @@ export function registerDbTools(pi: ExtensionAPI): void {
         integrationClosure: Type.String({ description: "Slice integration closure" }),
         observabilityImpact: Type.String({ description: "Slice observability impact" }),
       }), { description: "Planned slices for the milestone" }),
+      // ── Enrichment metadata (optional — defaults to empty) ────────────
+      status: Type.Optional(Type.String({ description: "Milestone status (defaults to active)" })),
+      dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Milestone dependencies" })),
+      successCriteria: Type.Optional(Type.Array(Type.String(), { description: "Top-level success criteria bullets" })),
+      keyRisks: Type.Optional(Type.Array(Type.Object({
+        risk: Type.String({ description: "Risk statement" }),
+        whyItMatters: Type.String({ description: "Why the risk matters" }),
+      }), { description: "Structured risk entries" })),
+      proofStrategy: Type.Optional(Type.Array(Type.Object({
+        riskOrUnknown: Type.String({ description: "Risk or unknown to retire" }),
+        retireIn: Type.String({ description: "Where it will be retired" }),
+        whatWillBeProven: Type.String({ description: "What proof will be produced" }),
+      }), { description: "Structured proof strategy entries" })),
+      verificationContract: Type.Optional(Type.String({ description: "Verification contract text" })),
+      verificationIntegration: Type.Optional(Type.String({ description: "Integration verification text" })),
+      verificationOperational: Type.Optional(Type.String({ description: "Operational verification text" })),
+      verificationUat: Type.Optional(Type.String({ description: "UAT verification text" })),
+      definitionOfDone: Type.Optional(Type.Array(Type.String(), { description: "Definition of done bullets" })),
+      requirementCoverage: Type.Optional(Type.String({ description: "Requirement coverage text" })),
+      boundaryMapMarkdown: Type.Optional(Type.String({ description: "Boundary map markdown block" })),
     }),
     execute: planMilestoneExecute,
   };
@@ -594,13 +596,10 @@ export function registerDbTools(pi: ExtensionAPI): void {
       "Use the canonical name gsd_plan_slice; gsd_slice_plan is only an alias.",
     ],
     parameters: Type.Object({
+      // ── Core identification + content (required) ──────────────────────
       milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
       sliceId: Type.String({ description: "Slice ID (e.g. S01)" }),
       goal: Type.String({ description: "Slice goal" }),
-      successCriteria: Type.String({ description: "Slice success criteria block" }),
-      proofLevel: Type.String({ description: "Slice proof level" }),
-      integrationClosure: Type.String({ description: "Slice integration closure" }),
-      observabilityImpact: Type.String({ description: "Slice observability impact" }),
       tasks: Type.Array(Type.Object({
         taskId: Type.String({ description: "Task ID (e.g. T01)" }),
         title: Type.String({ description: "Task title" }),
@@ -612,6 +611,11 @@ export function registerDbTools(pi: ExtensionAPI): void {
         expectedOutput: Type.Array(Type.String(), { description: "Expected output files or artifacts" }),
         observabilityImpact: Type.Optional(Type.String({ description: "Task observability impact" })),
       }), { description: "Planned tasks for the slice" }),
+      // ── Enrichment metadata (optional — defaults to empty) ────────────
+      successCriteria: Type.Optional(Type.String({ description: "Slice success criteria block" })),
+      proofLevel: Type.Optional(Type.String({ description: "Slice proof level" })),
+      integrationClosure: Type.Optional(Type.String({ description: "Slice integration closure" })),
+      observabilityImpact: Type.Optional(Type.String({ description: "Slice observability impact" })),
     }),
     execute: planSliceExecute,
   };
@@ -700,8 +704,14 @@ export function registerDbTools(pi: ExtensionAPI): void {
       };
     }
     try {
+      // Coerce string items to objects for verificationEvidence (#3541).
+      const coerced = { ...params };
+      coerced.verificationEvidence = (params.verificationEvidence ?? []).map((v: any) =>
+        typeof v === "string" ? { command: v, exitCode: -1, verdict: "unknown (coerced from string)", durationMs: 0 } : v,
+      );
+
       const { handleCompleteTask } = await import("../tools/complete-task.js");
-      const result = await handleCompleteTask(params, process.cwd());
+      const result = await handleCompleteTask(coerced, process.cwd());
       if ("error" in result) {
         return {
           content: [{ type: "text" as const, text: `Error completing task: ${result.error}` }],
@@ -743,26 +753,31 @@ export function registerDbTools(pi: ExtensionAPI): void {
       "Idempotent — calling with the same params twice will upsert (INSERT OR REPLACE) without error.",
     ],
     parameters: Type.Object({
+      // ── Core identification + content (required) ──────────────────────
       taskId: Type.String({ description: "Task ID (e.g. T01)" }),
       sliceId: Type.String({ description: "Slice ID (e.g. S01)" }),
       milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
       oneLiner: Type.String({ description: "One-line summary of what was accomplished" }),
       narrative: Type.String({ description: "Detailed narrative of what happened during the task" }),
       verification: Type.String({ description: "What was verified and how — commands run, tests passed, behavior confirmed" }),
-      deviations: Type.String({ description: "Deviations from the task plan, or 'None.'" }),
-      knownIssues: Type.String({ description: "Known issues discovered but not fixed, or 'None.'" }),
-      keyFiles: Type.Array(Type.String(), { description: "List of key files created or modified" }),
-      keyDecisions: Type.Array(Type.String(), { description: "List of key decisions made during this task" }),
-      blockerDiscovered: Type.Boolean({ description: "Whether a plan-invalidating blocker was discovered" }),
-      verificationEvidence: Type.Array(
-        Type.Object({
-          command: Type.String({ description: "Verification command that was run" }),
-          exitCode: Type.Number({ description: "Exit code of the command" }),
-          verdict: Type.String({ description: "Pass/fail verdict (e.g. '✅ pass', '❌ fail')" }),
-          durationMs: Type.Number({ description: "Duration of the command in milliseconds" }),
-        }),
+      // ── Enrichment metadata (optional — defaults to empty) ────────────
+      deviations: Type.Optional(Type.String({ description: "Deviations from the task plan, or 'None.'" })),
+      knownIssues: Type.Optional(Type.String({ description: "Known issues discovered but not fixed, or 'None.'" })),
+      keyFiles: Type.Optional(Type.Array(Type.String(), { description: "List of key files created or modified" })),
+      keyDecisions: Type.Optional(Type.Array(Type.String(), { description: "List of key decisions made during this task" })),
+      blockerDiscovered: Type.Optional(Type.Boolean({ description: "Whether a plan-invalidating blocker was discovered" })),
+      verificationEvidence: Type.Optional(Type.Array(
+        Type.Union([
+          Type.Object({
+            command: Type.String({ description: "Verification command that was run" }),
+            exitCode: Type.Number({ description: "Exit code of the command" }),
+            verdict: Type.String({ description: "Pass/fail verdict (e.g. '✅ pass', '❌ fail')" }),
+            durationMs: Type.Number({ description: "Duration of the command in milliseconds" }),
+          }),
+          Type.String({ description: "Fallback: verification summary string" }),
+        ]),
         { description: "Array of verification evidence entries" },
-      ),
+      )),
     }),
     execute: taskCompleteExecute,
   };
@@ -781,8 +796,54 @@ export function registerDbTools(pi: ExtensionAPI): void {
       };
     }
     try {
+      // Coerce string items to objects for fields where LLMs sometimes pass
+      // plain strings instead of the expected { key, value } shape (#3541).
+      // Parses "key — value" or "key - value" format when possible.
+      const splitPair = (s: string): [string, string] => {
+        const m = s.match(/^(.+?)\s*(?:—|-)\s+(.+)$/);
+        return m ? [m[1].trim(), m[2].trim()] : [s.trim(), ""];
+      };
+      const coerced = { ...params };
+      // Coerce simple string-array fields: LLMs sometimes pass a plain string
+      // instead of a single-element array (#3585).
+      const wrapArray = (v: any): any[] =>
+        v == null ? [] : Array.isArray(v) ? v : [v];
+      coerced.provides = wrapArray(params.provides);
+      coerced.keyFiles = wrapArray(params.keyFiles);
+      coerced.keyDecisions = wrapArray(params.keyDecisions);
+      coerced.patternsEstablished = wrapArray(params.patternsEstablished);
+      coerced.observabilitySurfaces = wrapArray(params.observabilitySurfaces);
+      coerced.requirementsSurfaced = wrapArray(params.requirementsSurfaced);
+      coerced.drillDownPaths = wrapArray(params.drillDownPaths);
+      coerced.affects = wrapArray(params.affects);
+      coerced.filesModified = wrapArray(params.filesModified).map((f: any) => {
+        if (typeof f !== "string") return f;
+        const [path, description] = splitPair(f);
+        return { path, description };
+      });
+      coerced.requires = wrapArray(params.requires).map((r: any) => {
+        if (typeof r !== "string") return r;
+        const [slice, provides] = splitPair(r);
+        return { slice, provides };
+      });
+      coerced.requirementsAdvanced = wrapArray(params.requirementsAdvanced).map((r: any) => {
+        if (typeof r !== "string") return r;
+        const [id, how] = splitPair(r);
+        return { id, how };
+      });
+      coerced.requirementsValidated = wrapArray(params.requirementsValidated).map((r: any) => {
+        if (typeof r !== "string") return r;
+        const [id, proof] = splitPair(r);
+        return { id, proof };
+      });
+      coerced.requirementsInvalidated = wrapArray(params.requirementsInvalidated).map((r: any) => {
+        if (typeof r !== "string") return r;
+        const [id, what] = splitPair(r);
+        return { id, what };
+      });
+
       const { handleCompleteSlice } = await import("../tools/complete-slice.js");
-      const result = await handleCompleteSlice(params, process.cwd());
+      const result = await handleCompleteSlice(coerced, process.cwd());
       if ("error" in result) {
         return {
           content: [{ type: "text" as const, text: `Error completing slice: ${result.error}` }],
@@ -823,59 +884,76 @@ export function registerDbTools(pi: ExtensionAPI): void {
       "Idempotent — calling with the same params twice will not crash.",
     ],
     parameters: Type.Object({
+      // ── Core identification + content (required) ──────────────────────
       sliceId: Type.String({ description: "Slice ID (e.g. S01)" }),
       milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
       sliceTitle: Type.String({ description: "Title of the slice" }),
       oneLiner: Type.String({ description: "One-line summary of what the slice accomplished" }),
       narrative: Type.String({ description: "Detailed narrative of what happened across all tasks" }),
       verification: Type.String({ description: "What was verified across all tasks" }),
-      deviations: Type.String({ description: "Deviations from the slice plan, or 'None.'" }),
-      knownLimitations: Type.String({ description: "Known limitations or gaps, or 'None.'" }),
-      followUps: Type.String({ description: "Follow-up work discovered during execution, or 'None.'" }),
-      keyFiles: Type.Array(Type.String(), { description: "Key files created or modified" }),
-      keyDecisions: Type.Array(Type.String(), { description: "Key decisions made during this slice" }),
-      patternsEstablished: Type.Array(Type.String(), { description: "Patterns established by this slice" }),
-      observabilitySurfaces: Type.Array(Type.String(), { description: "Observability surfaces added" }),
-      provides: Type.Array(Type.String(), { description: "What this slice provides to downstream slices" }),
-      requirementsSurfaced: Type.Array(Type.String(), { description: "New requirements surfaced" }),
-      drillDownPaths: Type.Array(Type.String(), { description: "Paths to task summaries for drill-down" }),
-      affects: Type.Array(Type.String(), { description: "Downstream slices affected" }),
-      requirementsAdvanced: Type.Array(
-        Type.Object({
-          id: Type.String({ description: "Requirement ID" }),
-          how: Type.String({ description: "How it was advanced" }),
-        }),
-        { description: "Requirements advanced by this slice" },
-      ),
-      requirementsValidated: Type.Array(
-        Type.Object({
-          id: Type.String({ description: "Requirement ID" }),
-          proof: Type.String({ description: "What proof validates it" }),
-        }),
-        { description: "Requirements validated by this slice" },
-      ),
-      requirementsInvalidated: Type.Array(
-        Type.Object({
-          id: Type.String({ description: "Requirement ID" }),
-          what: Type.String({ description: "What changed" }),
-        }),
-        { description: "Requirements invalidated or re-scoped" },
-      ),
-      filesModified: Type.Array(
-        Type.Object({
-          path: Type.String({ description: "File path" }),
-          description: Type.String({ description: "What changed" }),
-        }),
-        { description: "Files modified with descriptions" },
-      ),
-      requires: Type.Array(
-        Type.Object({
-          slice: Type.String({ description: "Dependency slice ID" }),
-          provides: Type.String({ description: "What was consumed from it" }),
-        }),
-        { description: "Upstream slice dependencies consumed" },
-      ),
       uatContent: Type.String({ description: "UAT test content (markdown body)" }),
+      // ── Enrichment metadata (optional — defaults to empty) ────────────
+      deviations: Type.Optional(Type.String({ description: "Deviations from the slice plan, or 'None.'" })),
+      knownLimitations: Type.Optional(Type.String({ description: "Known limitations or gaps, or 'None.'" })),
+      followUps: Type.Optional(Type.String({ description: "Follow-up work discovered during execution, or 'None.'" })),
+      keyFiles: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "Key files created or modified" })),
+      keyDecisions: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "Key decisions made during this slice" })),
+      patternsEstablished: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "Patterns established by this slice" })),
+      observabilitySurfaces: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "Observability surfaces added" })),
+      provides: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "What this slice provides to downstream slices" })),
+      requirementsSurfaced: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "New requirements surfaced" })),
+      drillDownPaths: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "Paths to task summaries for drill-down" })),
+      affects: Type.Optional(Type.Union([Type.Array(Type.String()), Type.String()], { description: "Downstream slices affected" })),
+      requirementsAdvanced: Type.Optional(Type.Array(
+        Type.Union([
+          Type.Object({
+            id: Type.String({ description: "Requirement ID" }),
+            how: Type.String({ description: "How it was advanced" }),
+          }),
+          Type.String({ description: "Fallback: 'ID — how' string" }),
+        ]),
+        { description: "Requirements advanced by this slice" },
+      )),
+      requirementsValidated: Type.Optional(Type.Array(
+        Type.Union([
+          Type.Object({
+            id: Type.String({ description: "Requirement ID" }),
+            proof: Type.String({ description: "What proof validates it" }),
+          }),
+          Type.String({ description: "Fallback: 'ID — proof' string" }),
+        ]),
+        { description: "Requirements validated by this slice" },
+      )),
+      requirementsInvalidated: Type.Optional(Type.Array(
+        Type.Union([
+          Type.Object({
+            id: Type.String({ description: "Requirement ID" }),
+            what: Type.String({ description: "What changed" }),
+          }),
+          Type.String({ description: "Fallback: 'ID — what' string" }),
+        ]),
+        { description: "Requirements invalidated or re-scoped" },
+      )),
+      filesModified: Type.Optional(Type.Array(
+        Type.Union([
+          Type.Object({
+            path: Type.String({ description: "File path" }),
+            description: Type.String({ description: "What changed" }),
+          }),
+          Type.String({ description: "Fallback: file path string" }),
+        ]),
+        { description: "Files modified with descriptions" },
+      )),
+      requires: Type.Optional(Type.Array(
+        Type.Union([
+          Type.Object({
+            slice: Type.String({ description: "Dependency slice ID" }),
+            provides: Type.String({ description: "What was consumed from it" }),
+          }),
+          Type.String({ description: "Fallback: slice ID string" }),
+        ]),
+        { description: "Upstream slice dependencies consumed" },
+      )),
     }),
     execute: sliceCompleteExecute,
   };
@@ -921,6 +999,16 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
       updateSliceStatus(params.milestoneId, params.sliceId, "skipped");
       invalidateStateCache();
+
+      // Rebuild STATE.md so it reflects the skip immediately (#3477).
+      // Without this, /gsd auto reads stale STATE.md and resumes the skipped slice.
+      try {
+        const basePath = process.cwd();
+        const { rebuildState } = await import("../doctor.js");
+        await rebuildState(basePath);
+      } catch (err) {
+        logError("tool", `skip_slice rebuildState failed: ${(err as Error).message}`, { tool: "gsd_skip_slice" });
+      }
 
       return {
         content: [{ type: "text" as const, text: `Skipped slice ${params.sliceId} (${params.milestoneId}). Reason: ${params.reason ?? "User-directed skip"}. Auto-mode will advance past this slice.` }],
@@ -972,8 +1060,12 @@ export function registerDbTools(pi: ExtensionAPI): void {
       };
     }
     try {
+      // ── Input sanitization: normalize markdown parameters (#3013) ──────
+      const { sanitizeCompleteMilestoneParams } = await import("./sanitize-complete-milestone.js");
+      const sanitized = sanitizeCompleteMilestoneParams(params);
+
       const { handleCompleteMilestone } = await import("../tools/complete-milestone.js");
-      const result = await handleCompleteMilestone(params, process.cwd());
+      const result = await handleCompleteMilestone(sanitized, process.cwd());
       if ("error" in result) {
         return {
           content: [{ type: "text" as const, text: `Error completing milestone: ${result.error}` }],
@@ -1012,19 +1104,21 @@ export function registerDbTools(pi: ExtensionAPI): void {
       "On success, returns summaryPath where the MILESTONE-SUMMARY.md was written.",
     ],
     parameters: Type.Object({
+      // ── Core identification + content (required) ──────────────────────
       milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
       title: Type.String({ description: "Milestone title" }),
       oneLiner: Type.String({ description: "One-sentence summary of what the milestone achieved" }),
       narrative: Type.String({ description: "Detailed narrative of what happened during the milestone" }),
-      successCriteriaResults: Type.String({ description: "Markdown detailing how each success criterion was met or not met" }),
-      definitionOfDoneResults: Type.String({ description: "Markdown detailing how each definition-of-done item was met" }),
-      requirementOutcomes: Type.String({ description: "Markdown detailing requirement status transitions with evidence" }),
-      keyDecisions: Type.Array(Type.String(), { description: "Key architectural/pattern decisions made during the milestone" }),
-      keyFiles: Type.Array(Type.String(), { description: "Key files created or modified during the milestone" }),
-      lessonsLearned: Type.Array(Type.String(), { description: "Lessons learned during the milestone" }),
+      verificationPassed: Type.Boolean({ description: "Must be true — confirms that code change verification, success criteria, and definition of done checks all passed before completion" }),
+      // ── Enrichment metadata (optional — defaults to empty) ────────────
+      successCriteriaResults: Type.Optional(Type.String({ description: "Markdown detailing how each success criterion was met or not met" })),
+      definitionOfDoneResults: Type.Optional(Type.String({ description: "Markdown detailing how each definition-of-done item was met" })),
+      requirementOutcomes: Type.Optional(Type.String({ description: "Markdown detailing requirement status transitions with evidence" })),
+      keyDecisions: Type.Optional(Type.Array(Type.String(), { description: "Key architectural/pattern decisions made during the milestone" })),
+      keyFiles: Type.Optional(Type.Array(Type.String(), { description: "Key files created or modified during the milestone" })),
+      lessonsLearned: Type.Optional(Type.Array(Type.String(), { description: "Lessons learned during the milestone" })),
       followUps: Type.Optional(Type.String({ description: "Follow-up items for future milestones" })),
       deviations: Type.Optional(Type.String({ description: "Deviations from the original plan" })),
-      verificationPassed: Type.Boolean({ description: "Must be true — confirms that code change verification, success criteria, and definition of done checks all passed before completion" }),
     }),
     execute: milestoneCompleteExecute,
   };

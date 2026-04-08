@@ -70,6 +70,25 @@ export function clearParseCache(): void {
   for (const cb of _cacheClearCallbacks) cb();
 }
 
+// ─── Platform shortcuts ───────────────────────────────────────────────────
+
+const IS_MAC = process.platform === "darwin";
+
+/**
+ * Format a keyboard shortcut for the current OS.
+ * Input: modifier key combo like "Ctrl+Alt+G"
+ * Output: "⌃⌥G" on macOS, "Ctrl+Alt+G" on Windows/Linux.
+ */
+export function formatShortcut(combo: string): string {
+  if (!IS_MAC) return combo;
+  return combo
+    .replace(/Ctrl\+Alt\+/i, "⌃⌥")
+    .replace(/Ctrl\+/i, "⌃")
+    .replace(/Alt\+/i, "⌥")
+    .replace(/Shift\+/i, "⇧")
+    .replace(/Cmd\+/i, "⌘");
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 /** Extract the text after a heading at a given level, up to the next heading of same or higher level. */

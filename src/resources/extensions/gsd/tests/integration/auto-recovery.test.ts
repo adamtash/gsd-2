@@ -454,7 +454,7 @@ test("verifyExpectedArtifact accepts plan-slice with colon-style heading tasks (
   );
 });
 
-test("verifyExpectedArtifact execute-task passes for heading-style plan entry (#1691)", (t) => {
+test("verifyExpectedArtifact execute-task rejects heading-style plan without checked checkbox (#3607)", (t) => {
   const base = makeTmpBase();
   t.after(() => cleanup(base));
 
@@ -471,10 +471,12 @@ test("verifyExpectedArtifact execute-task passes for heading-style plan entry (#
     "Feature description.",
   ].join("\n"));
   writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "# T01 Summary\n\nDone.");
+  // Heading-style entries no longer count as verified — only checked
+  // checkboxes prove gsd_complete_task ran (#3607).
   assert.strictEqual(
     verifyExpectedArtifact("execute-task", "M001/S01/T01", base),
-    true,
-    "execute-task should pass for heading-style plan entry when summary exists",
+    false,
+    "heading-style without checked checkbox should NOT pass verification",
   );
 });
 
@@ -682,7 +684,7 @@ function makeGitBase(): string {
   return base;
 }
 
-test("hasImplementationArtifacts returns false when only .gsd/ files committed (#1703)", (t) => {
+test("hasImplementationArtifacts returns 'absent' when only .gsd/ files committed (#1703)", (t) => {
   const base = makeGitBase();
   t.after(() => cleanup(base));
 
@@ -695,10 +697,10 @@ test("hasImplementationArtifacts returns false when only .gsd/ files committed (
   execFileSync("git", ["commit", "-m", "chore: add plan files"], { cwd: base, stdio: "ignore" });
 
   const result = hasImplementationArtifacts(base);
-  assert.equal(result, false, "should return false when only .gsd/ files were committed");
+  assert.equal(result, "absent", "should return 'absent' when only .gsd/ files were committed");
 });
 
-test("hasImplementationArtifacts returns true when implementation files committed (#1703)", (t) => {
+test("hasImplementationArtifacts returns 'present' when implementation files committed (#1703)", (t) => {
   const base = makeGitBase();
   t.after(() => cleanup(base));
 
@@ -712,16 +714,16 @@ test("hasImplementationArtifacts returns true when implementation files committe
   execFileSync("git", ["commit", "-m", "feat: add feature"], { cwd: base, stdio: "ignore" });
 
   const result = hasImplementationArtifacts(base);
-  assert.equal(result, true, "should return true when implementation files are present");
+  assert.equal(result, "present", "should return 'present' when implementation files are present");
 });
 
-test("hasImplementationArtifacts returns true on non-git directory (fail-open)", (t) => {
+test("hasImplementationArtifacts returns 'unknown' on non-git directory (fail-open)", (t) => {
   const base = join(tmpdir(), `gsd-test-nogit-${randomUUID()}`);
   mkdirSync(base, { recursive: true });
   t.after(() => cleanup(base));
 
   const result = hasImplementationArtifacts(base);
-  assert.equal(result, true, "should return true (fail-open) in non-git directory");
+  assert.equal(result, "unknown", "should return 'unknown' (fail-open) in non-git directory");
 });
 
 // ─── verifyExpectedArtifact: complete-milestone requires impl artifacts (#1703) ──

@@ -530,6 +530,14 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
     }
 
+    if (p.worker_model !== undefined) {
+      if (typeof p.worker_model === "string" && p.worker_model.length > 0) {
+        parallel.worker_model = p.worker_model;
+      } else {
+        errors.push("parallel.worker_model must be a non-empty string");
+      }
+    }
+
     if (Object.keys(parallel).length > 0) {
       validated.parallel = parallel as unknown as import("./types.js").ParallelConfig;
     }
@@ -561,7 +569,15 @@ export function validatePreferences(preferences: GSDPreferences): {
         }
       }
 
-      const knownReKeys = new Set(["enabled", "max_parallel", "isolation_mode"]);
+      if (re.subagent_model !== undefined) {
+        if (typeof re.subagent_model === "string" && re.subagent_model.length > 0) {
+          validRe.subagent_model = re.subagent_model;
+        } else {
+          errors.push("reactive_execution.subagent_model must be a non-empty string");
+        }
+      }
+
+      const knownReKeys = new Set(["enabled", "max_parallel", "isolation_mode", "subagent_model"]);
       for (const key of Object.keys(re)) {
         if (!knownReKeys.has(key)) {
           warnings.push(`unknown reactive_execution key "${key}" — ignored`);
@@ -854,6 +870,112 @@ export function validatePreferences(preferences: GSDPreferences): {
       }
     } else {
       errors.push("experimental must be an object");
+    }
+  }
+
+  // ─── Codebase Map ──────────────────────────────────────────────────
+  if (preferences.codebase !== undefined) {
+    if (typeof preferences.codebase === "object" && preferences.codebase !== null) {
+      const cb = preferences.codebase as Record<string, unknown>;
+      const validCb: import("./preferences-types.js").CodebaseMapPreferences = {};
+
+      if (cb.exclude_patterns !== undefined) {
+        if (Array.isArray(cb.exclude_patterns) && cb.exclude_patterns.every((p: unknown) => typeof p === "string")) {
+          validCb.exclude_patterns = cb.exclude_patterns as string[];
+        } else {
+          errors.push("codebase.exclude_patterns must be an array of strings");
+        }
+      }
+      if (cb.max_files !== undefined) {
+        const mf = typeof cb.max_files === "number" ? cb.max_files : Number(cb.max_files);
+        if (Number.isFinite(mf) && mf >= 1) {
+          validCb.max_files = Math.floor(mf);
+        } else {
+          errors.push("codebase.max_files must be a positive integer");
+        }
+      }
+      if (cb.collapse_threshold !== undefined) {
+        const ct = typeof cb.collapse_threshold === "number" ? cb.collapse_threshold : Number(cb.collapse_threshold);
+        if (Number.isFinite(ct) && ct >= 1) {
+          validCb.collapse_threshold = Math.floor(ct);
+        } else {
+          errors.push("codebase.collapse_threshold must be a positive integer");
+        }
+      }
+
+      const knownCbKeys = new Set(["exclude_patterns", "max_files", "collapse_threshold"]);
+      for (const key of Object.keys(cb)) {
+        if (!knownCbKeys.has(key)) {
+          warnings.push(`unknown codebase key "${key}" — ignored`);
+        }
+      }
+
+      if (Object.keys(validCb).length > 0) {
+        validated.codebase = validCb;
+      }
+    } else {
+      errors.push("codebase must be an object");
+    }
+  }
+
+  // ─── Enhanced Verification ──────────────────────────────────────────────────
+  if (preferences.enhanced_verification !== undefined) {
+    if (typeof preferences.enhanced_verification === "boolean") {
+      validated.enhanced_verification = preferences.enhanced_verification;
+    } else {
+      errors.push("enhanced_verification must be a boolean");
+    }
+  }
+
+  if (preferences.enhanced_verification_pre !== undefined) {
+    if (typeof preferences.enhanced_verification_pre === "boolean") {
+      validated.enhanced_verification_pre = preferences.enhanced_verification_pre;
+    } else {
+      errors.push("enhanced_verification_pre must be a boolean");
+    }
+  }
+
+  if (preferences.enhanced_verification_post !== undefined) {
+    if (typeof preferences.enhanced_verification_post === "boolean") {
+      validated.enhanced_verification_post = preferences.enhanced_verification_post;
+    } else {
+      errors.push("enhanced_verification_post must be a boolean");
+    }
+  }
+
+  if (preferences.enhanced_verification_strict !== undefined) {
+    if (typeof preferences.enhanced_verification_strict === "boolean") {
+      validated.enhanced_verification_strict = preferences.enhanced_verification_strict;
+    } else {
+      errors.push("enhanced_verification_strict must be a boolean");
+    }
+  }
+
+  // ─── Discuss Preparation ────────────────────────────────────────────
+  if (preferences.discuss_preparation !== undefined) {
+    if (typeof preferences.discuss_preparation === "boolean") {
+      validated.discuss_preparation = preferences.discuss_preparation;
+    } else {
+      errors.push("discuss_preparation must be a boolean");
+    }
+  }
+
+  // ─── Discuss Web Research ───────────────────────────────────────────
+  if (preferences.discuss_web_research !== undefined) {
+    if (typeof preferences.discuss_web_research === "boolean") {
+      validated.discuss_web_research = preferences.discuss_web_research;
+    } else {
+      errors.push("discuss_web_research must be a boolean");
+    }
+  }
+
+  // ─── Discuss Depth ──────────────────────────────────────────────────
+  if (preferences.discuss_depth !== undefined) {
+    const validDepths = new Set(["quick", "standard", "thorough"]);
+    if (typeof preferences.discuss_depth === "string" && validDepths.has(preferences.discuss_depth)) {
+      validated.discuss_depth = preferences.discuss_depth as GSDPreferences["discuss_depth"];
+    } else {
+      errors.push(`discuss_depth must be one of: quick, standard, thorough`);
     }
   }
 

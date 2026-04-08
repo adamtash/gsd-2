@@ -54,6 +54,35 @@ export function markDepthVerified(): void {
   depthVerificationDone = true;
 }
 
+/**
+ * Check whether a depth_verification answer confirms the discussion is complete.
+ * Uses structural validation: the selected answer must exactly match the first
+ * option label from the question definition (the confirmation option by convention).
+ * This rejects free-form "Other" text, decline options, and garbage input without
+ * coupling to any specific label substring.
+ *
+ * @param selected  The answer's selected value from details.response.answers[id].selected
+ * @param options   The question's options array from event.input.questions[n].options
+ */
+export function isDepthConfirmationAnswer(
+  selected: unknown,
+  options?: Array<{ label?: string }>,
+): boolean {
+  const value = Array.isArray(selected) ? selected[0] : selected;
+  if (typeof value !== "string" || !value) return false;
+
+  // If options are available, structurally validate: selected must exactly match
+  // the first option (confirmation) label. Rejects free-form "Other" and decline options.
+  if (Array.isArray(options) && options.length > 0) {
+    const confirmLabel = options[0]?.label;
+    return typeof confirmLabel === "string" && value === confirmLabel;
+  }
+
+  // Fallback when options aren't available (e.g., older call sites):
+  // accept only if it contains "(Recommended)" — the prompt convention suffix.
+  return value.includes("(Recommended)");
+}
+
 export function shouldBlockContextWrite(
   toolName: string,
   inputPath: string,
@@ -71,7 +100,13 @@ export function shouldBlockContextWrite(
 
   return {
     block: true,
-    reason: `Blocked: Cannot write to milestone CONTEXT.md during discussion phase without depth verification. Call ask_user_questions with question id "depth_verification" first to confirm discussion depth before writing context.`,
+    reason: [
+      `HARD BLOCK: Cannot write to milestone CONTEXT.md without depth verification.`,
+      `This is a mechanical gate — you MUST NOT proceed, retry, or rationalize past this block.`,
+      `Required action: call ask_user_questions with question id containing "depth_verification".`,
+      `The user MUST select the "(Recommended)" confirmation option to unlock this gate.`,
+      `If the user declines, cancels, or the tool fails, you must re-ask — not bypass.`,
+    ].join(" "),
   };
 }
 

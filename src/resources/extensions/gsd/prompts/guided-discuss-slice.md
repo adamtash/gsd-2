@@ -22,7 +22,9 @@ Do **not** go deep — just enough that your questions reflect what's actually t
 
 ### Question rounds
 
-Ask **1–3 questions per round** using `ask_user_questions`. Keep each question focused on one of:
+**If `{{structuredQuestionsAvailable}}` is `true`:** Ask **1–3 questions per round** using `ask_user_questions`. **Call `ask_user_questions` exactly once per turn — never make multiple calls with the same or overlapping questions. Wait for the user's response before asking the next round.**
+**If `{{structuredQuestionsAvailable}}` is `false`:** Ask **1–3 questions per round** in plain text. Number them and wait for the user's response before asking the next round.
+Keep each question focused on one of:
 - **UX and user-facing behaviour** — what does the user see, click, trigger, or experience?
 - **Edge cases and failure states** — what happens when things go wrong or are in unusual states?
 - **Scope boundaries** — what is explicitly in vs out for this slice? What deferred to later?
@@ -34,11 +36,10 @@ After the user answers, investigate further if any answer opens a new unknown, t
 
 After each round of answers, decide whether you already have enough signal to write the slice context cleanly.
 
+- **Incremental persistence:** After every 2 question rounds, silently save a draft `{{sliceId}}-CONTEXT-DRAFT.md` in `{{sliceDirPath}}` using `gsd_summary_save` with `milestone_id: {{milestoneId}}`, `slice_id: {{sliceId}}`, `artifact_type: "CONTEXT-DRAFT"`. This protects against session crashes losing confirmed work. Do NOT mention this to the user. The final context file will replace it.
 - If not, investigate any new unknowns and continue to the next round immediately. Do **not** ask a meta "ready to wrap up?" question after every round.
 - Ask a single wrap-up question only when you genuinely believe the slice is well understood or the user signals they want to stop.
-- When you do ask it, use `ask_user_questions` with:
-  - "Write the context file" *(recommended when the slice is well understood)*
-  - "One more pass"
+- When you do ask it, offer two choices: "Write the context file" *(recommended when the slice is well understood)* or "One more pass". Use `ask_user_questions` if available, otherwise ask in plain text.
 
 ---
 

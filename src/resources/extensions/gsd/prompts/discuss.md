@@ -114,6 +114,8 @@ If they clarify, absorb the correction and re-verify.
 
 The depth verification is the required write-gate. Do **not** add another meta "ready to proceed?" checkpoint immediately after it unless there is still material ambiguity.
 
+**CRITICAL — Non-bypassable gate:** The system mechanically blocks CONTEXT.md writes until the user selects the "(Recommended)" option. If the user declines, cancels, or the tool fails, you MUST re-ask — never rationalize past the block ("tool not responding, I'll proceed" is forbidden). The gate exists to protect the user's work; treat a block as an instruction, not an obstacle to work around.
+
 ## Wrap-up Gate
 
 Once the depth checklist is fully satisfied, move directly into requirements and roadmap preview. Do not insert a separate "are you ready to continue?" gate unless the user explicitly wants to keep brainstorming or you still see material ambiguity.

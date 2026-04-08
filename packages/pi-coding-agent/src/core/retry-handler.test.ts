@@ -62,6 +62,13 @@ function createMockDeps(overrides?: {
 	isProviderRequestReady?: (provider: string) => boolean;
 	authState?: AuthState;
 	onSleep?: () => void;
+	retryEnabled?: boolean;
+	markUsageLimitReachedResult?: boolean;
+	retrySettings?: {
+		maxRetries?: number;
+		baseDelayMs?: number;
+		maxDelayMs?: number;
+	};
 }): {
 	deps: RetryHandlerDeps;
 	emittedEvents: Array<Record<string, any>>;
@@ -69,6 +76,7 @@ function createMockDeps(overrides?: {
 	setModelFn: Mock<(model: Model<Api>) => void>;
 	findFallback: Mock<(...args: any[]) => Promise<any>>;
 	markUsageLimitReached: Mock<(...args: any[]) => boolean>;
+	onModelChangeFn: Mock<(model: Model<any>) => void>;
 } {
 	const currentModel = overrides?.model ?? createMockModel("anthropic", "claude-opus-4-6");
 	const messages: Array<{ role: string } & Record<string, any>> = [];
@@ -94,8 +102,11 @@ function createMockDeps(overrides?: {
 		earliestRecoveryMs: overrides?.authState?.earliestRecoveryMs ?? {},
 	};
 
-	const markUsageLimitReached = mock.fn(() => authState.markUsageLimitReachedResult);
+	const markUsageLimitReached = mock.fn(() =>
+		overrides?.markUsageLimitReachedResult ?? authState.markUsageLimitReachedResult,
+	);
 	const findFallback = mock.fn(async () => overrides?.fallbackResult ?? null);
+	const onModelChangeFn = mock.fn((_model: Model<any>) => {});
 
 	const deps: RetryHandlerDeps = {
 		agent: {
@@ -110,10 +121,10 @@ function createMockDeps(overrides?: {
 		settingsManager: {
 			getRetryEnabled: () => true,
 			getRetrySettings: () => ({
-				enabled: true,
-				maxRetries: 5,
-				baseDelayMs: 1000,
-				maxDelayMs: 30000,
+				enabled: overrides?.retryEnabled ?? true,
+				maxRetries: overrides?.retrySettings?.maxRetries ?? 5,
+				baseDelayMs: overrides?.retrySettings?.baseDelayMs ?? 1000,
+				maxDelayMs: overrides?.retrySettings?.maxDelayMs ?? 30000,
 			}),
 		} as unknown as SettingsManager,
 		modelRegistry: {
@@ -165,7 +176,7 @@ function createMockDeps(overrides?: {
 		getModel: () => current.value,
 		getSessionId: () => "test-session",
 		emit: (event: any) => emittedEvents.push(event),
-		onModelChange: mock.fn(),
+		onModelChange: onModelChangeFn,
 		sleepFn: async (ms: number) => {
 			now += ms;
 			overrides?.onSleep?.();
@@ -173,7 +184,7 @@ function createMockDeps(overrides?: {
 		now: () => now,
 	};
 
-	return { deps, emittedEvents, continueFn, setModelFn, findFallback, markUsageLimitReached };
+	return { deps, emittedEvents, continueFn, setModelFn, findFallback, markUsageLimitReached, onModelChangeFn };
 }
 
 describe("RetryHandler", () => {
@@ -334,5 +345,163 @@ describe("RetryHandler", () => {
 		const switchEvent = emittedEvents.find((event) => event.type === "fallback_provider_switch");
 		assert.ok(switchEvent);
 		assert.match(String(switchEvent?.reason), /long context downgrade/);
+	});
+
+	describe("retry cancellation", () => {
+		it("cancels queued immediate continue callbacks when retry is aborted", async () => {
+			const { deps, emittedEvents, continueFn } = createMockDeps({
+				markUsageLimitReachedResult: true,
+			});
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage("429 Too Many Requests");
+
+			const result = await handler.handleRetryableError(msg);
+			assert.equal(result, true, "retry should be initiated");
+
+			handler.abortRetry();
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			assert.equal(continueFn.mock.calls.length, 0, "cancelled retry must not continue after explicit abort");
+			const endEvents = emittedEvents.filter((e) => e.type === "auto_retry_end");
+			assert.equal(endEvents.length, 1, "retry cancellation should emit a single auto_retry_end event");
+			assert.equal(endEvents[0]?.finalError, "Retry cancelled");
+		});
+	});
+
+	describe("isRetryableError", () => {
+		it("considers long-context entitlement error as retryable", () => {
+			const { deps } = createMockDeps();
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage("Extra usage is required for long context requests.");
+			assert.equal(handler.isRetryableError(msg), true);
+		});
+
+		it("does NOT consider credential cooldown error as retryable (#3429)", () => {
+			// The credential cooldown message from getApiKey() must not re-enter
+			// the retry handler. Re-entry creates cascading empty error entries
+			// in the session file that break resume.
+			const { deps } = createMockDeps();
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage(
+				'All credentials for "anthropic" are in a cooldown window. ' +
+				'Please wait a moment and try again, or switch to a different provider.',
+			);
+			assert.equal(handler.isRetryableError(msg), false);
+		});
+	});
+
+	describe("third-party block claude-code fallback (#3772)", () => {
+		it("switches to claude-code provider when current provider is anthropic", async () => {
+			const ccModel = createMockModel("claude-code", "claude-opus-4-6");
+			const { deps, emittedEvents, onModelChangeFn } = createMockDeps({
+				model: createMockModel("anthropic", "claude-opus-4-6"),
+				findModelResult: (provider: string, modelId: string) => {
+					if (provider === "claude-code" && modelId === "claude-opus-4-6") return ccModel;
+					return undefined;
+				},
+			});
+			deps.isClaudeCodeReady = () => true;
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage("third-party apps cannot draw from extra usage");
+
+			const result = await handler.handleRetryableError(msg);
+
+			assert.equal(result, true, "should retry via claude-code fallback");
+			const switchEvent = emittedEvents.find((e) => e.type === "fallback_provider_switch");
+			assert.ok(switchEvent, "Expected fallback_provider_switch event");
+			assert.ok(switchEvent!.to.startsWith("claude-code/"), "Should switch to claude-code provider");
+		});
+
+		it("does NOT switch to claude-code when current provider is not anthropic", async () => {
+			const ccModel = createMockModel("claude-code", "gpt-4o");
+			const { deps, emittedEvents } = createMockDeps({
+				model: createMockModel("openai", "gpt-4o"),
+				findModelResult: (provider: string, modelId: string) => {
+					if (provider === "claude-code" && modelId === "gpt-4o") return ccModel;
+					return undefined;
+				},
+			});
+			deps.isClaudeCodeReady = () => true;
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage("third-party apps are not supported for this plan");
+
+			const result = await handler.handleRetryableError(msg);
+
+			// Should NOT have triggered the claude-code fallback
+			const switchEvent = emittedEvents.find(
+				(e) => e.type === "fallback_provider_switch" && e.to?.startsWith("claude-code/"),
+			);
+			assert.equal(switchEvent, undefined, "Should NOT switch non-anthropic provider to claude-code");
+		});
+	});
+
+	describe("quota_exhausted credential backoff (#3430)", () => {
+		it("does NOT call markUsageLimitReached for quota_exhausted errors", async () => {
+			// "Extra usage is required" is an account-level billing gate.
+			// Backing off the credential for 30 minutes blocks all provider
+			// requests and has no effect on the billing condition.
+			const { deps, markUsageLimitReached } = createMockDeps({
+				model: createMockModel("anthropic", "claude-opus-4-6[1m]"),
+				markUsageLimitReachedResult: false,
+				fallbackResult: null,
+				findModelResult: () => undefined,
+			});
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage(
+				'429 {"type":"error","error":{"type":"rate_limit_error","message":"Extra usage is required for long context requests."}}',
+			);
+
+			await handler.handleRetryableError(msg);
+
+			assert.equal(
+				markUsageLimitReached.mock.calls.length,
+				0,
+				"markUsageLimitReached must NOT be called for quota_exhausted errors",
+			);
+		});
+
+		it("still calls markUsageLimitReached for regular rate_limit errors", async () => {
+			const { deps, markUsageLimitReached } = createMockDeps({
+				model: createMockModel("anthropic", "claude-opus-4-6"),
+				markUsageLimitReachedResult: false,
+				fallbackResult: null,
+			});
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage("429 Too Many Requests");
+
+			await handler.handleRetryableError(msg);
+
+			assert.equal(
+				markUsageLimitReached.mock.calls.length,
+				1,
+				"markUsageLimitReached should be called for rate_limit errors",
+			);
+		});
+
+		it("still tries cross-provider fallback for quota_exhausted without credential backoff", async () => {
+			const fallbackModel = createMockModel("openai", "gpt-4o");
+			const { deps, markUsageLimitReached, continueFn } = createMockDeps({
+				model: createMockModel("anthropic", "claude-opus-4-6[1m]"),
+				markUsageLimitReachedResult: false,
+				fallbackResult: { model: fallbackModel, chainName: "coding", reason: "cross-provider fallback" },
+			});
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage("Extra usage is required for long context requests.");
+
+			const result = await handler.handleRetryableError(msg);
+
+			assert.equal(result, true, "should retry with fallback provider");
+			assert.equal(
+				markUsageLimitReached.mock.calls.length,
+				0,
+				"should NOT back off credentials before trying fallback",
+			);
+		});
 	});
 });

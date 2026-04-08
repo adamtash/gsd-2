@@ -7,12 +7,20 @@ import {
   transaction,
   updateTaskStatus,
   updateSliceStatus,
+  updateMilestoneStatus,
   getSliceTasks,
+  insertMilestone,
+  _getAdapter,
+  getMilestoneSlices,
   insertVerificationEvidence,
   upsertDecision,
   openDatabase,
+  setTaskBlockerDiscovered,
 } from "./gsd-db.js";
 import { isClosedStatus } from "./status-guards.js";
+import { invalidateStateCache } from "./state.js";
+import { clearPathCache } from "./paths.js";
+import { clearParseCache } from "./files.js";
 import { writeManifest } from "./workflow-manifest.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { acquireSyncLock, releaseSyncLock } from "./sync-lock.js";
@@ -73,7 +81,15 @@ function replayEvents(events: WorkflowEvent[]): void {
   transaction(() => {
   for (const event of events) {
     const p = event.params;
-    switch (event.cmd) {
+    // Normalize cmd format: completion tools write hyphens ("complete-task"),
+    // legacy logs use underscores ("complete_task"). Accept both formats.
+    // Type guard: malformed event lines with non-string cmd are skipped.
+    if (typeof event.cmd !== "string") {
+      logWarning("reconcile", `Event with non-string cmd skipped: ${JSON.stringify(event.cmd)}`);
+      continue;
+    }
+    const cmd = event.cmd.replace(/-/g, "_");
+    switch (cmd) {
       case "complete_task": {
         const milestoneId = p["milestoneId"] as string;
         const sliceId = p["sliceId"] as string;
@@ -89,13 +105,11 @@ function replayEvents(events: WorkflowEvent[]): void {
         break;
       }
       case "report_blocker": {
-        // report_blocker marks the task with blocker_discovered = 1
-        // The DB helper updateTaskStatus doesn't handle blockers,
-        // so we just update status to "blocked" as a best-effort replay.
         const milestoneId = p["milestoneId"] as string;
         const sliceId = p["sliceId"] as string;
         const taskId = p["taskId"] as string;
         updateTaskStatus(milestoneId, sliceId, taskId, "blocked");
+        setTaskBlockerDiscovered(milestoneId, sliceId, taskId, true);
         break;
       }
       case "record_verification": {
@@ -120,9 +134,66 @@ function replayEvents(events: WorkflowEvent[]): void {
         replaySliceComplete(milestoneId, sliceId, event.ts);
         break;
       }
+      case "complete_milestone": {
+        const milestoneId = p["milestoneId"] as string;
+        if (!milestoneId) break;
+        // Invariant check: only mark complete if all slices are closed.
+        // Without this guard, a reordered/partial event stream could close
+        // a milestone while work is still incomplete.
+        const mSlices = getMilestoneSlices(milestoneId);
+        const allClosed = mSlices.length === 0 || mSlices.every(s => isClosedStatus(s.status));
+        if (allClosed) {
+          updateMilestoneStatus(milestoneId, "complete", event.ts);
+        } else {
+          logWarning("reconcile", `Skipping complete_milestone replay for ${milestoneId}: not all slices are closed`);
+        }
+        break;
+      }
+      case "plan_milestone": {
+        // Replay milestone creation — uses INSERT OR IGNORE (gsd-db's insertMilestone is safe)
+        const mId = p["milestoneId"] as string;
+        if (mId) {
+          insertMilestone({ id: mId, title: (p["title"] as string) ?? mId });
+        }
+        break;
+      }
       case "plan_slice": {
-        // plan_slice events are informational — slice should already exist.
-        // No DB mutation needed during replay (the slice was inserted at plan time).
+        // Replay slice creation — strict INSERT OR IGNORE to avoid overwriting
+        // progressed status. insertSlice() uses ON CONFLICT DO UPDATE which
+        // could downgrade a completed slice back to pending.
+        const milestoneId = p["milestoneId"] as string;
+        const sliceId = p["sliceId"] as string;
+        if (milestoneId && sliceId) {
+          const adapter = _getAdapter();
+          if (adapter) {
+            adapter.prepare(
+              `INSERT OR IGNORE INTO slices (milestone_id, id, title, status, created_at)
+               VALUES (:mid, :sid, :title, 'pending', :ts)`,
+            ).run({ ":mid": milestoneId, ":sid": sliceId, ":title": (p["title"] as string) ?? sliceId, ":ts": event.ts });
+          }
+        }
+        break;
+      }
+      case "plan_task": {
+        // Replay task creation — strict INSERT OR IGNORE to avoid overwriting
+        // progressed status. insertTask() uses ON CONFLICT DO UPDATE which
+        // could downgrade a done/in-progress task back to pending.
+        const milestoneId = p["milestoneId"] as string;
+        const sliceId = p["sliceId"] as string;
+        const taskId = p["taskId"] as string;
+        if (milestoneId && sliceId && taskId) {
+          const adapter = _getAdapter();
+          if (adapter) {
+            adapter.prepare(
+              `INSERT OR IGNORE INTO tasks (milestone_id, slice_id, id, title, status, created_at)
+               VALUES (:mid, :sid, :tid, :title, 'pending', :ts)`,
+            ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId, ":title": (p["title"] as string) ?? taskId, ":ts": event.ts });
+          }
+        }
+        break;
+      }
+      case "replan_slice": {
+        // Informational — replan events don't mutate DB during replay
         break;
       }
       case "save_decision": {
@@ -140,7 +211,7 @@ function replayEvents(events: WorkflowEvent[]): void {
         break;
       }
       default:
-        // Unknown commands are silently skipped during replay
+        logWarning("reconcile", `Unknown event cmd during replay: "${event.cmd}" — skipped`);
         break;
     }
   }
@@ -158,24 +229,40 @@ export function extractEntityKey(
   event: WorkflowEvent,
 ): { type: string; id: string } | null {
   const p = event.params;
+  // Normalize cmd format: accept both hyphens and underscores
+  if (typeof event.cmd !== "string") return null;
+  const cmd = event.cmd.replace(/-/g, "_");
 
-  switch (event.cmd) {
+  switch (cmd) {
     case "complete_task":
     case "start_task":
     case "report_blocker":
     case "record_verification":
+    case "plan_task":
       return typeof p["taskId"] === "string"
         ? { type: "task", id: p["taskId"] }
         : null;
 
     case "complete_slice":
+    case "replan_slice":
       return typeof p["sliceId"] === "string"
         ? { type: "slice", id: p["sliceId"] }
+        : null;
+
+    case "complete_milestone":
+      return typeof p["milestoneId"] === "string"
+        ? { type: "milestone", id: p["milestoneId"] }
         : null;
 
     case "plan_slice":
       return typeof p["sliceId"] === "string"
         ? { type: "slice_plan", id: p["sliceId"] }
+        : null;
+
+    case "complete_milestone":
+    case "plan_milestone":
+      return typeof p["milestoneId"] === "string"
+        ? { type: "milestone", id: p["milestoneId"] }
         : null;
 
     case "save_decision":
@@ -348,7 +435,9 @@ function _reconcileWorktreeLogsInner(
   if (conflicts.length > 0) {
     // D-04: atomic all-or-nothing — block entire merge
     writeConflictsFile(mainBasePath, conflicts, worktreeBasePath);
-    logError("reconcile", `${conflicts.length} conflict(s) detected`, { count: String(conflicts.length), path: join(mainBasePath, ".gsd", "CONFLICTS.md") });
+    const conflictSummary = conflicts.slice(0, 3).map(c => `${c.entityType}:${c.entityId}`).join(", ");
+    const truncated = conflicts.length > 3 ? `... and ${conflicts.length - 3} more` : "";
+    logError("reconcile", `${conflicts.length} conflict(s) detected on ${conflictSummary}${truncated}. Details: .gsd/CONFLICTS.md`, { count: String(conflicts.length), path: join(mainBasePath, ".gsd", "CONFLICTS.md") });
     return { autoMerged: 0, conflicts };
   }
 
@@ -358,6 +447,14 @@ function _reconcileWorktreeLogsInner(
   const merged = indexed.map(({ e }) => e);
 
   // Step 7: Write merged event log FIRST (so crash recovery can re-derive DB state)
+  // Guard: detect concurrent appendEvent calls between our read (step 1) and
+  // this rewrite. If the log grew, re-read and retry to avoid dropping events.
+  const preWriteEvents = readEvents(mainLogPath);
+  if (preWriteEvents.length > mainEvents.length) {
+    logWarning("reconcile", `Event log grew during reconcile (${mainEvents.length} → ${preWriteEvents.length}), retrying with fresh read`);
+    return _reconcileWorktreeLogsInner(mainBasePath, worktreeBasePath);
+  }
+
   const baseEvents = mainEvents.slice(0, forkPoint + 1);
   const mergedLog = baseEvents.concat(merged);
   const logContent = mergedLog.map((e) => JSON.stringify(e)).join("\n") + (mergedLog.length > 0 ? "\n" : "");
@@ -374,6 +471,12 @@ function _reconcileWorktreeLogsInner(
   } catch (err) {
     logWarning("reconcile", "manifest write failed (non-fatal)", { error: (err as Error).message });
   }
+
+  // Step 10: Invalidate caches so deriveState() sees post-reconcile DB state.
+  // Use targeted invalidation (not invalidateAllCaches) to avoid wiping artifacts table.
+  invalidateStateCache();
+  clearPathCache();
+  clearParseCache();
 
   return { autoMerged: merged.length, conflicts: [] };
 }
@@ -455,8 +558,8 @@ function parseEventBlock(block: string): WorkflowEvent[] {
           if (paramsMatch) {
             try {
               params = JSON.parse(paramsMatch[1]!) as Record<string, unknown>;
-            } catch {
-              // Keep empty params on parse error
+            } catch (e) {
+              logWarning("reconcile", `tool call params parse failed: ${(e as Error).message}`);
             }
             i++; // consume params line
           }
