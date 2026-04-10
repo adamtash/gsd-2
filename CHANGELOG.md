@@ -6,6 +6,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.69.0] - 2026-04-10
+
+### Added
+- **gsd**: implement ADR-005 multi-model provider and tool strategy
+- **gsd**: complete ADR-004 capability-aware model routing implementation
+
+### Fixed
+- **gsd**: add missing directories to codebase generator exclude list
+- **gsd**: wire ADR-005 infrastructure into live paths
+- **gsd**: replace empty catch with logWarning for CI compliance
+- **gsd**: merge enhanced context sections into standard template, clean up stale gate patterns
+- **gsd**: remove broken discuss-prepared template, inject briefs into discuss.md
+
 ## [2.68.1] - 2026-04-10
 
 ### Fixed
@@ -2671,7 +2684,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.68.1...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.69.0...HEAD
+[2.69.0]: https://github.com/gsd-build/gsd-2/compare/v2.68.1...v2.69.0
 [2.68.1]: https://github.com/gsd-build/gsd-2/compare/v2.68.0...v2.68.1
 [2.68.0]: https://github.com/gsd-build/gsd-2/compare/v2.67.0...v2.68.0
 [2.67.0]: https://github.com/gsd-build/gsd-2/compare/v2.66.1...v2.67.0

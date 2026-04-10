@@ -1,6 +1,6 @@
 {
   "name": "@glittercowboy/gsd",
-  "version": "2.68.1",
+  "version": "2.69.0",
   "piConfig": {
     "name": "gsd",
     "configDir": ".gsd"
