@@ -230,16 +230,13 @@ import {
 // ─── Scenario 19: isGateQuestionId recognizes all gate patterns ──
 
 test('write-gate: isGateQuestionId recognizes all gate patterns', () => {
-  assert.strictEqual(isGateQuestionId('layer1_scope_gate'), true);
-  assert.strictEqual(isGateQuestionId('layer2_architecture_gate'), true);
-  assert.strictEqual(isGateQuestionId('layer3_error_gate'), true);
-  assert.strictEqual(isGateQuestionId('layer4_quality_gate'), true);
   assert.strictEqual(isGateQuestionId('depth_verification'), true);
   assert.strictEqual(isGateQuestionId('depth_verification_M002'), true);
-  assert.strictEqual(isGateQuestionId('my_layer1_scope_gate_question'), true);
+  assert.strictEqual(isGateQuestionId('depth_verification_confirm'), true);
   // Non-gate question IDs
   assert.strictEqual(isGateQuestionId('project_intent'), false);
   assert.strictEqual(isGateQuestionId('feature_priority'), false);
+  assert.strictEqual(isGateQuestionId('layer1_scope_gate'), false);
   assert.strictEqual(isGateQuestionId(''), false);
 });
 
@@ -249,14 +246,14 @@ test('write-gate: pending gate lifecycle (set, get, clear)', () => {
   clearDiscussionFlowState();
   assert.strictEqual(getPendingGate(), null, 'starts null');
 
-  setPendingGate('layer1_scope_gate');
-  assert.strictEqual(getPendingGate(), 'layer1_scope_gate', 'set correctly');
+  setPendingGate('depth_verification');
+  assert.strictEqual(getPendingGate(), 'depth_verification', 'set correctly');
 
   clearPendingGate();
   assert.strictEqual(getPendingGate(), null, 'cleared correctly');
 
   // clearDiscussionFlowState also clears pending gate
-  setPendingGate('layer2_architecture_gate');
+  setPendingGate('depth_verification_M002');
   clearDiscussionFlowState();
   assert.strictEqual(getPendingGate(), null, 'clearDiscussionFlowState clears pending gate');
 });
@@ -265,12 +262,12 @@ test('write-gate: pending gate lifecycle (set, get, clear)', () => {
 
 test('write-gate: shouldBlockPendingGate blocks write/edit during pending gate', () => {
   clearDiscussionFlowState();
-  setPendingGate('layer1_scope_gate');
+  setPendingGate('depth_verification');
 
   // write should be blocked during discussion
   const writeResult = shouldBlockPendingGate('write', 'M001', false);
   assert.strictEqual(writeResult.block, true, 'write should be blocked');
-  assert.ok(writeResult.reason!.includes('layer1_scope_gate'), 'reason mentions the gate');
+  assert.ok(writeResult.reason!.includes('depth_verification'), 'reason mentions the gate');
 
   // edit should be blocked
   const editResult = shouldBlockPendingGate('edit', 'M001', false);
@@ -287,7 +284,7 @@ test('write-gate: shouldBlockPendingGate blocks write/edit during pending gate',
 
 test('write-gate: shouldBlockPendingGate allows read-only and ask_user_questions during pending gate', () => {
   clearDiscussionFlowState();
-  setPendingGate('layer1_scope_gate');
+  setPendingGate('depth_verification');
 
   // ask_user_questions is always safe (model needs to re-ask)
   assert.strictEqual(shouldBlockPendingGate('ask_user_questions', 'M001').block, false);
@@ -304,7 +301,7 @@ test('write-gate: shouldBlockPendingGate allows read-only and ask_user_questions
 
 test('write-gate: shouldBlockPendingGate blocks outside discussion when a gate is pending', () => {
   clearDiscussionFlowState();
-  setPendingGate('layer1_scope_gate');
+  setPendingGate('depth_verification');
 
   // No milestoneId and no queue phase — still block because the gate is pending
   const result = shouldBlockPendingGate('write', null, false);
@@ -330,7 +327,7 @@ test('write-gate: shouldBlockPendingGate blocks in queue mode when gate is pendi
 
 test('write-gate: shouldBlockPendingGateBash allows read-only commands during pending gate', () => {
   clearDiscussionFlowState();
-  setPendingGate('layer2_architecture_gate');
+  setPendingGate('depth_verification');
 
   assert.strictEqual(shouldBlockPendingGateBash('cat file.txt', 'M001').block, false);
   assert.strictEqual(shouldBlockPendingGateBash('git log --oneline', 'M001').block, false);
@@ -344,11 +341,11 @@ test('write-gate: shouldBlockPendingGateBash allows read-only commands during pe
 
 test('write-gate: shouldBlockPendingGateBash blocks mutating commands during pending gate', () => {
   clearDiscussionFlowState();
-  setPendingGate('layer2_architecture_gate');
+  setPendingGate('depth_verification');
 
   const result = shouldBlockPendingGateBash('npm run build', 'M001');
   assert.strictEqual(result.block, true, 'mutating bash should be blocked');
-  assert.ok(result.reason!.includes('layer2_architecture_gate'));
+  assert.ok(result.reason!.includes('depth_verification'));
 
   clearDiscussionFlowState();
 });
@@ -365,7 +362,7 @@ test('write-gate: no pending gate means no blocking', () => {
 // ─── Scenario 28: resetWriteGateState clears pending gate ──
 
 test('write-gate: resetWriteGateState clears pending gate', () => {
-  setPendingGate('layer3_error_gate');
+  setPendingGate('depth_verification');
   resetWriteGateState();
   assert.strictEqual(getPendingGate(), null);
 });

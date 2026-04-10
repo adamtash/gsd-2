@@ -53,24 +53,7 @@ import {
   runPreparation,
   formatCodebaseBrief,
   formatPriorContextBrief,
-  formatEcosystemBrief,
-  type PreparationResult,
 } from "./preparation.js";
-
-// ─── Preparation result storage ─────────────────────────────────────────────
-// Stores the most recent preparation result for injection into discuss prompts.
-// S02 will consume this when building the prepared discussion prompt.
-let lastPreparationResult: PreparationResult | null = null;
-
-/** Get the most recent preparation result (for S02 prompt building). */
-export function getLastPreparationResult(): PreparationResult | null {
-  return lastPreparationResult;
-}
-
-/** Clear the preparation result (called after discussion completes). */
-export function clearPreparationResult(): void {
-  lastPreparationResult = null;
-}
 
 // ─── Re-exports (preserve public API for existing importers) ────────────────
 export {
@@ -427,7 +410,7 @@ function resolveAvailableModel<T extends { id: string; provider: string }>(
  * Build the discuss-and-plan prompt for a new milestone.
  * Used by all three "new milestone" paths (first ever, no active, all complete).
  */
-function buildDiscussPrompt(nextId: string, preamble: string, _basePath: string): string {
+function buildDiscussPrompt(nextId: string, preamble: string, _basePath: string, preparationContext?: string): string {
   const milestoneRel = `.gsd/milestones/${nextId}`;
   const inlinedTemplates = [
     inlineTemplate("project", "Project"),
@@ -439,6 +422,7 @@ function buildDiscussPrompt(nextId: string, preamble: string, _basePath: string)
   return loadPrompt("discuss", {
     milestoneId: nextId,
     preamble,
+    preparationContext: preparationContext ?? "",
     contextPath: `${milestoneRel}/${nextId}-CONTEXT.md`,
     roadmapPath: `${milestoneRel}/${nextId}-ROADMAP.md`,
     inlinedTemplates,
@@ -472,58 +456,11 @@ function buildHeadlessDiscussPrompt(nextId: string, seedContext: string, _basePa
 }
 
 /**
- * Build the prepared discuss prompt with brief injection.
- * Uses the discuss-prepared template which encodes the 4-layer discussion protocol.
- *
- * @param nextId - The milestone ID being discussed
- * @param preamble - Preamble text for the discuss prompt
- * @param _basePath - Root directory of the project (unused, kept for signature consistency)
- * @param prepResult - Preparation result containing briefs to inject
- * @returns The prepared discuss prompt string
- */
-function buildPreparedPrompt(
-  nextId: string,
-  preamble: string,
-  _basePath: string,
-  prepResult: PreparationResult,
-): string {
-  const milestoneRel = `.gsd/milestones/${nextId}`;
-
-  // Use context-enhanced instead of context for prepared discussions
-  const inlinedTemplates = [
-    inlineTemplate("project", "Project"),
-    inlineTemplate("requirements", "Requirements"),
-    inlineTemplate("context-enhanced", "Context Enhanced"),
-    inlineTemplate("roadmap", "Roadmap"),
-    inlineTemplate("decisions", "Decisions"),
-  ].join("\n\n---\n\n");
-
-  // Format the briefs from the preparation result
-  const codebaseBrief = prepResult.codebaseBrief || formatCodebaseBrief(prepResult.codebase);
-  const priorContextBrief = prepResult.priorContextBrief || formatPriorContextBrief(prepResult.priorContext);
-  const ecosystemBrief = prepResult.ecosystemBrief || formatEcosystemBrief(prepResult.ecosystem);
-
-  return loadPrompt("discuss-prepared", {
-    milestoneId: nextId,
-    preamble,
-    codebaseBrief,
-    priorContextBrief,
-    ecosystemBrief,
-    contextPath: `${milestoneRel}/${nextId}-CONTEXT.md`,
-    roadmapPath: `${milestoneRel}/${nextId}-ROADMAP.md`,
-    inlinedTemplates,
-    commitInstruction: buildDocsCommitInstruction(`docs(${nextId}): context, requirements, and roadmap`),
-    multiMilestoneCommitInstruction: buildDocsCommitInstruction("docs: project plan — N milestones"),
-  });
-}
-
-/**
  * Run preparation phase if enabled, then build the discuss prompt.
- * This is the main entry point for new milestone discussions with preparation.
- * Stores the preparation result for S02 to inject into the discuss prompt.
- *
- * When preparation succeeds, uses the discuss-prepared template with brief injection.
- * Falls back to the standard discuss template when preparation is disabled or fails.
+ * Preparation analyzes the codebase and prior context, injecting the results
+ * as supplementary context into the standard discuss template. The discuss
+ * template drives the conversation (asks "What's the vision?" first), while
+ * the preparation briefs give the agent grounding in the existing codebase.
  *
  * @param ctx - Extension command context with UI for progress notifications
  * @param nextId - The milestone ID being discussed
@@ -537,14 +474,13 @@ async function prepareAndBuildDiscussPrompt(
   preamble: string,
   basePath: string,
 ): Promise<string> {
-  // Clear stale preparation result immediately to prevent cross-session/project
-  // state leaks. This ensures data from a prior milestone/project never leaks
-  // into subsequent discussions (adversarial review fix #3602).
-  lastPreparationResult = null;
-
   const prefs = loadEffectiveGSDPreferences()?.preferences ?? {};
 
-  // Run preparation if enabled (default: true)
+  // Run preparation if enabled (default: true) — results are injected as
+  // supplementary context into the standard discuss prompt, NOT as a
+  // replacement template. The discuss prompt always leads with "What's the
+  // vision?" so the user defines the scope, not the codebase analysis.
+  let preparationContext = "";
   if (prefs.discuss_preparation !== false) {
     try {
       const prepResult = await runPreparation(basePath, ctx.ui, {
@@ -552,21 +488,23 @@ async function prepareAndBuildDiscussPrompt(
         discuss_web_research: prefs.discuss_web_research,
         discuss_depth: prefs.discuss_depth,
       });
-      lastPreparationResult = prepResult;
 
-      // Use prepared prompt if preparation was enabled and produced results
       if (prepResult.enabled) {
-        return buildPreparedPrompt(nextId, preamble, basePath, prepResult);
+        const codebaseBrief = prepResult.codebaseBrief || formatCodebaseBrief(prepResult.codebase);
+        const priorContextBrief = prepResult.priorContextBrief || formatPriorContextBrief(prepResult.priorContext);
+        const parts: string[] = [];
+        if (codebaseBrief) parts.push(`### Codebase Brief\n\n${codebaseBrief}`);
+        if (priorContextBrief) parts.push(`### Prior Context Brief\n\n${priorContextBrief}`);
+        if (parts.length > 0) {
+          preparationContext = `\n\n## Preparation Context\n\nThe system analyzed the codebase before this discussion. Use these findings as background context — they describe what already exists, NOT what the user wants to build. Always ask the user what they want to build first.\n\n${parts.join("\n\n")}`;
+        }
       }
-    } catch {
-      // If preparation throws, ensure stale data doesn't persist
-      lastPreparationResult = null;
+    } catch (err) {
+      logWarning("guided", `preparation failed, proceeding without context: ${(err as Error).message}`);
     }
   }
 
-  // Fall back to standard discuss prompt for backward compatibility
-  // lastPreparationResult is already null (cleared at entry or on error)
-  return buildDiscussPrompt(nextId, preamble, basePath);
+  return buildDiscussPrompt(nextId, preamble, basePath, preparationContext);
 }
 
 /**
