@@ -38,6 +38,7 @@ export interface ProviderManagerCallbacks {
 	onAddAccount: (provider: string) => void;
 	onAddApiKey: (provider: string) => void;
 	onSetupToken: (provider: string) => void;
+	onSetupAuth: (provider: string) => void;
 }
 
 export class ProviderManagerComponent extends Container implements Focusable {
@@ -126,6 +127,7 @@ export class ProviderManagerComponent extends Container implements Focusable {
 			onAddAccount: onAddAccount ?? (() => {}),
 			onAddApiKey: onAddApiKey ?? (() => {}),
 			onSetupToken: onSetupToken ?? (() => {}),
+			onSetupAuth: () => {},
 		});
 	}
 
@@ -504,7 +506,7 @@ export class ProviderManagerComponent extends Container implements Focusable {
 			// Enter key → initiate auth setup for the selected provider (#3579)
 			const provider = this.providers[this.selectedIndex];
 			if (provider) {
-				this.onSetupAuth(provider.name);
+				this.callbacks.onSetupAuth(provider.name);
 			}
 		}
 	}

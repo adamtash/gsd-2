@@ -3469,11 +3469,11 @@ export class InteractiveMode {
 						done();
 						this.showSetupTokenFlow(provider);
 					},
-				},
-				async (provider: string) => {
-					// Enter key → auth setup for selected provider (#3579)
-					done();
-					await this.showLoginDialog(provider);
+					onSetupAuth: async (provider: string) => {
+						// Enter key → auth setup for selected provider (#3579)
+						done();
+						await this.showLoginDialog(provider);
+					},
 				},
 			);
 			return { component, focus: component };
