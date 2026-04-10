@@ -21,58 +21,49 @@ One command. Walk away. Come back to a built project with clean git history.
 
 > GSD now provisions a managed [RTK](https://github.com/rtk-ai/rtk) binary on supported macOS, Linux, and Windows installs to compress shell-command output in `bash`, `async_bash`, `bg_shell`, and verification flows. GSD forces `RTK_TELEMETRY_DISABLED=1` for all managed invocations. Set `GSD_RTK_DISABLED=1` to disable the integration.
 
-> **📋 NOTICE: New to Node on Mac?** If you installed Node.js via Homebrew, you may be running a development release instead of LTS. **[Read this guide](./docs/node-lts-macos.md)** to pin Node 24 LTS and avoid compatibility issues.
+> **📋 NOTICE: New to Node on Mac?** If you installed Node.js via Homebrew, you may be running a development release instead of LTS. **[Read this guide](./docs/user-docs/node-lts-macos.md)** to pin Node 24 LTS and avoid compatibility issues.
 
 </div>
 
 ---
 
-## What's New in v2.67
+## What's New in v2.68
 
-### Context Engineering
+### MCP Workflow Tools
 
-- **Tiered Context Injection (M005)** — relevance-scoped context with 65%+ token reduction. Decision scope cascade derives context from slice metadata instead of blanket injection.
-- **Resilient transient error recovery** — defers to Core RetryHandler and fixes cmdCtx race conditions for more reliable auto-mode sessions.
+- **Full workflow over MCP** — slice replanning, milestone management, slice completion, task completion, and core planning tools are now exposed over MCP for external integrations.
+- **Transport-gated MCP** — workflow tool availability adapts to provider transport capabilities automatically.
+- **Write gate enforcement** — workflow MCP respects write gates, preventing unauthorized state mutations from external clients.
 
-### Provider & Model Improvements
+### Reliability & Recovery
 
-- **Anthropic subscription routing** — users with Anthropic subscriptions are automatically routed through Claude Code CLI provider with proper display names across all UI surfaces.
-- **Claude Code provider hardening** — native Windows claude lookup, fallback guards, and `out of extra usage` error matching.
-- **XML parameter recovery** — pi-ai recovers XML parameters trapped in JSON strings from providers.
+- **False degraded-mode fix** — eliminates spurious degraded-mode warnings when the DB hasn't been initialized yet.
+- **Stale session resume suppression** — prevents stale interrupted-session resume prompts from hijacking fresh sessions.
+- **Merge conflict recovery** — `autoCommitDirtyState` guarded with cwd restore on `MergeConflictError`.
+- **Auto-resume hardening** — `autoStartTime` restored on resume, managed resources resynced on auto resume.
 
-### Safety & Data Integrity
+### TUI & Developer Experience
 
-- **LLM safety harness** — auto-mode damage control prevents the LLM from running destructive operations or querying `gsd.db` directly via bash.
-- **5-wave state machine hardening** — critical data integrity fixes across atomic writes, randomized tmp paths, event log reconciliation, session recovery, and consistency enforcement. 86+ regression tests added.
-- **Discussion gate enforcement** — mechanical enforcement for discussion question gates with fail-closed behavior.
-- **Enhanced verification** — pre-execution plan verification checks, post-execution cross-task consistency checks, blocking behavior and strict mode.
-
-### Parallel Execution & Dispatch
-
-- **Slice-level parallelism** — dependency-aware parallel dispatch within a milestone, not just across milestones.
-- **Parallel research slices** — research and milestone validation run in parallel.
-- **Worker model override** — configure different models for parallel milestone workers.
-
-### TUI & Notifications
-
-- **Persistent notification panel** — TUI overlay, widget, and web API for real-time notifications.
-- **Remote questions race** — local TUI races against remote channel (Slack/Discord) instead of remote-only routing.
-- **OS-specific keyboard shortcuts** — shortcut hints now adapt to macOS/Linux/Windows.
-- **`/gsd show-config`** — inspect active configuration at a glance.
+- **Contextual tips system** — TUI and web terminal now surface contextual tips based on workflow state.
+- **Claude Code MCP streaming** — real-time streaming and tool output rendering for Claude Code MCP connections.
 
 ### Infrastructure
 
-- **Ollama native provider** — `/api/chat` provider with full option exposure, `apiKey` auth mode, and headless probe.
-- **MCP OAuth** — MCP client supports OAuth auth provider for HTTP transport.
-- **WAL-safe migration backup** — database migrations create WAL-safe backups with stronger regression tests.
-- **Xcode/xcodegen detection** — project detection now supports Xcode bundles and xcodegen.
-- **170+ bug fixes** — state machine resilience, worktree safety, prompt injection, session recovery, and more.
+- **Weekly model registry refresh** — CI workflow auto-regenerates the model registry on a weekly schedule.
+- **Codebase cache auto-refresh** — stale codebase cache is refreshed automatically without manual intervention.
 
 See the full [Changelog](./CHANGELOG.md) for details on every release.
 
 <details>
-<summary>Previous highlights (v2.63 and earlier)</summary>
+<summary>Previous highlights (v2.67 and earlier)</summary>
 
+- **Tiered Context Injection (M005)** — relevance-scoped context with 65%+ token reduction
+- **Resilient transient error recovery** — defers to Core RetryHandler and fixes cmdCtx race conditions
+- **Anthropic subscription routing** — auto-routed through Claude Code CLI provider with proper display names
+- **5-wave state machine hardening** — critical data integrity fixes across atomic writes, event log reconciliation, session recovery
+- **Discussion gate enforcement** — mechanical enforcement with fail-closed behavior
+- **Slice-level parallelism** — dependency-aware parallel dispatch within a milestone
+- **Persistent notification panel** — TUI overlay, widget, and web API for real-time notifications
 - **MCP server** — 6 read-only project state tools for external integrations, auto-wrapup guard, and question dedup
 - **Ollama extension** — first-class local LLM support via Ollama, with dynamic routing enabled by default
 - **Discord bot & daemon** — dedicated daemon package, Discord bot, and headless text mode with tool calls
@@ -95,30 +86,35 @@ See the full [Changelog](./CHANGELOG.md) for details on every release.
 
 ## Documentation
 
-Full documentation is available at **[gsd.build](https://gsd.build)** (powered by Mintlify) and in the [`docs/`](./docs/) directory:
+Full documentation is in the [`docs/`](./docs/) directory:
 
-- **[Getting Started](./docs/getting-started.md)** — install, first run, basic usage
-- **[Auto Mode](./docs/auto-mode.md)** — autonomous execution deep-dive
-- **[Configuration](./docs/configuration.md)** — all preferences, models, git, and hooks
-- **[Custom Models](./docs/custom-models.md)** — add custom providers (Ollama, vLLM, LM Studio, proxies)
-- **[Token Optimization](./docs/token-optimization.md)** — profiles, context compression, complexity routing
-- **[Cost Management](./docs/cost-management.md)** — budgets, tracking, projections
-- **[Git Strategy](./docs/git-strategy.md)** — worktree isolation, branching, merge behavior
-- **[Parallel Orchestration](./docs/parallel-orchestration.md)** — run multiple milestones simultaneously
-- **[Working in Teams](./docs/working-in-teams.md)** — unique IDs, shared artifacts
-- **[Skills](./docs/skills.md)** — bundled skills, discovery, custom authoring
-- **[Commands Reference](./docs/commands.md)** — all commands and keyboard shortcuts
-- **[Architecture](./docs/architecture.md)** — system design and dispatch pipeline
-- **[Troubleshooting](./docs/troubleshooting.md)** — common issues, doctor, forensics, recovery
-- **[CI/CD Pipeline](./docs/ci-cd-pipeline.md)** — three-stage promotion pipeline (Dev → Test → Prod)
-- **[VS Code Extension](./vscode-extension/README.md)** — chat participant, sidebar dashboard, RPC integration
-- **[Visualizer](./docs/visualizer.md)** — workflow visualizer with stats and discussion status
-- **[Remote Questions](./docs/remote-questions.md)** — route decisions to Slack or Discord when human input is needed
-- **[Dynamic Model Routing](./docs/dynamic-model-routing.md)** — complexity-based model selection and budget pressure
-- **[Web Interface](./docs/web-interface.md)** — browser-based project management and real-time progress
-- **[Pipeline Simplification (ADR-003)](./docs/ADR-003-pipeline-simplification.md)** — merged research into planning, mechanical completion
+### User Guides
+
+- **[Getting Started](./docs/user-docs/getting-started.md)** — install, first run, basic usage
+- **[Auto Mode](./docs/user-docs/auto-mode.md)** — autonomous execution deep-dive
+- **[Configuration](./docs/user-docs/configuration.md)** — all preferences, models, git, and hooks
+- **[Custom Models](./docs/user-docs/custom-models.md)** — add custom providers (Ollama, vLLM, LM Studio, proxies)
+- **[Token Optimization](./docs/user-docs/token-optimization.md)** — profiles, context compression, complexity routing
+- **[Cost Management](./docs/user-docs/cost-management.md)** — budgets, tracking, projections
+- **[Git Strategy](./docs/user-docs/git-strategy.md)** — worktree isolation, branching, merge behavior
+- **[Parallel Orchestration](./docs/user-docs/parallel-orchestration.md)** — run multiple milestones simultaneously
+- **[Working in Teams](./docs/user-docs/working-in-teams.md)** — unique IDs, shared artifacts
+- **[Skills](./docs/user-docs/skills.md)** — bundled skills, discovery, custom authoring
+- **[Commands Reference](./docs/user-docs/commands.md)** — all commands and keyboard shortcuts
+- **[Troubleshooting](./docs/user-docs/troubleshooting.md)** — common issues, doctor, forensics, recovery
+- **[Visualizer](./docs/user-docs/visualizer.md)** — workflow visualizer with stats and discussion status
+- **[Remote Questions](./docs/user-docs/remote-questions.md)** — route decisions to Slack or Discord when human input is needed
+- **[Dynamic Model Routing](./docs/user-docs/dynamic-model-routing.md)** — complexity-based model selection and budget pressure
+- **[Web Interface](./docs/user-docs/web-interface.md)** — browser-based project management and real-time progress
+- **[Migration from v1](./docs/user-docs/migration.md)** — `.planning` → `.gsd` migration
 - **[Docker Sandbox](./docker/README.md)** — run GSD auto mode in an isolated Docker container
-- **[Migration from v1](./docs/migration.md)** — `.planning` → `.gsd` migration
+
+### Developer Docs
+
+- **[Architecture](./docs/dev/architecture.md)** — system design and dispatch pipeline
+- **[CI/CD Pipeline](./docs/dev/ci-cd-pipeline.md)** — three-stage promotion pipeline (Dev → Test → Prod)
+- **[Pipeline Simplification (ADR-003)](./docs/dev/ADR-003-pipeline-simplification.md)** — merged research into planning, mechanical completion
+- **[VS Code Extension](./vscode-extension/README.md)** — chat participant, sidebar dashboard, RPC integration
 
 ---
 
@@ -334,7 +330,7 @@ gsd headless query
 gsd headless dispatch plan
 ```
 
-Headless auto-responds to interactive prompts, detects completion, and exits with structured codes: `0` complete, `1` error/timeout, `2` blocked. Auto-restarts on crash with exponential backoff. Use `gsd headless query` for instant, machine-readable state inspection — returns phase, next dispatch preview, and parallel worker costs as a single JSON object without spawning an LLM session. Pair with [remote questions](./docs/remote-questions.md) to route decisions to Slack or Discord when human input is needed.
+Headless auto-responds to interactive prompts, detects completion, and exits with structured codes: `0` complete, `1` error/timeout, `2` blocked. Auto-restarts on crash with exponential backoff. Use `gsd headless query` for instant, machine-readable state inspection — returns phase, next dispatch preview, and parallel worker costs as a single JSON object without spawning an LLM session. Pair with [remote questions](./docs/user-docs/remote-questions.md) to route decisions to Slack or Discord when human input is needed.
 
 **Multi-session orchestration** — headless mode supports file-based IPC in `.gsd/parallel/` for coordinating multiple GSD workers across milestones. Build orchestrators that spawn, monitor, and budget-cap a fleet of GSD workers.
 
@@ -507,9 +503,8 @@ auto_report: true
 | `verification_commands`| Array of shell commands to run after task execution (e.g., `["npm run lint", "npm run test"]`)        |
 | `verification_auto_fix`| Auto-retry on verification failures (default: true)                                                   |
 | `verification_max_retries` | Max retries for verification failures (default: 2)                                               |
-| `require_slice_discussion` | Pause auto-mode before each slice for human discussion review                                    |
+| `phases.require_slice_discussion` | Pause auto-mode before each slice for human discussion review                                    |
 | `auto_report`          | Auto-generate HTML reports after milestone completion (default: true)                                 |
-| `searchExcludeDirs`    | Directories to exclude from `@` file autocomplete (e.g., `["node_modules", ".git", "dist"]`)          |
 
 ### Agent Instructions
 
@@ -539,7 +534,7 @@ token_profile: budget      # or balanced (default), quality
 
 **Budget pressure** graduates model downgrading as you approach your budget ceiling — 50%, 75%, and 90% thresholds progressively shift work to cheaper tiers.
 
-See the full [Token Optimization Guide](./docs/token-optimization.md) for details.
+See the full [Token Optimization Guide](./docs/user-docs/token-optimization.md) for details.
 
 ### Bundled Tools
 
@@ -574,13 +569,15 @@ GSD ships with 24 extensions, all loaded automatically:
 
 ### Bundled Agents
 
-Three specialized subagents for delegated work:
+Five specialized subagents for delegated work:
 
-| Agent          | Role                                                         |
-| -------------- | ------------------------------------------------------------ |
-| **Scout**      | Fast codebase recon — returns compressed context for handoff |
-| **Researcher** | Web research — finds and synthesizes current information     |
-| **Worker**     | General-purpose execution in an isolated context window      |
+| Agent               | Role                                                         |
+| ------------------- | ------------------------------------------------------------ |
+| **Scout**           | Fast codebase recon — returns compressed context for handoff |
+| **Researcher**      | Web research — finds and synthesizes current information     |
+| **Worker**          | General-purpose execution in an isolated context window      |
+| **JavaScript Pro**  | JavaScript-specialized execution and debugging               |
+| **TypeScript Pro**  | TypeScript-specialized execution and debugging               |
 
 ---
 
@@ -655,9 +652,8 @@ gsd (CLI binary)
           ├─ resource-loader.ts  Syncs bundled extensions + agents to ~/.gsd/agent/
           └─ src/resources/
               ├─ extensions/gsd/    Core GSD extension (auto, state, commands, ...)
-              ├─ extensions/...     23 supporting extensions
-              ├─ agents/            scout, researcher, worker
-              ├─ AGENTS.md          Agent routing instructions
+              ├─ extensions/...     21 supporting extensions
+              ├─ agents/            scout, researcher, worker, javascript-pro, typescript-pro
               └─ GSD-WORKFLOW.md    Manual bootstrap protocol
 ```
 
