@@ -194,7 +194,7 @@ export async function autoLoop(
 
         // Verification passed — mark step complete
         debugLog("autoLoop", { phase: "custom-engine-reconcile", iteration, unitId: iterData.unitId });
-        await engine.reconcile(engineState, {
+        const reconcileResult = await engine.reconcile(engineState, {
           unitType: iterData.unitType,
           unitId: iterData.unitId,
           startedAt: s.currentUnit?.startedAt ?? Date.now(),
@@ -206,6 +206,19 @@ export async function autoLoop(
         recentErrorMessages.length = 0;
         deps.emitJournalEvent({ ts: new Date().toISOString(), flowId, seq: nextSeq(), eventType: "iteration-end", data: { iteration } });
         debugLog("autoLoop", { phase: "iteration-complete", iteration });
+
+        if (reconcileResult.outcome === "milestone-complete") {
+          await deps.stopAuto(ctx, pi, "Workflow complete");
+          break;
+        }
+        if (reconcileResult.outcome === "pause") {
+          await deps.pauseAuto(ctx, pi);
+          break;
+        }
+        if (reconcileResult.outcome === "stop") {
+          await deps.stopAuto(ctx, pi, reconcileResult.reason ?? "Engine stopped");
+          break;
+        }
         continue;
       }
 

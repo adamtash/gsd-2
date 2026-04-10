@@ -14,6 +14,7 @@ import {
 } from "@gsd/pi-tui";
 import type { AuthCredentialStatus, AuthStorage } from "../../../core/auth-storage.js";
 import { getDiscoverableProviders } from "../../../core/model-discovery.js";
+import { providerDisplayName } from "./model-selector.js";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";

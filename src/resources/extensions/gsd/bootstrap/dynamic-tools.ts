@@ -75,12 +75,9 @@ export function resolveProjectRootDbPath(basePath: string): string {
   return join(basePath, ".gsd", "gsd.db");
 }
 
-export async function ensureDbOpen(): Promise<boolean> {
+export async function ensureDbOpen(basePath: string = process.cwd()): Promise<boolean> {
   try {
     const db = await import("../gsd-db.js");
-    if (db.isDbAvailable()) return true;
-
-    const basePath = process.cwd();
     const dbPath = resolveProjectRootDbPath(basePath);
     const gsdDir = join(basePath, ".gsd");
 
@@ -194,4 +191,3 @@ export function registerDynamicTools(pi: ExtensionAPI): void {
     },
   } as any);
 }
-

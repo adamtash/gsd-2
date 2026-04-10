@@ -67,6 +67,7 @@ export interface LogEntry {
 const MAX_BUFFER = 100;
 let _buffer: LogEntry[] = [];
 let _auditBasePath: string | null = null;
+let _stderrEnabled = true;
 
 /**
  * Set the base path for persistent audit log writes.
@@ -75,6 +76,16 @@ let _auditBasePath: string | null = null;
  */
 export function setLogBasePath(basePath: string): void {
   _auditBasePath = basePath;
+}
+
+/**
+ * Enable or disable immediate stderr writes for workflow logs.
+ * Returns the previous setting so callers can restore it.
+ */
+export function setStderrLoggingEnabled(enabled: boolean): boolean {
+  const previous = _stderrEnabled;
+  _stderrEnabled = enabled;
+  return previous;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────
@@ -245,7 +256,7 @@ function _push(
   // Always forward to stderr so terminal watchers see it (see module header for policy)
   const prefix = severity === "error" ? "ERROR" : "WARN";
   const ctxStr = context ? ` ${JSON.stringify(context)}` : "";
-  process.stderr.write(`[gsd:${component}] ${prefix}: ${message}${ctxStr}\n`);
+  _writeStderr(`[gsd:${component}] ${prefix}: ${message}${ctxStr}\n`);
 
   // Persist to notification store (both warnings and errors)
   try {
@@ -255,7 +266,7 @@ function _push(
       "workflow-logger",
     );
   } catch (notifErr) {
-    process.stderr.write(`[gsd:workflow-logger] notification-store append failed: ${(notifErr as Error).message}\n`);
+    _writeStderr(`[gsd:workflow-logger] notification-store append failed: ${(notifErr as Error).message}\n`);
   }
 
   // Buffer for auto-loop to drain
@@ -275,9 +286,14 @@ function _push(
       appendFileSync(join(auditDir, "audit-log.jsonl"), JSON.stringify(sanitized) + "\n", "utf-8");
     } catch (auditErr) {
       // Best-effort — never let audit write failures bubble up
-      process.stderr.write(`[gsd:audit] failed to persist log entry: ${(auditErr as Error).message}\n`);
+      _writeStderr(`[gsd:audit] failed to persist log entry: ${(auditErr as Error).message}\n`);
     }
   }
+}
+
+function _writeStderr(message: string): void {
+  if (!_stderrEnabled) return;
+  process.stderr.write(message);
 }
 
 /**

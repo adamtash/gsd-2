@@ -82,7 +82,7 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
 import { appKey, appKeyHint, editorKey, formatKeyForDisplay, keyHint, rawKeyHint } from "./components/keybinding-hints.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
-import { ModelSelectorComponent } from "./components/model-selector.js";
+import { ModelSelectorComponent, providerDisplayName } from "./components/model-selector.js";
 import { OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { ProviderManagerComponent } from "./components/provider-manager.js";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.js";
@@ -93,6 +93,7 @@ import { ToolExecutionComponent } from "./components/tool-execution.js";
 import { TreeSelectorComponent } from "./components/tree-selector.js";
 import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
+import { ContextualTips } from "../../core/contextual-tips.js";
 import { type SlashCommandContext, dispatchSlashCommand, getAppKeyDisplay } from "./slash-command-handlers.js";
 import { handleAgentEvent } from "./controllers/chat-controller.js";
 import { createExtensionUIContext as buildExtensionUIContext } from "./controllers/extension-ui-controller.js";
@@ -216,6 +217,9 @@ export class InteractiveMode {
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
+
+	// Contextual tips — session-scoped, non-intrusive hints
+	private contextualTips = new ContextualTips();
 
 	// Track current bash execution component
 	private bashComponent: BashExecutionComponent | undefined = undefined;
@@ -341,7 +345,7 @@ export class InteractiveMode {
 				return filtered.map((item) => ({
 					value: item.label,
 					label: item.id,
-					description: item.provider,
+					description: providerDisplayName(item.provider),
 				}));
 			};
 		}
@@ -2596,6 +2600,16 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	showTip(message: string): void {
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(theme.fg("dim", `💡 ${message}`), 1, 0));
+		this.ui.requestRender();
+	}
+
+	getContextPercent(): number | undefined {
+		return this.session.getContextUsage()?.percent ?? undefined;
+	}
+
 	showNewVersionNotification(newVersion: string): void {
 		const action = theme.fg("accent", getUpdateInstruction("@gsd/pi-coding-agent"));
 		const updateInstruction = theme.fg("muted", `New version ${newVersion} is available. `) + action;
@@ -3967,6 +3981,9 @@ export class InteractiveMode {
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
+
+		// Reset contextual tips for the new session
+		this.contextualTips.reset();
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));

@@ -134,6 +134,19 @@ describe("repairToolJson — XML parameter tag stripping (#3403)", () => {
 		assert.ok(!repaired.includes("<parameter"), "XML tags should be stripped");
 		assert.ok(repaired.includes("all tests pass"), "content should be preserved");
 	});
+
+	test("promotes XML parameters trapped inside valid JSON string values", () => {
+		const malformed =
+			'{"narrative":"text.</narrative>\\n<parameter name=\\"verification\\">all tests pass</parameter>\\n<parameter name=\\"verificationEvidence\\">[\\"npm test\\"]</parameter>","oneLiner":"done"}';
+		const repaired = repairToolJson(malformed);
+		const parsed = JSON.parse(repaired);
+
+		assert.equal(parsed.narrative, "text.");
+		assert.equal(parsed.verification, "all tests pass");
+		assert.deepEqual(parsed.verificationEvidence, ["npm test"]);
+		assert.equal(parsed.oneLiner, "done");
+		assert.ok(!parsed.narrative.includes("<parameter"), "narrative should not retain leaked XML");
+	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

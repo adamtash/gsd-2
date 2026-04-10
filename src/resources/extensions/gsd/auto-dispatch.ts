@@ -178,7 +178,7 @@ export function incrementUatCount(basePath: string, mid: string, sid: string): n
 export function isVerificationNotApplicable(value: string): boolean {
   const v = (value ?? "").toLowerCase().trim().replace(/[.\s]+$/, "");
   if (!v || v === "none") return true;
-  return /^(?:none[\s._-]*(?:required|needed|planned)?|n\/?a|not[\s._-]+(?:applicable|required|needed|provided)|no[\s._-]+operational[\s\S]*)$/i.test(v);
+  return /^(?:none(?:[\s._\u2014-]+[\s\S]*)?|n\/?a|not[\s._-]+(?:applicable|required|needed|provided)|no[\s._-]+operational[\s\S]*)$/i.test(v);
 }
 
 // ─── Rules ────────────────────────────────────────────────────────────────
@@ -379,40 +379,8 @@ export const DISPATCH_RULES: DispatchRule[] = [
     },
   },
   {
-    name: "planning (no research, not S01) → research-slice",
-    match: async ({ state, mid, midTitle, basePath, prefs }) => {
-      if (state.phase !== "planning") return null;
-      // Phase skip: skip research when preference or profile says so
-      if (prefs?.phases?.skip_research || prefs?.phases?.skip_slice_research)
-        return null;
-      if (!state.activeSlice) return missingSliceStop(mid, state.phase);
-      const sid = state.activeSlice!.id;
-      const sTitle = state.activeSlice!.title;
-      const researchFile = resolveSliceFile(basePath, mid, sid, "RESEARCH");
-      if (researchFile) return null; // has research, fall through
-      // Skip slice research for S01 when milestone research already exists —
-      // the milestone research already covers the same ground for the first slice.
-      const milestoneResearchFile = resolveMilestoneFile(
-        basePath,
-        mid,
-        "RESEARCH",
-      );
-      if (milestoneResearchFile && sid === "S01") return null; // fall through to plan-slice
-      return {
-        action: "dispatch",
-        unitType: "research-slice",
-        unitId: `${mid}/${sid}`,
-        prompt: await buildResearchSlicePrompt(
-          mid,
-          midTitle,
-          sid,
-          sTitle,
-          basePath,
-        ),
-      };
-    },
-  },
-  {
+    // Keep this rule before the single-slice research rule so the multi-slice
+    // path wins whenever 2+ slices are ready.
     name: "planning (multiple slices need research) → parallel-research-slices",
     match: async ({ state, mid, midTitle, basePath, prefs }) => {
       if (state.phase !== "planning") return null;
@@ -454,6 +422,40 @@ export const DISPATCH_RULES: DispatchRule[] = [
           mid,
           midTitle,
           researchReadySlices,
+          basePath,
+        ),
+      };
+    },
+  },
+  {
+    name: "planning (no research, not S01) → research-slice",
+    match: async ({ state, mid, midTitle, basePath, prefs }) => {
+      if (state.phase !== "planning") return null;
+      // Phase skip: skip research when preference or profile says so
+      if (prefs?.phases?.skip_research || prefs?.phases?.skip_slice_research)
+        return null;
+      if (!state.activeSlice) return missingSliceStop(mid, state.phase);
+      const sid = state.activeSlice!.id;
+      const sTitle = state.activeSlice!.title;
+      const researchFile = resolveSliceFile(basePath, mid, sid, "RESEARCH");
+      if (researchFile) return null; // has research, fall through
+      // Skip slice research for S01 when milestone research already exists —
+      // the milestone research already covers the same ground for the first slice.
+      const milestoneResearchFile = resolveMilestoneFile(
+        basePath,
+        mid,
+        "RESEARCH",
+      );
+      if (milestoneResearchFile && sid === "S01") return null; // fall through to plan-slice
+      return {
+        action: "dispatch",
+        unitType: "research-slice",
+        unitId: `${mid}/${sid}`,
+        prompt: await buildResearchSlicePrompt(
+          mid,
+          midTitle,
+          sid,
+          sTitle,
           basePath,
         ),
       };
@@ -883,4 +885,3 @@ export async function resolveDispatch(
 export function getDispatchRuleNames(): string[] {
   return DISPATCH_RULES.map((r) => r.name);
 }
-

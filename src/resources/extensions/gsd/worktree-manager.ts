@@ -124,8 +124,9 @@ export function worktreeBranchName(name: string): string {
  * nativeWorktreeRemove --force) to prevent #2365-style data loss.
  */
 export function isInsideWorktreesDir(basePath: string, targetPath: string): boolean {
-  const wtDir = resolve(worktreesDir(basePath));
-  const resolved = resolve(targetPath);
+  const wtDirPath = worktreesDir(basePath);
+  const wtDir = existsSync(wtDirPath) ? realpathSync(wtDirPath) : resolve(wtDirPath);
+  const resolved = existsSync(targetPath) ? realpathSync(targetPath) : resolve(targetPath);
   // The resolved path must start with the worktrees dir followed by a separator,
   // not merely be a prefix match (e.g. ".gsd/worktrees-extra" must not match).
   return resolved === wtDir || resolved.startsWith(wtDir + sep);
@@ -517,6 +518,9 @@ export function removeWorktree(
           rmSync(wtInternalDir, { recursive: true, force: true });
         }
         rmSync(resolvedWtPath, { recursive: true, force: true });
+        if (wtPath !== resolvedWtPath && existsSync(wtPath)) {
+          rmSync(wtPath, { recursive: true, force: true });
+        }
       } catch {
         logWarning(
           "reconcile",

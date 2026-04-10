@@ -329,8 +329,17 @@ export function resolveModelId<T extends { id: string; provider: string }>(
   if (candidates.length === 0) return undefined;
   if (candidates.length === 1) return candidates[0];
 
-  // Extension / CLI-wrapper providers that should never win bare-ID resolution
-  // when a first-class API provider also offers the same model.
+  // When the user's current provider is claude-code (set by startup migration
+  // or explicit selection), honour it for bare IDs.  Routing back to anthropic
+  // would undo the migration and hit the third-party subscription block (#3772).
+  if (currentProvider === "claude-code") {
+    const ccMatch = candidates.find(m => m.provider === "claude-code");
+    if (ccMatch) return ccMatch;
+  }
+
+  // Extension / CLI-wrapper providers that should not win bare-ID resolution
+  // when a first-class API provider also offers the same model AND the user
+  // has not explicitly chosen the extension provider.
   const EXTENSION_PROVIDERS = new Set(["claude-code"]);
 
   // Prefer currentProvider only when it is a first-class API provider

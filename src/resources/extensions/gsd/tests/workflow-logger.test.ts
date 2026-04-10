@@ -18,6 +18,7 @@ import {
   summarizeLogs,
   formatForNotification,
   setLogBasePath,
+  setStderrLoggingEnabled,
   _resetLogs,
 } from "../workflow-logger.ts";
 
@@ -374,6 +375,21 @@ describe("workflow-logger", () => {
 
       logError("tool", "failed", { cmd: "complete_task" });
       assert.ok(written[0].includes('"cmd":"complete_task"'));
+    });
+
+    test("suppresses stderr when disabled", (t) => {
+      const written: string[] = [];
+      const orig = process.stderr.write.bind(process.stderr);
+      const previous = setStderrLoggingEnabled(false);
+      // @ts-ignore — patching for test
+      process.stderr.write = (chunk: string) => { written.push(chunk); return true; };
+      t.after(() => {
+        process.stderr.write = orig;
+        setStderrLoggingEnabled(previous);
+      });
+
+      logWarning("engine", "hidden warning");
+      assert.deepEqual(written, []);
     });
   });
 });

@@ -6,6 +6,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.67.0] - 2026-04-09
+
+### Added
+- **context**: implement R005 decision scope cascade and derive scope from slice metadata
+- **M005**: Tiered Context Injection - relevance-scoped context with 65%+ reduction
+
+### Fixed
+- **test**: align auto-loop test timers with updated session timeout
+- **gsd**: repair CI after branch split
+- **gsd**: repair CI after branch split
+- **gsd**: repair CI after branch split
+- **gsd**: fail closed for discussion gate enforcement
+- **gsd**: harden auto merge recovery and session safety
+- **gsd**: repair overlay, shortcut, and widget surfaces
+- **gsd**: prevent stale workflow reconcile state writes
+- **gsd**: align prompt contracts and validation flow
+- **pi-tui**: harden input parsing and editor focus behavior
+- **remote-questions**: cancel local TUI when remote answer wins the race
+- **auto**: increase session timeout to 120s and treat timeout as recoverable pause (#3767)
+- **ui**: apply anthropic-api display name to all model/provider UI surfaces
+- **ui**: display 'anthropic-api' in GSD preferences wizard provider list
+- **remote-questions**: race local TUI against remote channel instead of remote-only routing
+- **ui**: display 'anthropic-api' in model selector to distinguish from claude-code
+- **gates**: add mechanical enforcement for discussion question gates
+- **prompts**: harden non-bypassable gates and exclude dot-folders from scanning
+- **gsd**: ignore filename headings in parsePlan
+- **providers**: match 'out of extra usage' error and respect claude-code provider in model resolution (#3772)
+- **pi-ai**: recover XML parameters trapped in JSON strings
+- **retry**: guard claude-code fallback to anthropic provider only
+- **providers**: route Anthropic subscription users through Claude Code CLI (#3772)
+- **claude-code**: use native Windows claude lookup
+- **gsd**: suppress repeated preferences section warnings
+- **gsd**: normalize described expected output paths
+- **auto**: resilient transient error recovery — defer to Core RetryHandler and fix cmdCtx race
+
 ## [2.66.1] - 2026-04-08
 
 ### Fixed
@@ -2566,7 +2601,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.66.1...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.67.0...HEAD
+[2.67.0]: https://github.com/gsd-build/gsd-2/compare/v2.66.1...v2.67.0
 [2.66.1]: https://github.com/gsd-build/gsd-2/compare/v2.66.0...v2.66.1
 [2.66.0]: https://github.com/gsd-build/gsd-2/compare/v2.65.0...v2.66.0
 [2.65.0]: https://github.com/gsd-build/gsd-2/compare/v2.64.0...v2.65.0

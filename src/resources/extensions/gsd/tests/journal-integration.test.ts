@@ -72,7 +72,7 @@ function makeMockDeps(
     getCurrentBranch: () => "main",
     autoWorktreeBranch: () => "auto/M001",
     resolveMilestoneFile: () => null,
-    reconcileMergeState: () => false,
+    reconcileMergeState: () => "clean",
     getLedger: () => ({ units: [] }),
     getProjectTotals: () => ({ cost: 0 }),
     formatCost: (c: number) => `$${c.toFixed(2)}`,

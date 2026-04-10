@@ -13,7 +13,7 @@ import { appendEvent } from "./workflow-events.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { clearParseCache } from "./files.js";
 import { parseRoadmap as parseLegacyRoadmap, parsePlan as parseLegacyPlan } from "./parsers-legacy.js";
-import { isDbAvailable, getTask, getSlice, getSliceTasks, updateTaskStatus, updateSliceStatus } from "./gsd-db.js";
+import { isDbAvailable, getTask, getSlice, getSliceTasks, getPendingGates, updateTaskStatus, updateSliceStatus } from "./gsd-db.js";
 import { isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
@@ -248,8 +248,7 @@ export function verifyExpectedArtifact(
     if (gateIds.length === 0) return true;
 
     try {
-      const { getPendingGates: getPending } = require("./gsd-db.js");
-      const pending = getPending(mid, sid, "slice");
+      const pending = getPendingGates(mid, sid, "slice");
       const pendingIds = new Set(pending.map((g: any) => g.gate_id));
       // All dispatched gates must no longer be pending
       for (const gid of gateIds) {
@@ -480,22 +479,23 @@ function abortAndResetMerge(
   }
 }
 
+export type MergeReconcileResult = "clean" | "reconciled" | "blocked";
+
 /**
  * Detect leftover merge state from a prior session and reconcile it.
  * If MERGE_HEAD or SQUASH_MSG exists, check whether conflicts are resolved.
- * If resolved: finalize the commit. If still conflicted: abort and reset.
- *
- * Returns true if state was dirty and re-derivation is needed.
+ * If resolved: finalize the commit. If only .gsd conflicts remain: auto-resolve.
+ * If code conflicts remain: fail safe without modifying the worktree.
  */
 export function reconcileMergeState(
   basePath: string,
   ctx: ExtensionContext,
-): boolean {
+): MergeReconcileResult {
   const mergeHeadPath = join(basePath, ".git", "MERGE_HEAD");
   const squashMsgPath = join(basePath, ".git", "SQUASH_MSG");
   const hasMergeHead = existsSync(mergeHeadPath);
   const hasSquashMsg = existsSync(squashMsgPath);
-  if (!hasMergeHead && !hasSquashMsg) return false;
+  if (!hasMergeHead && !hasSquashMsg) return "clean";
 
   const conflictedFiles = nativeConflictFiles(basePath);
   if (conflictedFiles.length === 0) {
@@ -511,7 +511,7 @@ export function reconcileMergeState(
     } catch (err) {
       const errorMessage = getErrorMessage(err);
       ctx.ui.notify(`Failed to finalize leftover merge/squash commit: ${errorMessage}`, "error");
-      return false;
+      return "blocked";
     }
   } else {
     // Still conflicted — try auto-resolving .gsd/ state file conflicts (#530)
@@ -551,15 +551,16 @@ export function reconcileMergeState(
         );
       }
     } else {
-      // Code conflicts present — abort and reset
-      abortAndResetMerge(basePath, hasMergeHead, squashMsgPath);
+      // Code conflicts present — fail safe and preserve any manual resolution
+      // work instead of discarding it with merge --abort/reset --hard.
       ctx.ui.notify(
-        "Detected leftover merge state with unresolved conflicts — cleaned up. Re-deriving state.",
-        "warning",
+        "Detected leftover merge state with unresolved code conflicts. Auto-mode will pause without modifying the worktree so manual conflict resolution is preserved.",
+        "error",
       );
+      return "blocked";
     }
   }
-  return true;
+  return "reconciled";
 }
 
 // ─── Loop Remediation ─────────────────────────────────────────────────────────
@@ -618,4 +619,3 @@ export function buildLoopRemediationSteps(
   }
   return null;
 }
-

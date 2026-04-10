@@ -11,6 +11,7 @@ import type { GSDState } from "./types.js";
 import { getCurrentBranch } from "./worktree.js";
 import { getActiveHook } from "./post-unit-hooks.js";
 import { getLedger, getProjectTotals } from "./metrics.js";
+import { getErrorMessage } from "./error-utils.js";
 import {
   resolveMilestoneFile,
   resolveSliceFile,
@@ -24,7 +25,11 @@ import { makeUI } from "../shared/tui.js";
 import { GLYPH, INDENT } from "../shared/mod.js";
 import { computeProgressScore } from "./progress-score.js";
 import { getActiveWorktreeName } from "./worktree-command.js";
-import { loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath } from "./preferences.js";
+import {
+  getGlobalGSDPreferencesPath,
+  getProjectGSDPreferencesPath,
+  parsePreferencesMarkdown,
+} from "./preferences.js";
 import { resolveServiceTierIcon, getEffectiveServiceTier } from "./service-tier.js";
 import { parseUnitId } from "./unit-id.js";
 import {
@@ -370,26 +375,74 @@ export type WidgetMode = "full" | "small" | "min" | "off";
 const WIDGET_MODES: WidgetMode[] = ["full", "small", "min", "off"];
 let widgetMode: WidgetMode = "full";
 let widgetModeInitialized = false;
+let widgetModePreferencePath: string | null = null;
 
-/** Load widget mode from preferences (once). */
-function ensureWidgetModeLoaded(): void {
-  if (widgetModeInitialized) return;
-  widgetModeInitialized = true;
+function safeReadTextFile(path: string): string | null {
   try {
-    const loaded = loadEffectiveGSDPreferences();
-    const saved = loaded?.preferences?.widget_mode;
-    if (saved && WIDGET_MODES.includes(saved as WidgetMode)) {
-      widgetMode = saved as WidgetMode;
-    }
-  } catch (err) { /* non-fatal — use default */
-    logWarning("dashboard", `operation failed: ${err instanceof Error ? err.message : String(err)}`);
+    if (!existsSync(path)) return null;
+    return readFileSync(path, "utf-8");
+  } catch {
+    return null;
   }
 }
 
-/** Persist widget mode to global preferences YAML. */
-function persistWidgetMode(mode: WidgetMode): void {
+function readWidgetModeFromFile(path: string): WidgetMode | undefined {
+  const raw = safeReadTextFile(path);
+  if (!raw) return undefined;
+  const prefs = parsePreferencesMarkdown(raw);
+  const saved = prefs?.widget_mode;
+  if (saved && WIDGET_MODES.includes(saved as WidgetMode)) {
+    return saved as WidgetMode;
+  }
+  return undefined;
+}
+
+function resolveWidgetModePreferencePath(
+  projectPath = getProjectGSDPreferencesPath(),
+  globalPath = getGlobalGSDPreferencesPath(),
+): string {
+  if (readWidgetModeFromFile(projectPath)) {
+    return projectPath;
+  }
+
+  if (readWidgetModeFromFile(globalPath)) {
+    return globalPath;
+  }
+
+  if (safeReadTextFile(projectPath) !== null) return projectPath;
+  if (safeReadTextFile(globalPath) !== null) return globalPath;
+  return getGlobalGSDPreferencesPath();
+}
+
+/** Load widget mode from preferences (once). */
+function ensureWidgetModeLoaded(projectPath?: string, globalPath?: string): void {
+  if (widgetModeInitialized) return;
+  widgetModeInitialized = true;
   try {
-    const prefsPath = getGlobalGSDPreferencesPath();
+    const resolvedProjectPath = projectPath ?? getProjectGSDPreferencesPath();
+    const resolvedGlobalPath = globalPath ?? getGlobalGSDPreferencesPath();
+    const saved = readWidgetModeFromFile(resolvedProjectPath) ?? readWidgetModeFromFile(resolvedGlobalPath);
+    if (saved && WIDGET_MODES.includes(saved as WidgetMode)) {
+      widgetMode = saved as WidgetMode;
+    }
+    widgetModePreferencePath = resolveWidgetModePreferencePath(resolvedProjectPath, resolvedGlobalPath);
+  } catch (err) { /* non-fatal — use default */
+    logWarning("dashboard", `operation failed: ${getErrorMessage(err)}`);
+    widgetModePreferencePath = getGlobalGSDPreferencesPath();
+  }
+}
+
+/**
+ * Persist widget mode to the preference file that owns the effective value.
+ * Project-scoped widget_mode wins over global; if neither scope defines it,
+ * we prefer an existing project preferences file and otherwise fall back to
+ * the global preferences file.
+ */
+function persistWidgetMode(
+  mode: WidgetMode,
+  prefsPath = widgetModePreferencePath ?? resolveWidgetModePreferencePath(),
+): void {
+  try {
     let content = "";
     if (existsSync(prefsPath)) {
       content = readFileSync(prefsPath, "utf-8");
@@ -408,24 +461,32 @@ function persistWidgetMode(mode: WidgetMode): void {
 }
 
 /** Cycle to the next widget mode. Returns the new mode. */
-export function cycleWidgetMode(): WidgetMode {
-  ensureWidgetModeLoaded();
+export function cycleWidgetMode(projectPath?: string, globalPath?: string): WidgetMode {
+  ensureWidgetModeLoaded(projectPath, globalPath);
   const idx = WIDGET_MODES.indexOf(widgetMode);
   widgetMode = WIDGET_MODES[(idx + 1) % WIDGET_MODES.length];
-  persistWidgetMode(widgetMode);
+  persistWidgetMode(widgetMode, widgetModePreferencePath ?? resolveWidgetModePreferencePath(projectPath, globalPath));
   return widgetMode;
 }
 
 /** Set widget mode directly. */
-export function setWidgetMode(mode: WidgetMode): void {
+export function setWidgetMode(mode: WidgetMode, projectPath?: string, globalPath?: string): void {
+  ensureWidgetModeLoaded(projectPath, globalPath);
   widgetMode = mode;
-  persistWidgetMode(widgetMode);
+  persistWidgetMode(widgetMode, widgetModePreferencePath ?? resolveWidgetModePreferencePath(projectPath, globalPath));
 }
 
 /** Get current widget mode. */
-export function getWidgetMode(): WidgetMode {
-  ensureWidgetModeLoaded();
+export function getWidgetMode(projectPath?: string, globalPath?: string): WidgetMode {
+  ensureWidgetModeLoaded(projectPath, globalPath);
   return widgetMode;
+}
+
+/** Test-only reset for widget mode caching. */
+export function _resetWidgetModeForTests(): void {
+  widgetMode = "full";
+  widgetModeInitialized = false;
+  widgetModePreferencePath = null;
 }
 
 // ─── Progress Widget ──────────────────────────────────────────────────────────
@@ -901,4 +962,3 @@ function padToWidth(s: string, colWidth: number): string {
   if (vis >= colWidth) return truncateToWidth(s, colWidth, "…");
   return s + " ".repeat(colWidth - vis);
 }
-

@@ -55,6 +55,45 @@ export function hasTruncatedNumbers(json: string): boolean {
 	return /:\s*,/.test(json) || /:\s*-\s*[,}]/.test(json);
 }
 
+type XmlParameterBlock = {
+	name: string;
+	value: unknown;
+};
+
+const xmlParameterBlockPattern = /<parameter\s+name="([^"]+)"\s*>([\s\S]*?)<\/parameter>/g;
+
+function parseXmlParameterValue(raw: string): unknown {
+	const trimmed = raw.trim();
+	if (trimmed === "") return "";
+	try {
+		return JSON.parse(trimmed);
+	} catch {
+		return trimmed;
+	}
+}
+
+function extractXmlParameterBlocks(text: string): XmlParameterBlock[] {
+	const blocks: XmlParameterBlock[] = [];
+	for (const match of text.matchAll(xmlParameterBlockPattern)) {
+		blocks.push({
+			name: match[1],
+			value: parseXmlParameterValue(match[2] ?? ""),
+		});
+	}
+	return blocks;
+}
+
+function trimLeakedXmlTail(fieldName: string, value: string): string {
+	let cut = value.length;
+	const parameterIndex = value.indexOf("<parameter");
+	if (parameterIndex >= 0) cut = Math.min(cut, parameterIndex);
+
+	const closingTagIndex = value.indexOf(`</${fieldName}>`);
+	if (closingTagIndex >= 0) cut = Math.min(cut, closingTagIndex);
+
+	return value.slice(0, cut).trimEnd();
+}
+
 /**
  * Strip XML `<parameter>` tags from a JSON string, leaving only the
  * text content. This handles the case where the LLM mixes XML
@@ -66,6 +105,35 @@ function stripXmlParameterTags(json: string): string {
 	// Remove closing tags: </parameter>
 	cleaned = cleaned.replace(/<\/parameter>/g, "");
 	return cleaned;
+}
+
+function promoteXmlParametersToTopLevel(json: string): string {
+	try {
+		const parsed = JSON.parse(json) as Record<string, unknown>;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			return stripXmlParameterTags(json);
+		}
+
+		let changed = false;
+		for (const [fieldName, value] of Object.entries(parsed)) {
+			if (typeof value !== "string" || !hasXmlParameterTags(value)) continue;
+
+			const blocks = extractXmlParameterBlocks(value);
+			if (blocks.length === 0) continue;
+
+			parsed[fieldName] = trimLeakedXmlTail(fieldName, value);
+			for (const block of blocks) {
+				if (!(block.name in parsed)) {
+					parsed[block.name] = block.value;
+				}
+			}
+			changed = true;
+		}
+
+		return changed ? JSON.stringify(parsed) : stripXmlParameterTags(json);
+	} catch {
+		return stripXmlParameterTags(json);
+	}
 }
 
 /**
@@ -97,7 +165,7 @@ export function repairToolJson(json: string): string {
 
 	// Phase 1: Strip XML parameter tags
 	if (hasXmlParameterTags(repaired)) {
-		repaired = stripXmlParameterTags(repaired);
+		repaired = promoteXmlParametersToTopLevel(repaired);
 	}
 
 	// Phase 2: Repair truncated numbers

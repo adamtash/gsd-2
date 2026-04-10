@@ -67,7 +67,7 @@ export interface SidecarItem {
 export const MAX_UNIT_DISPATCHES = 3;
 export const STUB_RECOVERY_THRESHOLD = 2;
 export const MAX_LIFETIME_DISPATCHES = 6;
-export const NEW_SESSION_TIMEOUT_MS = 30_000;
+export const NEW_SESSION_TIMEOUT_MS = 120_000;
 
 // ─── AutoSession ─────────────────────────────────────────────────────────────
 
@@ -84,6 +84,9 @@ export class AutoSession {
   // ── Paths ────────────────────────────────────────────────────────────────
   basePath = "";
   originalBasePath = "";
+  previousProjectRootEnv: string | null = null;
+  hadProjectRootEnv = false;
+  projectRootEnvCaptured = false;
   gitService: GitServiceImpl | null = null;
 
   // ── Dispatch counters ────────────────────────────────────────────────────
@@ -116,6 +119,8 @@ export class AutoSession {
   pendingVerificationRetry: PendingVerificationRetry | null = null;
   readonly verificationRetryCount = new Map<string, number>();
   pausedSessionFile: string | null = null;
+  pausedUnitType: string | null = null;
+  pausedUnitId: string | null = null;
   resourceVersionOnStart: string | null = null;
   lastStateRebuildAt = 0;
 
@@ -192,6 +197,9 @@ export class AutoSession {
     // Paths
     this.basePath = "";
     this.originalBasePath = "";
+    this.previousProjectRootEnv = null;
+    this.hadProjectRootEnv = false;
+    this.projectRootEnvCaptured = false;
     this.gitService = null;
 
     // Dispatch
@@ -217,6 +225,8 @@ export class AutoSession {
     this.pendingVerificationRetry = null;
     this.verificationRetryCount.clear();
     this.pausedSessionFile = null;
+    this.pausedUnitType = null;
+    this.pausedUnitId = null;
     this.resourceVersionOnStart = null;
     this.lastStateRebuildAt = 0;
 

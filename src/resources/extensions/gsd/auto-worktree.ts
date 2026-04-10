@@ -1137,6 +1137,7 @@ function copyPlanningArtifacts(srcBase: string, wtPath: string): void {
   const srcGsd = join(srcBase, ".gsd");
   const dstGsd = join(wtPath, ".gsd");
   if (!existsSync(srcGsd)) return;
+  if (isSamePath(srcGsd, dstGsd)) return;
 
   // Copy milestones/ directory (planning files, roadmaps, plans, research)
   safeCopyRecursive(join(srcGsd, "milestones"), join(dstGsd, "milestones"), {
@@ -1420,8 +1421,31 @@ export function mergeMilestoneToMain(
   const worktreeCwd = process.cwd();
   const milestoneBranch = autoWorktreeBranch(milestoneId);
 
-  // 1. Auto-commit dirty state in worktree before leaving
-  autoCommitDirtyState(worktreeCwd);
+  // 1. Auto-commit dirty state before leaving.
+  //    Guard: when we entered through an auto-worktree (originalBase is set),
+  //    only auto-commit when cwd is on the milestone branch. In parallel mode,
+  //    cwd may be on the integration branch after a prior merge's
+  //    MergeConflictError left cwd unrestored. Auto-committing on the
+  //    integration branch captures dirty files from OTHER milestones under a
+  //    misleading commit message, contaminating the main branch (#2929).
+  //
+  //    When originalBase is null (branch mode, no worktree), autoCommitDirtyState
+  //    runs unconditionally — the caller is responsible for cwd placement.
+  {
+    let shouldAutoCommit = true;
+    if (originalBase !== null) {
+      try {
+        const currentBranch = nativeGetCurrentBranch(worktreeCwd);
+        shouldAutoCommit = currentBranch === milestoneBranch;
+      } catch {
+        // If we can't determine the branch, skip the auto-commit to be safe
+        shouldAutoCommit = false;
+      }
+    }
+    if (shouldAutoCommit) {
+      autoCommitDirtyState(worktreeCwd);
+    }
+  }
 
   // Reconcile worktree DB into main DB before leaving worktree context.
   // Skip when both paths resolve to the same physical file (shared WAL /
@@ -1778,6 +1802,12 @@ export function mergeMilestoneToMain(
           }
         }
         restoreShelter();
+        // Restore cwd so the caller is not stranded on the integration branch.
+        // Without this, the next mergeMilestoneToMain call in a parallel merge
+        // sequence uses process.cwd() (now the project root) as worktreeCwd,
+        // causing autoCommitDirtyState to commit unrelated milestone files to
+        // the integration branch (#2929).
+        process.chdir(previousCwd);
         throw new MergeConflictError(
           codeConflicts,
           "squash",
@@ -1975,23 +2005,38 @@ export function mergeMilestoneToMain(
   // changes (e.g. nativeHasChanges cache returned stale false, or auto-commit
   // silently failed), force one final commit so code is not destroyed by
   // `git worktree remove --force`.
+  //
+  // Guard: only run when worktreeCwd is on the milestone branch (#2929).
+  // In parallel mode or branch-mode merges, worktreeCwd may be the project
+  // root on the integration branch. Committing dirty state there would
+  // capture unrelated files from other milestones.
   if (existsSync(worktreeCwd)) {
+    let preTeardownBranch: string | null = null;
     try {
-      const dirtyCheck = nativeWorkingTreeStatus(worktreeCwd);
-      if (dirtyCheck) {
+      preTeardownBranch = nativeGetCurrentBranch(worktreeCwd);
+    } catch (err) {
+      debugLog("mergeMilestoneToMain", { phase: "pre-teardown-branch-detect-failed", error: String(err) });
+    }
+    const isOnMilestoneBranch = preTeardownBranch === milestoneBranch;
+
+    if (isOnMilestoneBranch) {
+      try {
+        const dirtyCheck = nativeWorkingTreeStatus(worktreeCwd);
+        if (dirtyCheck) {
+          debugLog("mergeMilestoneToMain", {
+            phase: "pre-teardown-dirty",
+            worktreeCwd,
+            status: dirtyCheck.slice(0, 200),
+          });
+          nativeAddAllWithExclusions(worktreeCwd, RUNTIME_EXCLUSION_PATHS);
+          nativeCommit(worktreeCwd, "chore: pre-teardown auto-commit of uncommitted worktree changes");
+        }
+      } catch (e) {
         debugLog("mergeMilestoneToMain", {
-          phase: "pre-teardown-dirty",
-          worktreeCwd,
-          status: dirtyCheck.slice(0, 200),
+          phase: "pre-teardown-commit-error",
+          error: String(e),
         });
-        nativeAddAllWithExclusions(worktreeCwd, RUNTIME_EXCLUSION_PATHS);
-        nativeCommit(worktreeCwd, "chore: pre-teardown auto-commit of uncommitted worktree changes");
       }
-    } catch (e) {
-      debugLog("mergeMilestoneToMain", {
-        phase: "pre-teardown-commit-error",
-        error: String(e),
-      });
     }
   }
 
@@ -2020,4 +2065,3 @@ export function mergeMilestoneToMain(
 
   return { commitMessage, pushed, prCreated, codeFilesChanged };
 }
-

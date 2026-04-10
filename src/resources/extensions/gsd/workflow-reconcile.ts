@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { mkdirSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { logWarning, logError } from "./workflow-logger.js";
-import { readEvents, findForkPoint, appendEvent, getSessionId } from "./workflow-events.js";
+import { readEvents, findForkPoint, getSessionId } from "./workflow-events.js";
 import type { WorkflowEvent } from "./workflow-events.js";
 import {
   transaction,
@@ -249,11 +249,6 @@ export function extractEntityKey(
         ? { type: "slice", id: p["sliceId"] }
         : null;
 
-    case "complete_milestone":
-      return typeof p["milestoneId"] === "string"
-        ? { type: "milestone", id: p["milestoneId"] }
-        : null;
-
     case "plan_slice":
       return typeof p["sliceId"] === "string"
         ? { type: "slice_plan", id: p["sliceId"] }
@@ -327,6 +322,41 @@ export function detectConflicts(
   }
 
   return conflicts;
+}
+
+function rewriteDivergedEventsForEntity(
+  divergedEvents: WorkflowEvent[],
+  entityType: string,
+  entityId: string,
+  replacementEvents: WorkflowEvent[],
+): WorkflowEvent[] {
+  const rewritten: WorkflowEvent[] = [];
+  let inserted = false;
+
+  for (const event of divergedEvents) {
+    const key = extractEntityKey(event);
+    if (key?.type === entityType && key.id === entityId) {
+      if (!inserted) {
+        rewritten.push(...replacementEvents);
+        inserted = true;
+      }
+      continue;
+    }
+    rewritten.push(event);
+  }
+
+  if (!inserted) {
+    rewritten.push(...replacementEvents);
+  }
+
+  return rewritten;
+}
+
+function writeEventLog(basePath: string, events: WorkflowEvent[]): void {
+  const dir = join(basePath, ".gsd");
+  mkdirSync(dir, { recursive: true });
+  const content = events.map((e) => JSON.stringify(e)).join("\n") + (events.length > 0 ? "\n" : "");
+  atomicWriteSync(join(dir, "event-log.jsonl"), content);
 }
 
 // ─── writeConflictsFile ───────────────────────────────────────────────────────
@@ -575,8 +605,8 @@ function parseEventBlock(block: string): WorkflowEvent[] {
 
 /**
  * Resolve a single conflict by picking one side's events.
- * Replays the picked events through the DB helpers, appends them to the event log,
- * and updates or removes CONFLICTS.md.
+ * Replays the picked events through the DB helpers, rewrites the chosen side's
+ * event log so the conflict is durable, and updates or removes CONFLICTS.md.
  *
  * When the last conflict is resolved, non-conflicting events from both sides
  * are also replayed (they were blocked by the all-or-nothing D-04 rule).
@@ -598,14 +628,30 @@ export function resolveConflict(
   const conflict = conflicts[idx]!;
   const eventsToReplay = pick === "main" ? conflict.mainSideEvents : conflict.worktreeSideEvents;
 
+  const mainLogPath = join(basePath, ".gsd", "event-log.jsonl");
+  const wtLogPath = join(worktreeBasePath, ".gsd", "event-log.jsonl");
+  const mainEvents = readEvents(mainLogPath);
+  const wtEvents = readEvents(wtLogPath);
+  const forkPoint = findForkPoint(mainEvents, wtEvents);
+  const mainBaseEvents = mainEvents.slice(0, forkPoint + 1);
+  const wtBaseEvents = wtEvents.slice(0, forkPoint + 1);
+  const mainDiverged = mainEvents.slice(forkPoint + 1);
+  const wtDiverged = wtEvents.slice(forkPoint + 1);
+
+  const rewrittenTargetEvents = pick === "main"
+    ? rewriteDivergedEventsForEntity(wtDiverged, entityType, entityId, eventsToReplay)
+    : rewriteDivergedEventsForEntity(mainDiverged, entityType, entityId, eventsToReplay);
+
+  const targetBasePath = pick === "main" ? worktreeBasePath : basePath;
+  const targetBaseEvents = pick === "main" ? wtBaseEvents : mainBaseEvents;
+  writeEventLog(targetBasePath, targetBaseEvents.concat(rewrittenTargetEvents));
+
   // Replay resolved events through the DB (updates DB state)
   openDatabase(join(basePath, ".gsd", "gsd.db"));
   replayEvents(eventsToReplay);
-
-  // Append resolved events to the event log
-  for (const event of eventsToReplay) {
-    appendEvent(basePath, { cmd: event.cmd, params: event.params, ts: event.ts, actor: event.actor });
-  }
+  invalidateStateCache();
+  clearPathCache();
+  clearParseCache();
 
   // Remove resolved conflict from list
   conflicts.splice(idx, 1);

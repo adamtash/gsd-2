@@ -64,6 +64,7 @@ import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { getSliceTasks } from "./gsd-db.js";
 import { runPreExecutionChecks, type PreExecutionResult } from "./pre-execution-checks.js";
 import { writePreExecutionEvidence } from "./verification-evidence.js";
+import { ensureCodebaseMapFresh } from "./codebase-generator.js";
 
 /** Maximum verification retry attempts before escalating to blocker placeholder (#2653). */
 const MAX_VERIFICATION_RETRIES = 3;
@@ -669,6 +670,35 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
 export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"continue" | "step-wizard" | "stopped"> {
   const { s, ctx, pi, buildSnapshotOpts, lockBase, stopAuto, pauseAuto, updateProgressWidget } = pctx;
 
+  if (s.currentUnit) {
+    try {
+      const codebasePrefs = loadEffectiveGSDPreferences()?.preferences?.codebase;
+      const refresh = ensureCodebaseMapFresh(
+        s.basePath,
+        codebasePrefs
+          ? {
+              excludePatterns: codebasePrefs.exclude_patterns,
+              maxFiles: codebasePrefs.max_files,
+              collapseThreshold: codebasePrefs.collapse_threshold,
+            }
+          : undefined,
+        { force: true, ttlMs: 0 },
+      );
+      if (refresh.status === "generated" || refresh.status === "updated") {
+        debugLog("postUnit", {
+          phase: "codebase-refresh",
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+          status: refresh.status,
+          fileCount: refresh.fileCount,
+          reason: refresh.reason,
+        });
+      }
+    } catch (e) {
+      logWarning("engine", `CODEBASE refresh failed: ${(e as Error).message}`);
+    }
+  }
+
   // ── Post-unit hooks ──
   if (s.currentUnit && !s.stepMode) {
     const hookUnit = checkPostUnitHooks(s.currentUnit.type, s.currentUnit.id, s.basePath);
@@ -995,4 +1025,3 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
 
   return "continue";
 }
-

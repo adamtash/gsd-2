@@ -20,10 +20,11 @@ import type { CodebaseMapOptions } from "./codebase-generator.js";
 const USAGE =
   "Usage: /gsd codebase [generate|update|stats]\n\n" +
   "  generate [--max-files N] [--collapse-threshold N]  — Generate or regenerate CODEBASE.md\n" +
-  "  update [--max-files N] [--collapse-threshold N]    — Incremental update (preserves descriptions)\n" +
+  "  update [--max-files N] [--collapse-threshold N]    — Refresh the CODEBASE.md cache immediately\n" +
   "  stats                                              — Show file count, coverage, and generation time\n" +
   "  help                                               — Show this help\n\n" +
-  "With no subcommand, shows stats if a map exists or help if not.\n\n" +
+  "With no subcommand, shows stats if a map exists or help if not.\n" +
+  "GSD also refreshes CODEBASE.md automatically before prompt injection and after completed units when tracked files change.\n\n" +
   "Configure defaults via preferences.md:\n" +
   "  codebase:\n" +
   "    exclude_patterns: [\"docs/\", \"fixtures/\"]\n" +
@@ -141,7 +142,7 @@ function showStats(basePath: string, ctx: ExtensionCommandContext): void {
     `  Undescribed: ${stats.undescribedCount}\n` +
     `  Generated: ${stats.generatedAt ?? "unknown"}\n\n` +
     (stats.undescribedCount > 0
-      ? `Tip: Run /gsd codebase update to refresh after file changes.`
+      ? `Tip: Auto-refresh keeps the cache current, but /gsd codebase update forces an immediate refresh.`
       : `Coverage is complete.`),
     "info",
   );

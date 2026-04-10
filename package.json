@@ -1,6 +1,6 @@
 {
   "name": "gsd-pi",
-  "version": "2.66.1",
+  "version": "2.67.0",
   "description": "GSD — Get Shit Done coding agent",
   "license": "MIT",
   "repository": {
@@ -46,8 +46,10 @@
     "build:pi-agent-core": "npm run build -w @gsd/pi-agent-core",
     "build:pi-coding-agent": "npm run build -w @gsd/pi-coding-agent",
     "build:native-pkg": "npm run build -w @gsd/native",
+    "build:rpc-client": "npm run build -w @gsd-build/rpc-client",
     "build:pi": "npm run build:native-pkg && npm run build:pi-tui && npm run build:pi-ai && npm run build:pi-agent-core && npm run build:pi-coding-agent",
-    "build": "npm run build:pi && tsc && npm run copy-resources && npm run copy-themes && npm run copy-export-html && node scripts/build-web-if-stale.cjs",
+    "build:mcp-server": "npm run build -w @gsd-build/mcp-server",
+    "build": "npm run build:pi && npm run build:rpc-client && npm run build:mcp-server && tsc && npm run copy-resources && npm run copy-themes && npm run copy-export-html && node scripts/build-web-if-stale.cjs",
     "stage:web-host": "node scripts/stage-web-standalone.cjs",
     "build:web-host": "npm --prefix web run build && npm run stage:web-host",
     "copy-resources": "node scripts/copy-resources.cjs",

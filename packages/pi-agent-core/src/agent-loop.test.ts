@@ -45,6 +45,59 @@ describe("agent-loop — pauseTurn handling (#2869)", () => {
 			'StopReason type must include "pauseTurn"',
 		);
 	});
+
+	it("uses provider-supplied external tool results instead of the placeholder", async () => {
+		const externalMessage = makeAssistantMessage({
+			content: [
+				{
+					type: "toolCall",
+					id: "tc-external-1",
+					name: "bash",
+					arguments: { command: "echo hi" },
+					externalResult: {
+						content: [{ type: "text", text: "hi\n" }],
+						details: { source: "claude-code" },
+						isError: false,
+					},
+				} as any,
+			],
+			stopReason: "toolUse",
+			provider: "claude-code",
+		});
+
+		const mockStream = createMockStreamFn([externalMessage]);
+
+		const context: AgentContext = {
+			systemPrompt: "You are a test agent.",
+			messages: [{ role: "user", content: [{ type: "text", text: "Run the command" }], timestamp: Date.now() }],
+			tools: [],
+		};
+
+		const config: AgentLoopConfig = {
+			model: { ...TEST_MODEL, provider: "claude-code" },
+			convertToLlm: (msgs) => msgs.filter((m): m is any => m.role !== "custom"),
+			toolExecution: "sequential",
+			externalToolExecution: true,
+		};
+
+		const stream = agentLoop(
+			[{ role: "user", content: [{ type: "text", text: "Run the command" }], timestamp: Date.now() }],
+			context,
+			config,
+			undefined,
+			mockStream as any,
+		);
+
+		const events = await collectEvents(stream);
+		const toolEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+
+		assert.ok(toolEnd, "expected tool_execution_end event");
+		assert.deepEqual(toolEnd.result.content, [{ type: "text", text: "hi\n" }]);
+		assert.deepEqual(toolEnd.result.details, { source: "claude-code" });
+		assert.equal(toolEnd.isError, false);
+	});
 });
 
 /**

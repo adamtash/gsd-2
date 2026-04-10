@@ -14,16 +14,36 @@ import type {
 	Context,
 	Model,
 	SimpleStreamOptions,
+	ToolCall,
 } from "@gsd/pi-ai";
 import { EventStream } from "@gsd/pi-ai";
 import { execSync } from "node:child_process";
 import { PartialMessageBuilder, ZERO_USAGE, mapUsage } from "./partial-builder.js";
+import { buildWorkflowMcpServers } from "../gsd/workflow-mcp.js";
 import type {
 	SDKAssistantMessage,
 	SDKMessage,
 	SDKPartialAssistantMessage,
 	SDKResultMessage,
+	SDKUserMessage,
 } from "./sdk-types.js";
+
+export interface ExternalToolResultContentBlock {
+	type: string;
+	text?: string;
+	data?: string;
+	mimeType?: string;
+}
+
+export interface ExternalToolResultPayload {
+	content: ExternalToolResultContentBlock[];
+	details?: Record<string, unknown>;
+	isError: boolean;
+}
+
+type ToolCallWithExternalResult = ToolCall & {
+	externalResult?: ExternalToolResultPayload;
+};
 
 // ---------------------------------------------------------------------------
 // Stream factory
@@ -50,6 +70,17 @@ function createAssistantStream(): AssistantMessageEventStream {
 
 let cachedClaudePath: string | null = null;
 
+export function getClaudeLookupCommand(platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? "where claude" : "which claude";
+}
+
+export function parseClaudeLookupOutput(output: Buffer | string): string {
+	return output
+		.toString()
+		.trim()
+		.split(/\r?\n/)[0] ?? "";
+}
+
 /**
  * Resolve the path to the system-installed `claude` binary.
  * The SDK defaults to a bundled cli.js which doesn't exist when
@@ -58,9 +89,7 @@ let cachedClaudePath: string | null = null;
 function getClaudePath(): string {
 	if (cachedClaudePath) return cachedClaudePath;
 	try {
-		cachedClaudePath = execSync("which claude", { timeout: 5_000, stdio: "pipe" })
-			.toString()
-			.trim();
+		cachedClaudePath = parseClaudeLookupOutput(execSync(getClaudeLookupCommand(), { timeout: 5_000, stdio: "pipe" }));
 	} catch {
 		cachedClaudePath = "claude"; // fall back to PATH resolution
 	}
@@ -154,6 +183,7 @@ export function makeStreamExhaustedErrorMessage(model: string, lastTextContent: 
  * beta flags, and other configuration without mocking the full SDK.
  */
 export function buildSdkOptions(modelId: string, prompt: string): Record<string, unknown> {
+	const mcpServers = buildWorkflowMcpServers();
 	return {
 		pathToClaudeCodeExecutable: getClaudePath(),
 		model: modelId,
@@ -164,8 +194,113 @@ export function buildSdkOptions(modelId: string, prompt: string): Record<string,
 		allowDangerouslySkipPermissions: true,
 		settingSources: ["project"],
 		systemPrompt: { type: "preset", preset: "claude_code" },
+		...(mcpServers ? { mcpServers } : {}),
 		betas: modelId.includes("sonnet") ? ["context-1m-2025-08-07"] : [],
 	};
+}
+
+function normalizeToolResultContent(content: unknown): ExternalToolResultContentBlock[] {
+	if (typeof content === "string") {
+		return [{ type: "text", text: content }];
+	}
+
+	if (!Array.isArray(content)) {
+		if (content == null) return [{ type: "text", text: "" }];
+		return [{ type: "text", text: JSON.stringify(content) }];
+	}
+
+	const blocks: ExternalToolResultContentBlock[] = [];
+
+	for (const item of content) {
+		if (typeof item === "string") {
+			blocks.push({ type: "text", text: item });
+			continue;
+		}
+		if (!item || typeof item !== "object") {
+			blocks.push({ type: "text", text: String(item) });
+			continue;
+		}
+
+		const block = item as Record<string, unknown>;
+		if (block.type === "text") {
+			blocks.push({ type: "text", text: typeof block.text === "string" ? block.text : "" });
+			continue;
+		}
+		if (
+			block.type === "image"
+			&& typeof block.data === "string"
+			&& typeof block.mimeType === "string"
+		) {
+			blocks.push({ type: "image", data: block.data, mimeType: block.mimeType });
+			continue;
+		}
+
+		blocks.push({ type: "text", text: JSON.stringify(block) });
+	}
+
+	return blocks.length > 0 ? blocks : [{ type: "text", text: "" }];
+}
+
+export function extractToolResultsFromSdkUserMessage(message: SDKUserMessage): Array<{
+	toolUseId: string;
+	result: ExternalToolResultPayload;
+}> {
+	const extracted: Array<{ toolUseId: string; result: ExternalToolResultPayload }> = [];
+	const seen = new Set<string>();
+	const rawMessage = message.message as Record<string, unknown> | null | undefined;
+	const content = Array.isArray(rawMessage?.content) ? rawMessage.content : [];
+
+	for (const item of content) {
+		if (!item || typeof item !== "object") continue;
+		const block = item as Record<string, unknown>;
+		const type = typeof block.type === "string" ? block.type : "";
+		if (type !== "tool_result" && type !== "mcp_tool_result") continue;
+
+		const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+		if (!toolUseId || seen.has(toolUseId)) continue;
+		seen.add(toolUseId);
+
+		extracted.push({
+			toolUseId,
+			result: {
+				content: normalizeToolResultContent(block.content),
+				details: {},
+				isError: block.is_error === true,
+			},
+		});
+	}
+
+	if (extracted.length === 0) {
+		const fallback = message.tool_use_result;
+		if (fallback && typeof fallback === "object") {
+			const toolResult = fallback as Record<string, unknown>;
+			const toolUseId = typeof toolResult.tool_use_id === "string" ? toolResult.tool_use_id : "";
+			if (toolUseId) {
+				extracted.push({
+					toolUseId,
+					result: {
+						content: normalizeToolResultContent(toolResult.content),
+						details: {},
+						isError: toolResult.is_error === true,
+					},
+				});
+			}
+		}
+	}
+
+	return extracted;
+}
+
+function attachExternalResultsToToolCalls(
+	toolCalls: AssistantMessage["content"],
+	toolResultsById: ReadonlyMap<string, ExternalToolResultPayload>,
+): void {
+	for (const block of toolCalls) {
+		if (block.type !== "toolCall") continue;
+		const externalResult = toolResultsById.get(block.id);
+		if (!externalResult) continue;
+		(block as ToolCallWithExternalResult).externalResult = externalResult;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +339,8 @@ async function pumpSdkMessages(
 	let lastThinkingContent = "";
 	/** Collect tool calls from intermediate SDK turns for tool_execution events. */
 	const intermediateToolCalls: AssistantMessage["content"] = [];
+	/** Preserve real external tool results from Claude Code's synthetic user messages. */
+	const toolResultsById = new Map<string, ExternalToolResultPayload>();
 
 	try {
 		// Dynamic import — the SDK is an optional dependency.
@@ -273,14 +410,7 @@ async function pumpSdkMessages(
 
 					const assistantEvent = builder.handleEvent(event);
 					if (assistantEvent) {
-						// Skip toolcall events — the agent loop's externalToolExecution
-						// path emits tool_execution_start/end events after streamSimple
-						// returns. Streaming toolcall events would render tool calls
-						// out of order in the TUI's accumulated message content.
-						const t = assistantEvent.type;
-						if (t !== "toolcall_start" && t !== "toolcall_delta" && t !== "toolcall_end") {
-							stream.push(assistantEvent);
-						}
+						stream.push(assistantEvent);
 					}
 					break;
 				}
@@ -315,6 +445,33 @@ async function pumpSdkMessages(
 							}
 						}
 					}
+
+					// Extract tool results from the SDK's synthetic user message
+					// and attach to corresponding tool call blocks immediately.
+					for (const { toolUseId, result } of extractToolResultsFromSdkUserMessage(msg as SDKUserMessage)) {
+						toolResultsById.set(toolUseId, result);
+					}
+					attachExternalResultsToToolCalls(intermediateToolCalls, toolResultsById);
+
+					// Push a synthetic toolcall_end for each tool call from this turn
+					// so the TUI can render tool results in real-time during the SDK
+					// session instead of waiting until the entire session completes.
+					if (builder) {
+						for (const block of builder.message.content) {
+							if (block.type !== "toolCall") continue;
+							const extResult = (block as ToolCallWithExternalResult).externalResult;
+							if (!extResult) continue;
+							// Push a toolcall_end with result attached so the chat-controller
+							// can call updateResult on the pending ToolExecutionComponent.
+							stream.push({
+								type: "toolcall_end",
+								contentIndex: builder.message.content.indexOf(block),
+								toolCall: block,
+								partial: builder.message,
+							});
+						}
+					}
+
 					builder = null;
 					break;
 				}
@@ -329,6 +486,7 @@ async function pumpSdkMessages(
 					const finalContent: AssistantMessage["content"] = [];
 
 					// Add tool calls from intermediate turns first (renders above text)
+					attachExternalResultsToToolCalls(intermediateToolCalls, toolResultsById);
 					finalContent.push(...intermediateToolCalls);
 
 					// Add text/thinking from the last turn

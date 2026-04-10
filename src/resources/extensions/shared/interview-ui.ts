@@ -81,6 +81,12 @@ export interface InterviewRoundOptions {
 	 */
 	exitHeadline?: string;
 	/**
+	 * Optional AbortSignal to cancel the interview externally (e.g. when racing
+	 * against a remote question channel). When aborted, the TUI closes and the
+	 * promise resolves with an empty answers object.
+	 */
+	signal?: AbortSignal;
+	/**
 	 * Text for the "exit" hint shown in the review screen footer and exit confirm overlay.
 	 * Defaults to "end interview".
 	 */
@@ -206,6 +212,13 @@ export async function showInterviewRound(
 		let showingExitConfirm = false;
 		let exitCursor = 0; // 0 = keep going (default), 1 = end interview
 		let cachedLines: string[] | undefined;
+
+		// External cancellation (e.g. remote channel won the race)
+		if (opts.signal) {
+			const onAbort = () => done({ endInterview: false, answers: {} });
+			if (opts.signal.aborted) { onAbort(); }
+			else { opts.signal.addEventListener("abort", onAbort, { once: true }); }
+		}
 
 		// Editor is created once; editorTheme comes from the design system
 		const editorRef = { current: null as Editor | null };

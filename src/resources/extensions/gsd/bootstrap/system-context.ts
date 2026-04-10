@@ -11,6 +11,7 @@ import { readForensicsMarker } from "../forensics.js";
 import { resolveAllSkillReferences, renderPreferencesForSystemPrompt, loadEffectiveGSDPreferences } from "../preferences.js";
 import { resolveSkillReference } from "../preferences-skills.js";
 import { resolveGsdRootFile, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
+import { ensureCodebaseMapFresh, readCodebaseMap } from "../codebase-generator.js";
 import { hasSkillSnapshot, detectNewSkills, formatSkillsXml } from "../skill-discovery.js";
 import { getActiveAutoWorktreeContext } from "../auto-worktree.js";
 import { getActiveWorktreeName, getWorktreeOriginalCwd } from "../worktree-command.js";
@@ -128,10 +129,24 @@ export async function buildBeforeAgentStartResult(
   }
 
   let codebaseBlock = "";
+  try {
+    const codebaseOptions = loadedPreferences?.preferences?.codebase
+      ? {
+          excludePatterns: loadedPreferences.preferences.codebase.exclude_patterns,
+          maxFiles: loadedPreferences.preferences.codebase.max_files,
+          collapseThreshold: loadedPreferences.preferences.codebase.collapse_threshold,
+        }
+      : undefined;
+    ensureCodebaseMapFresh(process.cwd(), codebaseOptions);
+  } catch (e) {
+    logWarning("bootstrap", `CODEBASE refresh failed: ${(e as Error).message}`);
+  }
+
   const codebasePath = resolveGsdRootFile(process.cwd(), "CODEBASE");
-  if (existsSync(codebasePath)) {
+  const rawCodebase = readCodebaseMap(process.cwd());
+  if (existsSync(codebasePath) && rawCodebase) {
     try {
-      const rawContent = readFileSync(codebasePath, "utf-8").trim();
+      const rawContent = rawCodebase.trim();
       if (rawContent) {
         // Cap injection size to ~2 000 tokens to avoid bloating every request.
         // Full map is always available at .gsd/CODEBASE.md.
@@ -141,7 +156,7 @@ export async function buildBeforeAgentStartResult(
         const content = rawContent.length > MAX_CODEBASE_CHARS
           ? rawContent.slice(0, MAX_CODEBASE_CHARS) + "\n\n*(truncated — see .gsd/CODEBASE.md for full map)*"
           : rawContent;
-        codebaseBlock = `\n\n[PROJECT CODEBASE — File structure and descriptions (generated ${generatedAt}, may be stale — run /gsd codebase update to refresh)]\n\n${content}`;
+        codebaseBlock = `\n\n[PROJECT CODEBASE — File structure and descriptions (generated ${generatedAt}, auto-refreshed when GSD detects tracked file changes; use /gsd codebase stats for status)]\n\n${content}`;
       }
     } catch (e) {
       logWarning("bootstrap", `CODEBASE file read failed: ${(e as Error).message}`);
@@ -153,7 +168,7 @@ export async function buildBeforeAgentStartResult(
   const injection = await buildGuidedExecuteContextInjection(event.prompt, process.cwd());
 
   // Re-inject forensics context on follow-up turns (#2941)
-  const forensicsInjection = !injection ? buildForensicsContextInjection(process.cwd()) : null;
+  const forensicsInjection = !injection ? buildForensicsContextInjection(process.cwd(), event.prompt) : null;
 
   const worktreeBlock = buildWorktreeContextBlock();
   const fullSystem = `${event.systemPrompt}\n\n[SYSTEM CONTEXT — GSD]\n\n${systemContent}${preferenceBlock}${knowledgeBlock}${codebaseBlock}${memoryBlock}${newSkillsBlock}${worktreeBlock}`;
@@ -466,13 +481,19 @@ function oneLine(text: string): string {
  * Check for an active forensics session and return the prompt content
  * so it can be re-injected on follow-up turns.
  */
-function buildForensicsContextInjection(basePath: string): string | null {
+export function buildForensicsContextInjection(basePath: string, prompt: string): string | null {
   const marker = readForensicsMarker(basePath);
   if (!marker) return null;
 
   // Expire markers older than 2 hours to avoid stale context
   const age = Date.now() - new Date(marker.createdAt).getTime();
   if (age > 2 * 60 * 60 * 1000) {
+    clearForensicsMarker(basePath);
+    return null;
+  }
+
+  const trimmed = prompt.trim().toLowerCase().replace(/[.!?,]+$/g, "");
+  if (trimmed && !RESUME_INTENT_PATTERNS.test(trimmed)) {
     clearForensicsMarker(basePath);
     return null;
   }
@@ -494,4 +515,3 @@ export function clearForensicsMarker(basePath: string): void {
     }
   }
 }
-

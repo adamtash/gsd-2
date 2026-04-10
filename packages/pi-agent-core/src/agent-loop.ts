@@ -255,8 +255,17 @@ async function runLoop(
 			if (hasMoreToolCalls && config.externalToolExecution) {
 				// External execution mode: tools were handled by the provider
 				// (e.g., Claude Code SDK). Emit tool_execution events for each
-				// tool call. The TUI adds these as components after the message.
+				// tool call. Prefer any provider-supplied externalResult attached
+				// to the tool call so the UI can show the real stdout/stderr
+				// instead of a generic placeholder.
 				for (const tc of toolCalls as AgentToolCall[]) {
+					const externalResult = (tc as AgentToolCall & {
+						externalResult?: {
+							content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+							details?: Record<string, unknown>;
+							isError?: boolean;
+						};
+					}).externalResult;
 					stream.push({
 						type: "tool_execution_start",
 						toolCallId: tc.id,
@@ -267,11 +276,16 @@ async function runLoop(
 						type: "tool_execution_end",
 						toolCallId: tc.id,
 						toolName: tc.name,
-						result: {
-							content: [{ type: "text", text: "(executed by Claude Code)" }],
-							details: {},
-						},
-						isError: false,
+						result: externalResult
+							? {
+									content: externalResult.content ?? [{ type: "text", text: "" }],
+									details: externalResult.details ?? {},
+								}
+							: {
+									content: [{ type: "text", text: "(executed by Claude Code)" }],
+									details: {},
+								},
+						isError: externalResult?.isError ?? false,
 					});
 				}
 				// Don't add tool results to context or loop back — the streamSimple

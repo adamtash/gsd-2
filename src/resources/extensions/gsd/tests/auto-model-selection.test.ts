@@ -143,17 +143,17 @@ test("resolvePreferredModelConfig keeps explicit phase models as the ceiling", (
 
 // ─── resolveModelId tests ─────────────────────────────────────────────────
 
-test("resolveModelId: bare ID resolves to anthropic over claude-code when session is claude-code (#2905)", () => {
+test("resolveModelId: bare ID resolves to claude-code when session is claude-code (#3772)", () => {
   const availableModels = [
     { id: "claude-sonnet-4-6", provider: "anthropic" },
     { id: "claude-sonnet-4-6", provider: "claude-code" },
   ];
 
-  // Bug: when currentProvider is "claude-code", bare ID "claude-sonnet-4-6"
-  // resolves to claude-code/claude-sonnet-4-6 instead of anthropic/claude-sonnet-4-6
+  // When currentProvider is "claude-code" (set by startup migration for subscription
+  // users), bare IDs must resolve to claude-code to avoid the third-party block (#3772).
   const result = resolveModelId("claude-sonnet-4-6", availableModels, "claude-code");
   assert.ok(result, "should resolve a model");
-  assert.equal(result.provider, "anthropic", "bare ID must resolve to anthropic, not claude-code");
+  assert.equal(result.provider, "claude-code", "bare ID must resolve to claude-code when session provider is claude-code");
 });
 
 test("resolveModelId: bare ID still prefers current provider when it is a first-class API provider", () => {
@@ -227,14 +227,28 @@ test("model change notify in selectAndApplyModel is gated behind verbose flag", 
   );
 });
 
-test("resolveModelId: anthropic wins over claude-code regardless of list order", () => {
+test("resolveModelId: anthropic wins over claude-code when session provider is not claude-code", () => {
   const availableModels = [
     { id: "claude-sonnet-4-6", provider: "claude-code" },
     { id: "claude-sonnet-4-6", provider: "anthropic" },
   ];
 
-  // Even when claude-code appears first in the list, anthropic should win
+  // When the session is NOT on claude-code, bare IDs should resolve to
+  // the canonical anthropic provider (original #2905 behavior preserved).
+  const result = resolveModelId("claude-sonnet-4-6", availableModels, undefined);
+  assert.ok(result, "should resolve a model");
+  assert.equal(result.provider, "anthropic", "anthropic must win when session is not claude-code");
+});
+
+test("resolveModelId: claude-code wins when session is claude-code regardless of list order", () => {
+  const availableModels = [
+    { id: "claude-sonnet-4-6", provider: "claude-code" },
+    { id: "claude-sonnet-4-6", provider: "anthropic" },
+  ];
+
+  // When session provider is claude-code (subscription user migration), it must
+  // win regardless of candidate ordering to avoid the third-party block (#3772).
   const result = resolveModelId("claude-sonnet-4-6", availableModels, "claude-code");
   assert.ok(result, "should resolve a model");
-  assert.equal(result.provider, "anthropic", "anthropic must win over claude-code regardless of list order");
+  assert.equal(result.provider, "claude-code", "claude-code must win when it is the session provider");
 });

@@ -16,7 +16,12 @@ import { buildSkillActivationBlock } from "./auto-prompts.js";
 import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import { startAuto } from "./auto.js";
-import { readCrashLock, clearLock, formatCrashInfo } from "./crash-recovery.js";
+import { clearLock } from "./crash-recovery.js";
+import {
+  assessInterruptedSession,
+  formatInterruptedSessionRunningMessage,
+  formatInterruptedSessionSummary,
+} from "./interrupted-session.js";
 import { listUnitRuntimeRecords, clearUnitRuntimeRecord } from "./unit-runtime.js";
 import { resolveExpectedArtifactPath } from "./auto.js";
 import {
@@ -40,6 +45,10 @@ import { findMilestoneIds, nextMilestoneId, reserveMilestoneId, getReservedMiles
 import { parkMilestone, discardMilestone } from "./milestone-actions.js";
 import { selectAndApplyModel } from "./auto-model-selection.js";
 import { DISCUSS_TOOLS_ALLOWLIST } from "./constants.js";
+import {
+  getWorkflowTransportSupportError,
+  getRequiredWorkflowToolsForGuidedUnit,
+} from "./workflow-mcp.js";
 import {
   runPreparation,
   formatCodebaseBrief,
@@ -186,12 +195,13 @@ export function checkAutoStartAfterDiscuss(): boolean {
   // Parse PROJECT.md for milestone sequence, warn if any are missing context.
   // Don't block — milestones can be intentionally queued without context.
   const projectFile = resolveGsdRootFile(basePath, "PROJECT");
+  let projectIds: string[] = [];
   if (projectFile) {
     try {
       const projectContent = readFileSync(projectFile, "utf-8");
-      const milestoneIds = parseMilestoneSequenceFromProject(projectContent);
-      if (milestoneIds.length > 1) {
-        const missing = milestoneIds.filter(id => {
+      projectIds = parseMilestoneSequenceFromProject(projectContent);
+      if (projectIds.length > 1) {
+        const missing = projectIds.filter(id => {
           const hasContext = !!resolveMilestoneFile(basePath, id, "CONTEXT");
           const hasDraft = !!resolveMilestoneFile(basePath, id, "CONTEXT-DRAFT");
           const hasDir = existsSync(join(gsdRoot(basePath), "milestones", id));
@@ -210,8 +220,8 @@ export function checkAutoStartAfterDiscuss(): boolean {
 
   // Gate 4: Discussion manifest process verification (multi-milestone only)
   // The LLM writes DISCUSSION-MANIFEST.json after each Phase 3 gate decision.
-  // If the manifest exists but gates_completed < total, the LLM hasn't finished
-  // presenting all readiness gates to the user — block auto-start.
+  // When it exists, validate it before auto-starting. Project history alone is
+  // not a reliable signal for the current discussion mode.
   const manifestPath = join(gsdRoot(basePath), "DISCUSSION-MANIFEST.json");
   if (existsSync(manifestPath)) {
     try {
@@ -225,9 +235,7 @@ export function checkAutoStartAfterDiscuss(): boolean {
       }
 
       // Cross-check manifest milestones against PROJECT.md if available
-      if (projectFile) {
-        const projectContent = readFileSync(projectFile, "utf-8");
-        const projectIds = parseMilestoneSequenceFromProject(projectContent);
+      if (projectIds.length > 0) {
         const manifestIds = Object.keys(manifest.milestones ?? {});
         const untracked = projectIds.filter(id => !manifestIds.includes(id));
         if (untracked.length > 0) {
@@ -310,6 +318,26 @@ async function dispatchWorkflow(
         model: `${result.appliedModel.provider}/${result.appliedModel.id}`,
         routing: result.routing,
       });
+    }
+
+    const compatibilityError = getWorkflowTransportSupportError(
+      result.appliedModel?.provider ?? ctx.model?.provider,
+      getRequiredWorkflowToolsForGuidedUnit(unitType),
+      {
+        projectRoot: process.cwd(),
+        surface: "guided flow",
+        unitType,
+        authMode: result.appliedModel?.provider
+          ? ctx.modelRegistry.getProviderAuthMode(result.appliedModel.provider)
+          : ctx.model?.provider
+            ? ctx.modelRegistry.getProviderAuthMode(ctx.model.provider)
+            : undefined,
+        baseUrl: result.appliedModel?.baseUrl ?? ctx.model?.baseUrl,
+      },
+    );
+    if (compatibilityError) {
+      ctx.ui.notify(compatibilityError, "error");
+      return;
     }
   }
 
@@ -1291,36 +1319,45 @@ export async function showSmartEntry(
   // ── Self-heal stale runtime records from crashed auto-mode sessions ──
   selfHealRuntimeRecords(basePath, ctx);
 
-  // Check for crash from previous auto-mode session.
-  // Skip if the lock was written by the current process — acquireSessionLock()
-  // writes to the same file, so we'd always false-positive (#1398).
-  const crashLock = readCrashLock(basePath);
-  if (crashLock && crashLock.pid !== process.pid) {
+  const interrupted = await assessInterruptedSession(basePath);
+  if (interrupted.classification === "running") {
+    ctx.ui.notify(formatInterruptedSessionRunningMessage(interrupted), "error");
+    return;
+  }
+
+  if (interrupted.classification === "stale") {
     clearLock(basePath);
-
-    // Bootstrap crash with zero completed units = no work was lost.
-    // Auto-discard instead of prompting the user — this commonly happens
-    // when the user exits during init wizard or discuss phase before any
-    // real auto-mode work begins.
-    const isBootstrapCrash = crashLock.unitType === "starting"
-      && crashLock.unitId === "bootstrap";
-
-    if (!isBootstrapCrash) {
-      const resume = await showNextAction(ctx, {
-        title: "GSD — Interrupted Session Detected",
-        summary: [formatCrashInfo(crashLock)],
-        actions: [
-          { id: "resume", label: "Resume with /gsd auto", description: "Pick up where it left off", recommended: true },
-          { id: "continue", label: "Continue manually", description: "Open the wizard as normal" },
-        ],
-      });
-      if (resume === "resume") {
-        await startAuto(ctx, pi, basePath, false);
-        return;
+    if (interrupted.pausedSession) {
+      try {
+        unlinkSync(join(gsdRoot(basePath), "runtime", "paused-session.json"));
+      } catch (e) {
+        logWarning("guided", `stale pause file cleanup failed: ${(e as Error).message}`, { file: "guided-flow.ts" });
       }
+    }
+  } else if (interrupted.classification === "recoverable") {
+    if (interrupted.lock) clearLock(basePath);
+    const resumeLabel = interrupted.pausedSession?.stepMode
+      ? "Resume with /gsd next"
+      : "Resume with /gsd auto";
+    const resume = await showNextAction(ctx, {
+      title: "GSD — Interrupted Session Detected",
+      summary: formatInterruptedSessionSummary(interrupted),
+      actions: [
+        { id: "resume", label: resumeLabel, description: "Pick up where it left off", recommended: true },
+        { id: "continue", label: "Continue manually", description: "Open the wizard as normal" },
+      ],
+    });
+    if (resume === "resume") {
+      await startAuto(ctx, pi, basePath, false, {
+        interrupted,
+        step: interrupted.pausedSession?.stepMode ?? false,
+      });
+      return;
     }
   }
 
+  // Always derive from the project root — the assessment may have derived
+  // state from a worktree path that was cleaned up in the stale branch above.
   const state = await deriveState(basePath);
 
   // Rebuild STATE.md from derived state before any dispatch (#3475).

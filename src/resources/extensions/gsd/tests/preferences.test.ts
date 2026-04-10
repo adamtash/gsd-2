@@ -17,6 +17,7 @@ import {
   parsePreferencesMarkdown,
   _resetParseWarningFlag,
 } from "../preferences.ts";
+import { formatConfiguredModel, toPersistedModelId } from "../commands-prefs-wizard.ts";
 import { _resetLogs, peekLogs } from "../workflow-logger.ts";
 import type { GSDPreferences, GSDModelConfigV2, GSDPhaseModelConfig } from "../preferences.ts";
 
@@ -345,6 +346,22 @@ test("handles model config with explicit provider field", () => {
   const execution = models.execution as GSDPhaseModelConfig;
   assert.equal(execution.model, "claude-opus-4-6");
   assert.equal(execution.provider, "bedrock");
+});
+
+test("formatConfiguredModel renders provider-qualified object config", () => {
+  assert.equal(
+    formatConfiguredModel({ model: "claude-opus-4-6", provider: "bedrock" }),
+    "bedrock/claude-opus-4-6",
+  );
+});
+
+test("toPersistedModelId prefixes provider chosen in prefs wizard", () => {
+  assert.equal(toPersistedModelId("openai", "gpt-5.4"), "openai/gpt-5.4");
+  assert.equal(
+    toPersistedModelId("openai", "openai/gpt-5.4"),
+    "openai/gpt-5.4",
+    "already-qualified IDs should be preserved",
+  );
 });
 
 test("handles empty models config", () => {

@@ -38,7 +38,7 @@ GSD ships with bundled skills. Load the relevant skill file with the `read` tool
 - Never print, echo, log, or restate secrets or credentials. Report only key names and applied/skipped status.
 - Never ask the user to edit `.env` files or set secrets manually. Use `secure_env_collect`.
 - In enduring files, write current state only unless the file is explicitly historical.
-- **Never take outward-facing actions on GitHub (or any external service) without explicit user confirmation.** This includes: creating issues, closing issues, merging PRs, approving PRs, posting comments, pushing to remote branches, publishing packages, or any other action that affects state outside the local filesystem. Read-only operations (listing, viewing, diffing) are fine. Always present what you intend to do and get a clear "yes" before executing.
+- **Never take outward-facing actions on GitHub (or any external service) without explicit user confirmation.** This includes: creating issues, closing issues, merging PRs, approving PRs, posting comments, pushing to remote branches, publishing packages, or any other action that affects state outside the local filesystem. Read-only operations (listing, viewing, diffing) are fine. Always present what you intend to do and get a clear "yes" before executing. **Non-bypassable:** If the user does not respond, gives an ambiguous answer, or `ask_user_questions` fails, you MUST re-ask — never rationalize past the block ("tool not responding, I'll proceed" is forbidden). A missing "yes" is a "no."
 
 If a `GSD Skill Preferences` block is present below this contract, treat it as explicit durable guidance for which skills to use, prefer, or avoid during GSD work. Follow it where it does not conflict with required GSD artifact rules, verification requirements, or higher-priority system/developer instructions.
 
@@ -62,6 +62,7 @@ Titles live inside file content (headings, frontmatter), not in file or director
   REQUIREMENTS.md       (requirement contract - tracks active/validated/deferred/out-of-scope)
   DECISIONS.md          (append-only register of architectural and pattern decisions)
   KNOWLEDGE.md          (append-only register of project-specific rules, patterns, and lessons learned)
+  CODEBASE.md           (generated codebase map cache — auto-refreshed when tracked files change)
   OVERRIDES.md          (user-issued overrides that supersede plan content via /gsd steer)
   QUEUE.md              (append-only log of queued milestones via /gsd queue)
   STATE.md
@@ -104,6 +105,7 @@ In all modes, slices commit sequentially on the active branch; there are no per-
 - **REQUIREMENTS.md** tracks the requirement contract — requirements move between Active, Validated, Deferred, Blocked, and Out of Scope as slices prove or invalidate them. Update at slice completion when evidence supports a status change.
 - **DECISIONS.md** is an append-only register of architectural and pattern decisions - read it during planning/research, append to it during execution when a meaningful decision is made
 - **KNOWLEDGE.md** is an append-only register of project-specific rules, patterns, and lessons learned. Read it at the start of every unit. Append to it when you discover a recurring issue, a non-obvious pattern, or a rule that future agents should follow.
+- **CODEBASE.md** is a generated structural cache of the tracked repository. GSD auto-refreshes it when tracked files change and injects it into system context when available. Use `/gsd codebase update` only when you need to force an immediate refresh.
 - **CONTEXT.md** files (milestone or slice level) capture the brief — scope, goals, constraints, and key decisions from discussion. When present, they are the authoritative source for what a milestone or slice is trying to achieve. Read them before planning or executing.
 - **Milestones** are major project phases (M001, M002, ...)
 - **Slices** are demoable vertical increments (S01, S02, ...) ordered by risk. After each slice completes, the roadmap is reassessed before the next slice begins.
@@ -131,6 +133,7 @@ Templates showing the expected format for each artifact type are in:
 - `/gsd status` - progress dashboard overlay
 - `/gsd queue` - queue future milestones (safe while auto-mode is running)
 - `/gsd quick <task>` - quick task with GSD guarantees (atomic commits, state tracking) but no milestone ceremony
+- `/gsd codebase [generate|update|stats]` - manage the `.gsd/CODEBASE.md` cache used for prompt context
 - `{{shortcutDashboard}}` - toggle dashboard overlay
 - `{{shortcutShell}}` - show shell processes
 

@@ -414,6 +414,28 @@ describe("RetryHandler", () => {
 			assert.ok(switchEvent!.to.startsWith("claude-code/"), "Should switch to claude-code provider");
 		});
 
+		it("switches to claude-code on 'out of extra usage' error (#3772)", async () => {
+			const ccModel = createMockModel("claude-code", "claude-opus-4-6");
+			const { deps, emittedEvents } = createMockDeps({
+				model: createMockModel("anthropic", "claude-opus-4-6"),
+				findModelResult: (provider: string, modelId: string) => {
+					if (provider === "claude-code" && modelId === "claude-opus-4-6") return ccModel;
+					return undefined;
+				},
+			});
+			deps.isClaudeCodeReady = () => true;
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage("You're out of extra usage. Add more at claude.ai/settings/usage and keep going.");
+
+			const result = await handler.handleRetryableError(msg);
+
+			assert.equal(result, true, "should retry via claude-code fallback");
+			const switchEvent = emittedEvents.find((e) => e.type === "fallback_provider_switch");
+			assert.ok(switchEvent, "Expected fallback_provider_switch event");
+			assert.ok(switchEvent!.to.startsWith("claude-code/"), "Should switch to claude-code provider");
+		});
+
 		it("does NOT switch to claude-code when current provider is not anthropic", async () => {
 			const ccModel = createMockModel("claude-code", "gpt-4o");
 			const { deps, emittedEvents } = createMockDeps({

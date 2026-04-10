@@ -53,18 +53,24 @@ test("hasStaleCompiledExtensionSiblings only flags top-level .ts/.js sibling pai
   const { hasStaleCompiledExtensionSiblings } = await import("../resource-loader.ts");
   const tmp = mkdtempSync(join(tmpdir(), "gsd-resource-loader-"));
   const extensionsDir = join(tmp, "extensions");
+  const bundledDir = join(tmp, "bundled");
 
   t.after(() => { rmSync(tmp, { recursive: true, force: true }); });
 
+  mkdirSync(bundledDir, { recursive: true });
   mkdirSync(join(extensionsDir, "gsd"), { recursive: true });
   writeFileSync(join(extensionsDir, "gsd", "index.ts"), "export {};\n");
-  assert.equal(hasStaleCompiledExtensionSiblings(extensionsDir), false);
+  assert.equal(hasStaleCompiledExtensionSiblings(extensionsDir, bundledDir), false);
 
+  writeFileSync(join(bundledDir, "ask-user-questions.js"), "export {};\n");
   writeFileSync(join(extensionsDir, "ask-user-questions.js"), "export {};\n");
-  assert.equal(hasStaleCompiledExtensionSiblings(extensionsDir), false);
+  assert.equal(hasStaleCompiledExtensionSiblings(extensionsDir, bundledDir), false);
 
   writeFileSync(join(extensionsDir, "ask-user-questions.ts"), "export {};\n");
-  assert.equal(hasStaleCompiledExtensionSiblings(extensionsDir), true);
+  assert.equal(hasStaleCompiledExtensionSiblings(extensionsDir, bundledDir), true);
+
+  writeFileSync(join(bundledDir, "ask-user-questions.ts"), "export {};\n");
+  assert.equal(hasStaleCompiledExtensionSiblings(extensionsDir, bundledDir), false);
 });
 
 test("buildResourceLoader excludes duplicate top-level pi extensions when bundled resources use .js", async (t) => {
@@ -148,16 +154,30 @@ test("initResources prunes stale top-level extension siblings next to bundled co
   const staleSiblingPath = bundledPath.endsWith(".js")
     ? bundledTsPath
     : bundledJsPath;
+  const siblingWasBundled = existsSync(staleSiblingPath);
+  const staleContent = "export {};\n";
 
   assert.equal(existsSync(bundledPath), true, "bundled top-level extension should exist");
 
   // Simulate a stale opposite-format sibling left from a previous sync/build mismatch.
-  writeFileSync(staleSiblingPath, "export {};\n");
+  writeFileSync(staleSiblingPath, staleContent);
   assert.equal(existsSync(staleSiblingPath), true);
+
+  // Force a full resync so this test exercises the prune/copy path rather than
+  // the early-return manifest fast path.
+  const manifestPath = join(fakeAgentDir, "managed-resources.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  manifest.contentHash = "force-resync";
+  writeFileSync(manifestPath, JSON.stringify(manifest));
 
   initResources(fakeAgentDir);
 
-  assert.equal(existsSync(staleSiblingPath), false, "stale top-level sibling should be removed during sync");
+  if (siblingWasBundled) {
+    assert.equal(existsSync(staleSiblingPath), true, "bundled sibling should be restored during sync");
+    assert.notEqual(readFileSync(staleSiblingPath, "utf-8"), staleContent, "bundled sibling should overwrite stale contents");
+  } else {
+    assert.equal(existsSync(staleSiblingPath), false, "stale top-level sibling should be removed during sync");
+  }
   assert.equal(existsSync(bundledPath), true, "bundled extension should remain after cleanup");
 });
 

@@ -65,6 +65,8 @@ try {
   const requiredFiles = [
     'dist/loader.js',
     'packages/pi-coding-agent/dist/index.js',
+    'packages/rpc-client/dist/index.js',
+    'packages/mcp-server/dist/cli.js',
     'scripts/link-workspace-packages.cjs',
     'dist/web/standalone/server.js',
   ];
@@ -109,16 +111,19 @@ try {
   // node_modules/@gsd/ is never populated, causing ERR_MODULE_NOT_FOUND at runtime.
   console.log('==> Verifying @gsd/* workspace package resolution...');
   const installedRoot = join(installDir, 'node_modules', 'gsd-pi');
-  const criticalPkgs = ['pi-coding-agent'];
+  const criticalPackages = [
+    { scope: '@gsd', name: 'pi-coding-agent' },
+    { scope: '@gsd-build', name: 'rpc-client' },
+  ];
   let resolutionFailed = false;
-  for (const pkg of criticalPkgs) {
-    const pkgPath = join(installedRoot, 'node_modules', '@gsd', pkg);
-    const fallbackPath = join(installedRoot, 'packages', pkg);
+  for (const pkg of criticalPackages) {
+    const pkgPath = join(installedRoot, 'node_modules', pkg.scope, pkg.name);
+    const fallbackPath = join(installedRoot, 'packages', pkg.name);
     if (!existsSync(pkgPath)) {
       if (existsSync(fallbackPath)) {
-        console.log(`    MISSING symlink/copy: node_modules/@gsd/${pkg} (packages/${pkg} exists — postinstall may not have run)`);
+        console.log(`    MISSING symlink/copy: node_modules/${pkg.scope}/${pkg.name} (packages/${pkg.name} exists — postinstall may not have run)`);
       } else {
-        console.log(`    MISSING: node_modules/@gsd/${pkg} (packages/${pkg} also absent — package is broken)`);
+        console.log(`    MISSING: node_modules/${pkg.scope}/${pkg.name} (packages/${pkg.name} also absent — package is broken)`);
       }
       resolutionFailed = true;
     }
@@ -133,6 +138,12 @@ try {
   // --- Run the binary to confirm end-to-end resolution ---
   console.log('==> Running installed binary (gsd -v)...');
   const loaderPath = join(installedRoot, 'dist', 'loader.js');
+  const bundledWorkflowMcpCliPath = join(installedRoot, 'packages', 'mcp-server', 'dist', 'cli.js');
+  if (!existsSync(bundledWorkflowMcpCliPath)) {
+    console.log('ERROR: Bundled workflow MCP CLI missing after install.');
+    console.log(`    Expected: ${bundledWorkflowMcpCliPath}`);
+    process.exit(1);
+  }
   try {
     const versionOutput = execSync(`node "${loaderPath}" -v`, {
       cwd: installDir,

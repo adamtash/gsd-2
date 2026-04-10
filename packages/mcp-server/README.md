@@ -4,6 +4,11 @@ MCP server exposing GSD orchestration tools for Claude Code, Cursor, and other M
 
 Start GSD auto-mode sessions, poll progress, resolve blockers, and retrieve results — all through the [Model Context Protocol](https://modelcontextprotocol.io/).
 
+This package now exposes two tool surfaces:
+
+- session/read tools for starting and inspecting GSD sessions
+- workflow mutation tools for planning, completion, validation, reassessment, and gate persistence
+
 ## Installation
 
 ```bash
@@ -68,6 +73,38 @@ Add to `.cursor/mcp.json`:
 ```
 
 ## Tools
+
+### Workflow mutation tools
+
+The workflow MCP surface includes:
+
+- `gsd_plan_milestone`
+- `gsd_plan_slice`
+- `gsd_replan_slice`
+- `gsd_slice_replan`
+- `gsd_task_complete`
+- `gsd_complete_task`
+- `gsd_slice_complete`
+- `gsd_complete_slice`
+- `gsd_validate_milestone`
+- `gsd_milestone_validate`
+- `gsd_complete_milestone`
+- `gsd_milestone_complete`
+- `gsd_reassess_roadmap`
+- `gsd_roadmap_reassess`
+- `gsd_save_gate_result`
+- `gsd_summary_save`
+- `gsd_milestone_status`
+
+These mutation tools use the same GSD workflow handlers as the native in-process tool path.
+
+Current support boundary:
+
+- when running inside the GSD monorepo checkout, the MCP server auto-discovers the shared workflow executor module
+- outside the monorepo, set `GSD_WORKFLOW_EXECUTORS_MODULE` to an importable `workflow-tool-executors` module path if you want the mutation tools enabled
+- session/read tools do not depend on this bridge
+
+If the executor bridge cannot be loaded, workflow mutation calls will fail with a precise configuration error instead of silently degrading.
 
 ### `gsd_execute`
 
@@ -175,6 +212,7 @@ Resolve a pending blocker in a session by sending a response to the blocked UI r
 | Variable | Description |
 |----------|-------------|
 | `GSD_CLI_PATH` | Absolute path to the GSD CLI binary. If not set, the server resolves `gsd` via `which`. |
+| `GSD_WORKFLOW_EXECUTORS_MODULE` | Optional absolute path or `file:` URL for the shared GSD workflow executor module used by workflow mutation tools. |
 
 ## Architecture
 

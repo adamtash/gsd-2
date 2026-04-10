@@ -4,11 +4,14 @@
  * Verifies the dispatch rule and prompt builder exist with correct structure.
  */
 
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+
+import { resolveDispatch } from "../auto-dispatch.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -16,6 +19,47 @@ const dispatchSrc = readFileSync(join(__dirname, "..", "auto-dispatch.ts"), "utf
 const promptsSrc = readFileSync(join(__dirname, "..", "auto-prompts.ts"), "utf-8");
 const templatePath = join(__dirname, "..", "prompts", "parallel-research-slices.md");
 const templateSrc = readFileSync(templatePath, "utf-8");
+
+const tmpDirs: string[] = [];
+
+function makeTmpProject(): string {
+  const base = mkdtempSync(join(tmpdir(), "parallel-research-"));
+  tmpDirs.push(base);
+  const milestoneDir = join(base, ".gsd", "milestones", "M001");
+  mkdirSync(milestoneDir, { recursive: true });
+  writeFileSync(
+    join(milestoneDir, "M001-ROADMAP.md"),
+    [
+      "# M001: Parallel Research Milestone",
+      "",
+      "**Vision:** Research-ready slices.",
+      "",
+      "**Success Criteria:**",
+      "- Research both slices",
+      "",
+      "## Slices",
+      "",
+      "- [ ] **S01: Alpha** `risk:low` `depends:[]`",
+      "- [ ] **S02: Beta** `risk:low` `depends:[]`",
+      "",
+      "## Boundary Map",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+  return base;
+}
+
+afterEach(() => {
+  for (const dir of tmpDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+  tmpDirs.length = 0;
+});
 
 // ─── Dispatch rule ────────────────────────────────────────────────────────
 
@@ -74,4 +118,29 @@ test("template: validate-milestone uses parallel reviewers", () => {
     validateSrc.includes("Reviewer A") && validateSrc.includes("Reviewer B") && validateSrc.includes("Reviewer C"),
     "validate-milestone should dispatch 3 parallel reviewers",
   );
+});
+
+test("resolveDispatch prefers parallel research when multiple slices are ready", async () => {
+  const base = makeTmpProject();
+
+  const action = await resolveDispatch({
+    basePath: base,
+    mid: "M001",
+    midTitle: "Parallel Research Milestone",
+    state: {
+      phase: "planning",
+      activeMilestone: { id: "M001", title: "Parallel Research Milestone", status: "active" },
+      activeSlice: { id: "S01", title: "Alpha" },
+      activeTask: null,
+      registry: [],
+      blockers: [],
+    } as any,
+    prefs: undefined,
+  });
+
+  assert.equal(action.action, "dispatch");
+  if (action.action === "dispatch") {
+    assert.equal(action.unitType, "research-slice");
+    assert.equal(action.unitId, "M001/parallel-research");
+  }
 });

@@ -125,7 +125,7 @@ export class RetryHandler {
 		// generated error from getApiKey() when credentials are in a backoff window.
 		// Re-entering the retry handler for that message creates a cascade of empty
 		// error entries in the session file, breaking resume (#3429).
-		return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay|network.?(?:is\s+)?unavailable|credentials.*expired|extra usage is required|third.party.*draw from extra|third.party.*not.*available/i.test(
+		return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay|network.?(?:is\s+)?unavailable|credentials.*expired|extra usage is required|(?:out of|no) extra usage|third.party.*draw from extra|third.party.*not.*available/i.test(
 			err,
 		);
 	}
@@ -507,12 +507,13 @@ export class RetryHandler {
 	}
 
 	/**
-	 * Detect the Anthropic third-party subscription block error (#3772).
-	 * This is a hard policy block, not a transient rate limit — credential
-	 * rotation will not help.
+	 * Detect Anthropic subscription block errors (#3772).
+	 * These are hard policy blocks, not transient rate limits — credential
+	 * rotation will not help. Matches both the explicit "third-party" message
+	 * and the "out of extra usage" variant that subscription users receive.
 	 */
 	private _isThirdPartyBlock(errorMessage: string): boolean {
-		return /third[- .]party.*(?:draw from extra|not.*available|plan limits|not permitted|cannot be used|not supported)/i.test(errorMessage);
+		return /third[- .]party.*(?:draw from extra|not.*available|plan limits|not permitted|cannot be used|not supported)|(?:out of|no) extra usage/i.test(errorMessage);
 	}
 
 	/**

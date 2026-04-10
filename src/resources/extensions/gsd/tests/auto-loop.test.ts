@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -189,6 +189,54 @@ test("runUnit returns cancelled when session creation times out", async () => {
   assert.equal(result.status, "cancelled");
   assert.equal(result.event, undefined);
   assert.equal(pi.calls.length, 0);
+});
+
+test("runUnit keeps the session-switch guard across a late newSession settlement", async () => {
+  _resetPendingResolve();
+  mock.timers.enable();
+
+  try {
+    const ctx = makeMockCtx();
+    const pi = makeMockPi();
+    // Use delays longer than NEW_SESSION_TIMEOUT_MS (120s) so the timeout fires
+    const firstSession = makeMockSession({ newSessionDelayMs: 200_000 });
+    const secondSession = makeMockSession({ newSessionDelayMs: 200_000 });
+
+    const firstRun = runUnit(ctx, pi, firstSession, "task", "T01", "prompt");
+
+    // Tick past the 120s session timeout
+    mock.timers.tick(121_000);
+    await Promise.resolve();
+
+    const firstResult = await firstRun;
+    assert.equal(firstResult.status, "cancelled");
+    assert.equal(isSessionSwitchInFlight(), true, "guard should remain set after the timed-out session");
+
+    mock.timers.tick(1);
+    const secondRun = runUnit(ctx, pi, secondSession, "task", "T02", "prompt");
+
+    mock.timers.tick(100_000);
+    await Promise.resolve();
+    assert.equal(
+      isSessionSwitchInFlight(),
+      true,
+      "late settlement from the first session must not clear the newer session guard",
+    );
+
+    // Tick past the second session's timeout (121s total > 120s NEW_SESSION_TIMEOUT_MS)
+    mock.timers.tick(21_001);
+    await Promise.resolve();
+
+    const secondResult = await secondRun;
+    assert.equal(secondResult.status, "cancelled");
+
+    // Tick past the second session's delayed promise (200s) so .finally() fires
+    mock.timers.tick(80_000);
+    await Promise.resolve();
+    assert.equal(isSessionSwitchInFlight(), false, "guard should clear after the newer session settles");
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("runUnit returns cancelled when s.active is false before sendMessage", async () => {
@@ -412,7 +460,7 @@ function makeMockDeps(
     getCurrentBranch: () => "main",
     autoWorktreeBranch: () => "auto/M001",
     resolveMilestoneFile: () => null,
-    reconcileMergeState: () => false,
+    reconcileMergeState: () => "clean",
     getLedger: () => null,
     getProjectTotals: () => ({ cost: 0 }),
     formatCost: (c: number) => `$${c.toFixed(2)}`,

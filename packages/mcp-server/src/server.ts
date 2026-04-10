@@ -1,8 +1,9 @@
 /**
- * MCP Server — registers GSD orchestration + read-only project state tools.
+ * MCP Server — registers GSD orchestration, project-state, and workflow tools.
  *
  * Session tools (6): gsd_execute, gsd_status, gsd_result, gsd_cancel, gsd_query, gsd_resolve_blocker
  * Read-only tools (6): gsd_progress, gsd_roadmap, gsd_history, gsd_doctor, gsd_captures, gsd_knowledge
+ * Workflow tools (17): planning, replanning, completion, validation, reassessment, gate result, and milestone status tools
  *
  * Uses dynamic imports for @modelcontextprotocol/sdk because TS Node16
  * cannot resolve the SDK's subpath exports statically (same pattern as
@@ -19,6 +20,7 @@ import { readHistory } from './readers/metrics.js';
 import { readCaptures } from './readers/captures.js';
 import { readKnowledge } from './readers/knowledge.js';
 import { runDoctorLite } from './readers/doctor-lite.js';
+import { registerWorkflowTools } from './workflow-tools.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -115,7 +117,7 @@ interface McpServerInstance {
 // ---------------------------------------------------------------------------
 
 /**
- * Create and configure an MCP server with 12 GSD tools (6 session + 6 read-only).
+ * Create and configure an MCP server with session, read-only, and workflow tools.
  *
  * Returns the McpServer instance — call `connect(transport)` to start serving.
  * Uses dynamic imports for the MCP SDK to avoid TS subpath resolution issues.
@@ -404,6 +406,8 @@ export async function createMcpServer(sessionManager: SessionManager): Promise<{
       }
     },
   );
+
+  registerWorkflowTools(server);
 
   return { server };
 }
