@@ -88,6 +88,8 @@ export interface ExtensionUIDialogOptions {
 	timeout?: number;
 	/** When true, the user can select multiple options. The return type becomes `string[]`. */
 	allowMultiple?: boolean;
+	/** When true, text input dialogs should hide typed characters if supported by the client surface. */
+	secure?: boolean;
 }
 
 /** Placement for extension widgets. */

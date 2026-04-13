@@ -1173,6 +1173,36 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Get the earliest timestamp at which any credential for this provider
+	 * will become available again.  Returns `undefined` when no credentials
+	 * are backed off (i.e. all are immediately available).
+	 *
+	 * Callers can use this to sleep exactly long enough for the cooldown to
+	 * clear instead of using a fixed retry delay that may be shorter than the
+	 * backoff window.
+	 */
+	getEarliestBackoffExpiry(provider: string): number | undefined {
+		const providerMap = this.credentialBackoff.get(provider);
+		if (!providerMap || providerMap.size === 0) return undefined;
+
+		const now = Date.now();
+		let earliest: number | undefined;
+
+		for (const [index, expiresAt] of providerMap) {
+			if (expiresAt <= now) {
+				// Already expired — clean up
+				providerMap.delete(index);
+				continue;
+			}
+			if (earliest === undefined || expiresAt < earliest) {
+				earliest = expiresAt;
+			}
+		}
+
+		return earliest;
+	}
+
+	/**
 	 * Check if a credential index is currently backed off.
 	 */
 	private isCredentialBackedOff(provider: string, index: number): boolean {

@@ -27,36 +27,68 @@ One command. Walk away. Come back to a built project with clean git history.
 
 ---
 
-## What's New in v2.68
+## What's New in v2.71
 
-### MCP Workflow Tools
+### MCP Secure Env Collect
 
-- **Full workflow over MCP** — slice replanning, milestone management, slice completion, task completion, and core planning tools are now exposed over MCP for external integrations.
-- **Transport-gated MCP** — workflow tool availability adapts to provider transport capabilities automatically.
-- **Write gate enforcement** — workflow MCP respects write gates, preventing unauthorized state mutations from external clients.
+- **Secure credential collection over MCP** — the new `secure_env_collect` tool uses MCP form elicitation to collect secrets (API keys, tokens) from external clients without exposing values in tool output. Masks input in interactive mode.
+- **Hardened elicitation schema** — MCP elicitation schema handling is stricter, with proper validation and fallback for providers that don't support forms.
 
-### Reliability & Recovery
+### MCP Reliability
 
-- **False degraded-mode fix** — eliminates spurious degraded-mode warnings when the DB hasn't been initialized yet.
-- **Stale session resume suppression** — prevents stale interrupted-session resume prompts from hijacking fresh sessions.
-- **Merge conflict recovery** — `autoCommitDirtyState` guarded with cwd restore on `MergeConflictError`.
-- **Auto-resume hardening** — `autoStartTime` restored on resume, managed resources resynced on auto resume.
+- **Stream ordering preserved** — MCP tool output now renders in the correct order, fixing interleaved output in Claude Code and other MCP clients.
+- **isError flag propagation** — workflow tool execution failures now correctly return `isError: true`, so MCP clients can distinguish success from failure.
+- **Multi-round discuss questions** — new-project discuss phase supports multi-round questioning with structured question gates.
 
-### TUI & Developer Experience
+### Model Selection Hardening
 
-- **Contextual tips system** — TUI and web terminal now surface contextual tips based on workflow state.
-- **Claude Code MCP streaming** — real-time streaming and tool output rendering for Claude Code MCP connections.
+- **Unconfigured models blocked** — models without a configured provider are filtered from selection surfaces, preventing dispatch failures.
+- **Provider readiness required** — saved default model selection now verifies the provider is ready before accepting it.
+- **Session override honored** — `/gsd model` selection persists as a session override across all dispatch phases.
+- **Minimal context guard** — model override logic is skipped in minimal command contexts where it doesn't apply.
 
-### Infrastructure
+### Auto-Mode Resilience
 
-- **Weekly model registry refresh** — CI workflow auto-regenerates the model registry on a weekly schedule.
-- **Codebase cache auto-refresh** — stale codebase cache is refreshed automatically without manual intervention.
+- **Credential cooldown recovery** — auto-mode survives transient 429 rate-limit responses with structured cooldown errors and a bounded retry budget.
+- **Fire-and-forget auto start** — auto start is detached from active turns to prevent blocking.
+- **Scoped forensics** — stuck-loop forensics are now scoped to auto sessions only, preventing false positives in interactive use.
+
+### TUI Improvements
+
+- **Overlay subscription fix** — resolved overlay subscription lifecycle and `Ctrl+Shift+P` shortcut conflict.
+- **Improved overlays and shortcuts** — GSD overlays, keyboard shortcuts, and notification flows redesigned for consistency.
+- **Pinned output restored** — pinned output bar displays above the editor during tool execution again.
+- **Turn completion cleanup** — pinned latest output is cleared on turn completion, preventing stale output from persisting.
+- **Secure input masking** — extension input values are masked in interactive mode when collecting secrets.
+
+### Provider Fixes
+
+- **Full OAuth login URLs** — OAuth login URLs are now displayed in full instead of being truncated.
+- **MiniMax bearer auth** — MiniMax Anthropic API requests use proper bearer authentication.
+- **Case-insensitive tool rendering** — renderable tool matching is now case-insensitive, fixing missed tool output.
+- **Headless idle timeout** — idle timeout is kept off during interactive tool execution in headless mode.
+
+### Reliability & Internals
+
+- **TOCTOU file locking** — race conditions in event log and custom workflow graph file locking are fixed with proper atomic lock acquisition.
+- **State derive refactor** — `deriveStateFromDb` god function extracted into composable, testable helpers.
+- **Windows portability** — hardened cross-platform portability across runtime, tooling, and CI.
+- **Model routing transparency** — dynamic routing is skipped for interactive dispatches; model changes are always shown in the banner.
+- **Capability-aware routing (ADR-004)** — full implementation of capability scoring, `before_model_select` hook, and task metadata extraction.
+- **Multi-model provider strategy (ADR-005)** — infrastructure for multi-provider model selection wired into live paths.
+- **Anti-fabrication guardrails** — discuss prompts enforce turn-taking to prevent fabricated user responses.
+- **Milestone worktree cleanup** — merged worktree cleanup uses the milestone branch instead of generic lookups.
+- **Tool cache control** — `cache_control` breakpoints added to tool definitions for improved prompt caching.
 
 See the full [Changelog](./CHANGELOG.md) for details on every release.
 
 <details>
-<summary>Previous highlights (v2.67 and earlier)</summary>
+<summary>Previous highlights (v2.70 and earlier)</summary>
 
+- **Full workflow over MCP (v2.68)** — slice replanning, milestone management, slice completion, task completion, and core planning tools exposed over MCP
+- **Transport-gated MCP (v2.68)** — workflow tool availability adapts to provider transport capabilities automatically
+- **Contextual tips system (v2.68)** — TUI and web terminal surface contextual tips based on workflow state
+- **Ask user questions over MCP (v2.70)** — interactive questions exposed via elicitation for external integrations
 - **Tiered Context Injection (M005)** — relevance-scoped context with 65%+ token reduction
 - **Resilient transient error recovery** — defers to Core RetryHandler and fixes cmdCtx race conditions
 - **Anthropic subscription routing** — auto-routed through Claude Code CLI provider with proper display names
@@ -591,8 +623,10 @@ The best practice for working in teams is to ensure unique milestone names acros
 # ── GSD: Runtime / Ephemeral (per-developer, per-session) ──────────────────
 # Crash detection sentinel — PID lock, written per auto-mode session
 .gsd/auto.lock
-# Auto-mode dispatch tracker — prevents re-running completed units
-.gsd/completed-units.json
+# Auto-mode dispatch tracker — prevents re-running completed units (includes archived per-milestone files)
+.gsd/completed-units*.json
+# State manifest — workflow state for recovery
+.gsd/state-manifest.json
 # Derived state cache — regenerated from plan/roadmap files on disk
 .gsd/STATE.md
 # Per-developer token/cost accumulator
@@ -605,6 +639,14 @@ The best practice for working in teams is to ensure unique milestone names acros
 .gsd/worktrees/
 # Parallel orchestration IPC and worker status
 .gsd/parallel/
+# SQLite database and WAL sidecars — checkpoint state, forensics data
+.gsd/gsd.db*
+# Daily-rotated event journal — structured event log for forensics
+.gsd/journal/
+# Doctor run history — diagnostic check results
+.gsd/doctor-history.jsonl
+# Workflow event log — structured event stream
+.gsd/event-log.jsonl
 # Generated HTML reports (regenerable via /gsd export --html)
 .gsd/reports/
 # Session-specific interrupted-work markers
@@ -722,6 +764,14 @@ models:
 ```
 
 Use expensive models where quality matters (planning, complex execution) and cheaper/faster models where speed matters (research, simple completions). Each phase accepts a simple model string or an object with `model` and `fallbacks` — if the primary model fails (provider outage, rate limit, credit exhaustion), GSD automatically tries the next fallback. GSD tracks cost per-model so you can see exactly where your budget goes.
+
+---
+
+## Ecosystem
+
+| Project | Description |
+| ------- | ----------- |
+| [GSD2 Config Utility](https://github.com/jeremymcs/gsd2-config) | Standalone configuration tool for managing GSD preferences, providers, and API keys |
 
 ---
 

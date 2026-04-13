@@ -14,6 +14,7 @@ import { classifyUnitComplexity, tierLabel } from "./complexity-classifier.js";
 import { resolveModelForComplexity, escalateTier, getEligibleModels, loadCapabilityOverrides, adjustToolSet, filterToolsForProvider } from "./model-router.js";
 import { getLedger, getProjectTotals } from "./metrics.js";
 import { unitPhaseLabel } from "./auto-dashboard.js";
+import { getSessionModelOverride } from "./session-model-override.js";
 
 export interface ModelSelectionResult {
   /** Routing metadata for metrics recording */
@@ -25,9 +26,16 @@ export interface ModelSelectionResult {
 export function resolvePreferredModelConfig(
   unitType: string,
   autoModeStartModel: { provider: string; id: string } | null,
+  /** When false, only return explicit per-phase model configs — do not
+   *  synthesize a routing ceiling from dynamic_routing.tier_models (#3962). */
+  isAutoMode = true,
 ) {
   const explicitConfig = resolveModelWithFallbacksForUnit(unitType);
   if (explicitConfig) return explicitConfig;
+
+  // In interactive mode, don't synthesize a routing-based model config.
+  // The user's session model (/model) should be used as-is (#3962).
+  if (!isAutoMode) return undefined;
 
   const routingConfig = resolveDynamicRoutingConfig();
   if (!routingConfig.enabled || !routingConfig.tier_models) return undefined;
@@ -62,8 +70,18 @@ export async function selectAndApplyModel(
   verbose: boolean,
   autoModeStartModel: { provider: string; id: string } | null,
   retryContext?: { isRetry: boolean; previousTier?: string },
+  /** When false (interactive/guided-flow), skip dynamic routing and use the session model.
+   *  Dynamic routing only applies in auto-mode where cost optimization is expected. (#3962) */
+  isAutoMode = true,
+  /** Explicit /gsd model pin captured at bootstrap for long-running auto loops. */
+  sessionModelOverride?: { provider: string; id: string } | null,
 ): Promise<ModelSelectionResult> {
-  const modelConfig = resolvePreferredModelConfig(unitType, autoModeStartModel);
+  const effectiveSessionModelOverride = sessionModelOverride === undefined
+    ? getSessionModelOverride(ctx.sessionManager.getSessionId())
+    : (sessionModelOverride ?? undefined);
+  const modelConfig = effectiveSessionModelOverride
+    ? undefined
+    : resolvePreferredModelConfig(unitType, autoModeStartModel, isAutoMode);
   let routing: { tier: string; modelDowngraded: boolean } | null = null;
   let appliedModel: Model<Api> | null = null;
 
@@ -71,7 +89,13 @@ export async function selectAndApplyModel(
     const availableModels = ctx.modelRegistry.getAvailable();
 
     // ─── Dynamic Model Routing ─────────────────────────────────────────
+    // Dynamic routing (complexity-based downgrading) only applies in auto-mode.
+    // Interactive/guided-flow dispatches use the user's session model directly,
+    // respecting their /model selection without silent downgrades (#3962).
     const routingConfig = resolveDynamicRoutingConfig();
+    if (!isAutoMode) {
+      routingConfig.enabled = false;
+    }
     let effectiveModelConfig = modelConfig;
     let routingTierLabel = "";
 
@@ -123,12 +147,11 @@ export async function selectAndApplyModel(
           const escalated = escalateTier(retryContext.previousTier as ComplexityTier);
           if (escalated) {
             classification = { ...classification, tier: escalated, reason: "escalated after failure" };
-            if (verbose) {
-              ctx.ui.notify(
-                `Tier escalation: ${retryContext.previousTier} → ${escalated} (retry after failure)`,
-                "info",
-              );
-            }
+            // Always notify on tier escalation — model changes should be visible (#3962)
+            ctx.ui.notify(
+              `Tier escalation: ${retryContext.previousTier} → ${escalated} (retry after failure)`,
+              "info",
+            );
           }
         }
 
@@ -195,24 +218,23 @@ export async function selectAndApplyModel(
             primary: routingResult.modelId,
             fallbacks: routingResult.fallbacks,
           };
-          if (verbose) {
-            if (routingResult.selectionMethod === "capability-scored" && routingResult.capabilityScores) {
-              // Verbose scoring breakdown for capability-scored decisions (D-20)
-              const tierLbl = tierLabel(classification.tier);
-              const scores = Object.entries(routingResult.capabilityScores)
-                .sort(([, a], [, b]) => b - a)
-                .map(([id, score]) => `${id}: ${score.toFixed(1)}`)
-                .join(", ");
-              ctx.ui.notify(
-                `Dynamic routing [${tierLbl}]: ${routingResult.modelId} (capability-scored) — ${scores}`,
-                "info",
-              );
-            } else {
-              ctx.ui.notify(
-                `Dynamic routing [${tierLabel(classification.tier)}]: ${routingResult.modelId} (${classification.reason})`,
-                "info",
-              );
-            }
+          // Always notify on model downgrade — users should see when their
+          // model selection is overridden, not just in verbose mode (#3962).
+          if (routingResult.selectionMethod === "capability-scored" && routingResult.capabilityScores) {
+            const tierLbl = tierLabel(classification.tier);
+            const scores = Object.entries(routingResult.capabilityScores)
+              .sort(([, a], [, b]) => b - a)
+              .map(([id, score]) => `${id}: ${score.toFixed(1)}`)
+              .join(", ");
+            ctx.ui.notify(
+              `Dynamic routing [${tierLbl}]: ${routingResult.modelId} (capability-scored) — ${scores}`,
+              "info",
+            );
+          } else {
+            ctx.ui.notify(
+              `Dynamic routing [${tierLabel(classification.tier)}]: ${routingResult.modelId} (${classification.reason})`,
+              "info",
+            );
           }
         }
         routingTierLabel = ` [${tierLabel(classification.tier)}]`;

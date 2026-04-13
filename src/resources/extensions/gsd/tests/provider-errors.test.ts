@@ -32,6 +32,15 @@ test("classifyError detects rate limit from message", () => {
   assert.equal(result.kind, "rate-limit");
 });
 
+test("classifyError treats OpenRouter affordability errors as transient rate-limit class", () => {
+  const result = classifyError(
+    "402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 329.",
+  );
+  assert.ok(isTransient(result));
+  assert.equal(result.kind, "rate-limit");
+  assert.ok("retryAfterMs" in result && result.retryAfterMs > 0);
+});
+
 test("classifyError extracts reset delay from message", () => {
   const result = classifyError("rate limit exceeded, reset in 45s");
   assert.equal(result.kind, "rate-limit");
@@ -99,6 +108,13 @@ test("classifyError detects billing error as permanent", () => {
 test("classifyError detects quota exceeded as permanent", () => {
   const result = classifyError("quota exceeded for this month");
   assert.ok(!isTransient(result));
+});
+
+test("classifyError treats plain 'Connection error.' as transient connection failure (#3594)", () => {
+  const result = classifyError("Connection error.");
+  assert.ok(isTransient(result));
+  assert.equal(result.kind, "connection");
+  assert.ok("retryAfterMs" in result && result.retryAfterMs === 15_000);
 });
 
 test("classifyError treats unknown error as not transient", () => {

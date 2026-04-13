@@ -37,6 +37,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"opencode-go": "kimi-k2.5",
 	"kimi-coding": "kimi-k2-thinking",
 	"alibaba-coding-plan": "qwen3.5-plus",
+	"alibaba-dashscope": "qwen3.5-plus",
 	ollama: "llama3.1:8b",
 	"ollama-cloud": "qwen3:32b",
 };
@@ -504,27 +505,31 @@ export async function findInitialModel(options: {
 
 	// 3. Try saved default from settings
 	if (defaultProvider && defaultModelId) {
-		const found = modelRegistry.find(defaultProvider, defaultModelId);
-		if (found) {
-			// Check if the provider's recommended default is a higher-capability variant
-			// of the saved model (e.g. saved "claude-opus-4-6" vs recommended "claude-opus-4-6-extended").
-			// If so, prefer the recommended variant to avoid using a smaller context window (#1125).
-			const recommendedId = defaultModelPerProvider[defaultProvider as KnownProvider];
-			if (recommendedId && recommendedId !== defaultModelId && recommendedId.startsWith(defaultModelId)) {
-				const recommended = modelRegistry.find(defaultProvider, recommendedId);
-				if (recommended) {
-					model = recommended;
-					if (defaultThinkingLevel) {
-						thinkingLevel = defaultThinkingLevel;
+		// Guard against stale settings defaults: only use the saved provider/model
+		// if the provider is actually request-ready (auth/OAuth/CLI ready).
+		if (modelRegistry.isProviderRequestReady(defaultProvider)) {
+			const found = modelRegistry.find(defaultProvider, defaultModelId);
+			if (found) {
+				// Check if the provider's recommended default is a higher-capability variant
+				// of the saved model (e.g. saved "claude-opus-4-6" vs recommended "claude-opus-4-6-extended").
+				// If so, prefer the recommended variant to avoid using a smaller context window (#1125).
+				const recommendedId = defaultModelPerProvider[defaultProvider as KnownProvider];
+				if (recommendedId && recommendedId !== defaultModelId && recommendedId.startsWith(defaultModelId)) {
+					const recommended = modelRegistry.find(defaultProvider, recommendedId);
+					if (recommended) {
+						model = recommended;
+						if (defaultThinkingLevel) {
+							thinkingLevel = defaultThinkingLevel;
+						}
+						return { model, thinkingLevel, fallbackMessage: undefined };
 					}
-					return { model, thinkingLevel, fallbackMessage: undefined };
 				}
+				model = found;
+				if (defaultThinkingLevel) {
+					thinkingLevel = defaultThinkingLevel;
+				}
+				return { model, thinkingLevel, fallbackMessage: undefined };
 			}
-			model = found;
-			if (defaultThinkingLevel) {
-				thinkingLevel = defaultThinkingLevel;
-			}
-			return { model, thinkingLevel, fallbackMessage: undefined };
 		}
 	}
 

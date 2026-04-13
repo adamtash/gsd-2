@@ -1,13 +1,35 @@
-import { Loader, Spacer, Text } from "@gsd/pi-tui";
+import { Loader, Markdown, Spacer, Text } from "@gsd/pi-tui";
 
 import type { InteractiveModeEvent, InteractiveModeStateHost } from "../interactive-mode-state.js";
 import { theme } from "../theme/theme.js";
 import { AssistantMessageComponent } from "../components/assistant-message.js";
 import { ToolExecutionComponent } from "../components/tool-execution.js";
+import { DynamicBorder } from "../components/dynamic-border.js";
 import { appKey } from "../components/keybinding-hints.js";
 
 // Tracks the last processed content index to avoid re-scanning all blocks on every message_update
 let lastProcessedContentIndex = 0;
+
+function hasVisibleAssistantContent(message: { content: Array<any> }): boolean {
+	return message.content.some(
+		(c) =>
+			(c.type === "text" && typeof c.text === "string" && c.text.trim().length > 0)
+			|| (c.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim().length > 0),
+	);
+}
+
+function hasAssistantToolBlocks(message: { content: Array<any> }): boolean {
+	return message.content.some((c) => c.type === "toolCall" || c.type === "serverToolUse");
+}
+
+// Tracks the latest assistant text for the pinned message zone
+let lastPinnedText = "";
+// Whether any tool execution has been added in this assistant turn (triggers pinned display)
+let hasToolsInTurn = false;
+// Reference to the pinned border so we can toggle its label between working/idle
+let pinnedBorder: DynamicBorder | undefined;
+// Reference to the pinned markdown component below the border
+let pinnedTextComponent: Markdown | undefined;
 
 export async function handleAgentEvent(host: InteractiveModeStateHost & {
 	init: () => Promise<void>;
@@ -31,9 +53,15 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 
 	host.footer.invalidate();
 
-	// Reset content index tracker when a new assistant message starts
+	// Reset content index tracker and pinned state when a new assistant message starts
 	if (event.type === "message_start" && event.message.role === "assistant") {
 		lastProcessedContentIndex = 0;
+		lastPinnedText = "";
+		hasToolsInTurn = false;
+		if (pinnedBorder) pinnedBorder.stopSpinner();
+		pinnedBorder = undefined;
+		pinnedTextComponent = undefined;
+		host.pinnedMessageContainer.clear();
 	}
 
 	switch (event.type) {
@@ -46,6 +74,12 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 					host.streamingMessage = undefined;
 					host.pendingTools.clear();
 					host.pendingMessagesContainer.clear();
+					host.pinnedMessageContainer.clear();
+					lastPinnedText = "";
+					hasToolsInTurn = false;
+					if (pinnedBorder) pinnedBorder.stopSpinner();
+					pinnedBorder = undefined;
+					pinnedTextComponent = undefined;
 					host.compactionQueuedMessages = [];
 					host.rebuildChatFromMessages();
 					host.updatePendingMessagesDisplay();
@@ -104,45 +138,54 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 				host.updatePendingMessagesDisplay();
 				host.ui.requestRender();
 			} else if (event.message.role === "assistant") {
-				host.streamingComponent = new AssistantMessageComponent(
-					undefined,
-					host.hideThinkingBlock,
-					host.getMarkdownThemeWithSettings(),
-					host.settingsManager.getTimestampFormat(),
-				);
 				host.streamingMessage = event.message;
-				host.chatContainer.addChild(host.streamingComponent);
-				host.streamingComponent.updateContent(host.streamingMessage);
+				// External-tool providers can stream multiple assistant turns through
+				// one response. Delay component creation until visible assistant text
+				// arrives so tool outputs keep chronological ordering.
 				host.ui.requestRender();
 			}
 			break;
 
 		case "message_update":
-			if (host.streamingComponent && event.message.role === "assistant") {
+			if (event.message.role === "assistant") {
 				host.streamingMessage = event.message;
-				host.streamingComponent.updateContent(host.streamingMessage);
-
-				// When the stream adapter signals a completed tool call with an
-				// external result (from Claude Code SDK), update the pending
-				// ToolExecutionComponent immediately so output is visible in
-				// real-time instead of waiting for the session to end.
 				const innerEvent = event.assistantMessageEvent;
+
+				let externalToolResult:
+					| { toolCallId: string; content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; details: Record<string, unknown>; isError: boolean }
+					| undefined;
 				if (innerEvent.type === "toolcall_end" && innerEvent.toolCall) {
 					const tc = innerEvent.toolCall as any;
-					const externalResult = tc.externalResult;
-					if (externalResult) {
-						const component = host.pendingTools.get(tc.id);
-						if (component) {
-							component.updateResult({
-								content: externalResult.content ?? [{ type: "text", text: "" }],
-								details: externalResult.details ?? {},
-								isError: externalResult.isError ?? false,
-							});
-						}
+					const ext = tc.externalResult;
+					if (ext) {
+						externalToolResult = {
+							toolCallId: tc.id,
+							content: ext.content ?? [{ type: "text", text: "" }],
+							details: ext.details ?? {},
+							isError: ext.isError ?? false,
+						};
+					}
+				} else if (innerEvent.type === "server_tool_use") {
+					const idx = typeof innerEvent.contentIndex === "number" ? innerEvent.contentIndex : -1;
+					const block = idx >= 0 ? (host.streamingMessage.content[idx] as any) : undefined;
+					const ext = block?.externalResult;
+					if (block?.id && ext) {
+						externalToolResult = {
+							toolCallId: block.id,
+							content: ext.content ?? [{ type: "text", text: "" }],
+							details: ext.details ?? {},
+							isError: ext.isError ?? false,
+						};
 					}
 				}
 
 				const contentBlocks = host.streamingMessage.content;
+				// Some adapters reuse a single assistant lifecycle while internally
+				// spanning multiple provider turns. When a new turn starts, content
+				// length can shrink back to 0/1; reset scan index to avoid skipping.
+				if (lastProcessedContentIndex >= contentBlocks.length) {
+					lastProcessedContentIndex = 0;
+				}
 				for (let i = lastProcessedContentIndex; i < contentBlocks.length; i++) {
 					const content = contentBlocks[i];
 					if (content.type === "toolCall") {
@@ -192,19 +235,108 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 						}
 					}
 				}
+
+				// When the stream adapter signals a completed tool call with an
+				// external result (from Claude Code SDK), update the pending
+				// ToolExecutionComponent immediately so output is visible in
+				// real-time instead of waiting for the session to end.
+				if (externalToolResult) {
+					const component = host.pendingTools.get(externalToolResult.toolCallId);
+					if (component) {
+						component.updateResult({
+							content: externalToolResult.content,
+							details: externalToolResult.details,
+							isError: externalToolResult.isError,
+						});
+					}
+				}
+
+				// Render assistant text/thinking after tool components so mixed
+				// streams keep chronological ordering in the chat container.
+				const hasToolBlocks = hasAssistantToolBlocks(host.streamingMessage);
+				if (!host.streamingComponent && hasVisibleAssistantContent(host.streamingMessage)) {
+					host.streamingComponent = new AssistantMessageComponent(
+						undefined,
+						host.hideThinkingBlock,
+						host.getMarkdownThemeWithSettings(),
+						host.settingsManager.getTimestampFormat(),
+					);
+					host.chatContainer.addChild(host.streamingComponent);
+				}
+				if (host.streamingComponent) {
+					if (hasToolBlocks) {
+						host.chatContainer.removeChild(host.streamingComponent);
+						host.chatContainer.addChild(host.streamingComponent);
+					}
+					host.streamingComponent.updateContent(host.streamingMessage);
+				}
+
 				// Update index: fully processed blocks won't need re-scanning.
 				// Keep the last block's index (it may still be accumulating data),
 				// so we re-check it next time but skip all earlier ones.
 				if (contentBlocks.length > 0) {
 					lastProcessedContentIndex = Math.max(0, contentBlocks.length - 1);
 				}
+
+				// Pinned message: mirror the latest assistant text above the editor
+				// when tool executions push it out of the viewport.
+				const hasTools = contentBlocks.some(
+					(c: any) => c.type === "toolCall" || c.type === "serverToolUse",
+				);
+				if (hasTools) hasToolsInTurn = true;
+
+				if (hasToolsInTurn) {
+					// Collect the latest text block(s) from the assistant message
+					let latestText = "";
+					for (let i = contentBlocks.length - 1; i >= 0; i--) {
+						const c = contentBlocks[i] as any;
+						if (c.type === "text" && c.text?.trim()) {
+							latestText = c.text.trim();
+							break;
+						}
+					}
+
+					if (latestText && latestText !== lastPinnedText) {
+						lastPinnedText = latestText;
+
+						if (!pinnedBorder) {
+							// First time: create border + text component
+							host.pinnedMessageContainer.clear();
+							pinnedBorder = new DynamicBorder(
+								(str: string) => theme.fg("dim", str),
+								"Working · Latest Output",
+							);
+							pinnedBorder.startSpinner(host.ui, (str: string) => theme.fg("accent", str));
+							host.pinnedMessageContainer.addChild(pinnedBorder);
+							pinnedTextComponent = new Markdown(latestText, 1, 0, host.getMarkdownThemeWithSettings());
+							// Cap pinned content to ~40% of terminal height so tall output
+							// doesn't exceed the viewport and cause render flashing.
+							pinnedTextComponent.maxLines = Math.max(3, Math.floor(host.ui.terminal.rows * 0.4));
+							host.pinnedMessageContainer.addChild(pinnedTextComponent);
+							// Hide the separate status loader — the pinned zone replaces it
+							if (host.loadingAnimation) {
+								host.loadingAnimation.stop();
+								host.loadingAnimation = undefined;
+							}
+							host.statusContainer.clear();
+						} else {
+							// Update existing markdown component in-place
+							pinnedTextComponent?.setText(latestText);
+							// Refresh maxLines in case terminal was resized
+							if (pinnedTextComponent) {
+								pinnedTextComponent.maxLines = Math.max(3, Math.floor(host.ui.terminal.rows * 0.4));
+							}
+						}
+					}
+				}
+
 				host.ui.requestRender();
 			}
 			break;
 
 		case "message_end":
 			if (event.message.role === "user") break;
-			if (host.streamingComponent && event.message.role === "assistant") {
+			if (event.message.role === "assistant") {
 				host.streamingMessage = event.message;
 				let errorMessage: string | undefined;
 				if (host.streamingMessage.stopReason === "aborted") {
@@ -214,13 +346,36 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 						: "Operation aborted";
 					host.streamingMessage.errorMessage = errorMessage;
 				}
-				host.streamingComponent.updateContent(host.streamingMessage);
+
+				const shouldRenderAssistant = hasVisibleAssistantContent(host.streamingMessage)
+					|| (
+						(host.streamingMessage.stopReason === "aborted" || host.streamingMessage.stopReason === "error")
+						&& !hasAssistantToolBlocks(host.streamingMessage)
+					);
+				if (!host.streamingComponent && shouldRenderAssistant) {
+					host.streamingComponent = new AssistantMessageComponent(
+						undefined,
+						host.hideThinkingBlock,
+						host.getMarkdownThemeWithSettings(),
+						host.settingsManager.getTimestampFormat(),
+					);
+					host.chatContainer.addChild(host.streamingComponent);
+				}
+				if (host.streamingComponent) {
+					host.streamingComponent.updateContent(host.streamingMessage);
+				}
+
 				if (host.streamingMessage.stopReason === "aborted" || host.streamingMessage.stopReason === "error") {
 					if (!errorMessage) {
 						errorMessage = host.streamingMessage.errorMessage || "Error";
 					}
-					for (const [, component] of host.pendingTools.entries()) {
-						component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+					const pendingComponents = Array.from(host.pendingTools.values());
+					if (pendingComponents.length > 0) {
+						const [first, ...rest] = pendingComponents;
+						first.completeWithError(errorMessage);
+						for (const component of rest) {
+							component.completeWithError();
+						}
 					}
 					host.pendingTools.clear();
 				} else {
@@ -230,6 +385,15 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 				}
 				host.streamingComponent = undefined;
 				host.streamingMessage = undefined;
+				// Clear pinned output once the message is finalized in the chat
+				// container — prevents duplicate display when the agent continues
+				// (e.g. form elicitation) after the assistant message ends.
+				if (pinnedBorder) pinnedBorder.stopSpinner();
+				host.pinnedMessageContainer.clear();
+				lastPinnedText = "";
+				hasToolsInTurn = false;
+				pinnedBorder = undefined;
+				pinnedTextComponent = undefined;
 				host.footer.invalidate();
 			}
 			host.ui.requestRender();
@@ -282,6 +446,16 @@ export async function handleAgentEvent(host: InteractiveModeStateHost & {
 				host.streamingMessage = undefined;
 			}
 			host.pendingTools.clear();
+			// Pinned output is only useful while work is actively streaming.
+			// Keep chat history as the single source after completion.
+			if (pinnedBorder) {
+				pinnedBorder.stopSpinner();
+			}
+			host.pinnedMessageContainer.clear();
+			lastPinnedText = "";
+			hasToolsInTurn = false;
+			pinnedBorder = undefined;
+			pinnedTextComponent = undefined;
 			await host.checkShutdownRequested();
 			host.ui.requestRender();
 			break;

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 import { _getAdapter, closeDatabase } from "../../../src/resources/extensions/gsd/gsd-db.ts";
-import { registerWorkflowTools } from "./workflow-tools.ts";
+import { registerWorkflowTools, WORKFLOW_TOOL_NAMES } from "./workflow-tools.ts";
 
 function makeTmpBase(): string {
   const base = join(tmpdir(), `gsd-mcp-workflow-${randomUUID()}`);
@@ -68,33 +68,12 @@ function makeMockServer() {
 }
 
 describe("workflow MCP tools", () => {
-  it("registers the seventeen workflow tools", () => {
+  it("registers the full headless-safe workflow tool surface", () => {
     const server = makeMockServer();
     registerWorkflowTools(server as any);
 
-    assert.equal(server.tools.length, 17);
-    assert.deepEqual(
-      server.tools.map((t) => t.name),
-      [
-        "gsd_plan_milestone",
-        "gsd_plan_slice",
-        "gsd_replan_slice",
-        "gsd_slice_replan",
-        "gsd_slice_complete",
-        "gsd_complete_slice",
-        "gsd_complete_milestone",
-        "gsd_milestone_complete",
-        "gsd_validate_milestone",
-        "gsd_milestone_validate",
-        "gsd_reassess_roadmap",
-        "gsd_roadmap_reassess",
-        "gsd_save_gate_result",
-        "gsd_summary_save",
-        "gsd_task_complete",
-        "gsd_complete_task",
-        "gsd_milestone_status",
-      ],
-    );
+    assert.equal(server.tools.length, WORKFLOW_TOOL_NAMES.length);
+    assert.deepEqual(server.tools.map((t) => t.name), [...WORKFLOW_TOOL_NAMES]);
   });
 
   it("gsd_summary_save writes artifact through the shared executor", async () => {
@@ -399,6 +378,116 @@ describe("workflow MCP tools", () => {
       assert.ok(
         existsSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-PLAN.md")),
         "task plan should exist on disk",
+      );
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_requirement_save opens the DB before inline requirement writes", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const requirementTool = server.tools.find((t) => t.name === "gsd_requirement_save");
+      assert.ok(requirementTool, "requirement tool should be registered");
+
+      closeDatabase();
+
+      const result = await requirementTool!.handler({
+        projectDir: base,
+        class: "operability",
+        description: "Inline MCP requirement save regression",
+        why: "Reproduce missing ensureDbOpen in workflow-tools",
+        source: "user",
+        status: "active",
+        primary_owner: "M010/S10",
+        validation: "n/a",
+      });
+
+      assert.match((result as any).content[0].text as string, /Saved requirement R\d+/);
+      assert.ok(existsSync(join(base, ".gsd", "REQUIREMENTS.md")), "REQUIREMENTS.md should be written to disk");
+      const row = _getAdapter()!
+        .prepare("SELECT id, class, description FROM requirements WHERE description = ?")
+        .get("Inline MCP requirement save regression") as Record<string, unknown> | undefined;
+      assert.ok(row, "requirement should be written to the database");
+      assert.equal(row["class"], "operability");
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_plan_task reopens the DB before inline task planning writes", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const milestoneTool = server.tools.find((t) => t.name === "gsd_plan_milestone");
+      const sliceTool = server.tools.find((t) => t.name === "gsd_plan_slice");
+      const taskTool = server.tools.find((t) => t.name === "gsd_plan_task");
+      assert.ok(milestoneTool, "milestone planning tool should be registered");
+      assert.ok(sliceTool, "slice planning tool should be registered");
+      assert.ok(taskTool, "task planning tool should be registered");
+
+      await milestoneTool!.handler({
+        projectDir: base,
+        milestoneId: "M010",
+        title: "Inline task planning DB reopen",
+        vision: "Seed a slice, close the DB, then plan another task inline.",
+        slices: [
+          {
+            sliceId: "S10",
+            title: "Inline task planning",
+            risk: "medium",
+            depends: [],
+            demo: "Inline gsd_plan_task reopens the DB after it was closed.",
+            goal: "Preserve MCP task planning after the DB adapter is closed.",
+            successCriteria: "The second task plan persists after a closed DB is reopened.",
+            proofLevel: "integration",
+            integrationClosure: "The inline MCP handler reopens the DB before planning.",
+            observabilityImpact: "workflow-tools MCP tests cover the inline reopen path.",
+          },
+        ],
+      });
+      await sliceTool!.handler({
+        projectDir: base,
+        milestoneId: "M010",
+        sliceId: "S10",
+        goal: "Create the initial slice plan before closing the DB.",
+        tasks: [
+          {
+            taskId: "T10",
+            title: "Seed existing task",
+            description: "Create the initial task plan before closing the DB.",
+            estimate: "5m",
+            files: ["packages/mcp-server/src/workflow-tools.ts"],
+            verify: "node --test",
+            inputs: ["M010-ROADMAP.md"],
+            expectedOutput: ["T10-PLAN.md"],
+          },
+        ],
+      });
+
+      closeDatabase();
+
+      const result = await taskTool!.handler({
+        projectDir: base,
+        milestoneId: "M010",
+        sliceId: "S10",
+        taskId: "T11",
+        title: "Reopen and plan",
+        description: "Exercise the inline plan-task path after the DB was closed.",
+        estimate: "5m",
+        files: ["packages/mcp-server/src/workflow-tools.ts"],
+        verify: "node --test",
+        inputs: ["M010-ROADMAP.md", "S10-PLAN.md"],
+        expectedOutput: ["T11-PLAN.md"],
+      });
+
+      assert.match((result as any).content[0].text as string, /Planned task T11/);
+      assert.ok(
+        existsSync(join(base, ".gsd", "milestones", "M010", "slices", "S10", "tasks", "T11-PLAN.md")),
+        "T11 plan should be written after reopening the DB",
       );
     } finally {
       cleanup(base);
@@ -972,5 +1061,33 @@ describe("workflow MCP tools", () => {
     } finally {
       cleanup(base);
     }
+  });
+});
+
+describe("URL scheme regex — Windows drive letter safety", () => {
+  // This is the regex used in getWriteGateModuleCandidates() and
+  // getWorkflowExecutorModuleCandidates() to reject non-file URL schemes.
+  // It must NOT match single-letter Windows drive prefixes (C:, D:, etc.).
+  const urlSchemeRegex = /^[a-z]{2,}:/i;
+
+  it("rejects multi-letter URL schemes", () => {
+    assert.ok(urlSchemeRegex.test("http://example.com"), "http: should match");
+    assert.ok(urlSchemeRegex.test("https://example.com"), "https: should match");
+    assert.ok(urlSchemeRegex.test("ftp://files.example.com"), "ftp: should match");
+    assert.ok(urlSchemeRegex.test("file:///C:/Users"), "file: should match");
+    assert.ok(urlSchemeRegex.test("node:fs"), "node: should match");
+  });
+
+  it("allows single-letter Windows drive prefixes", () => {
+    assert.ok(!urlSchemeRegex.test("C:\\Users\\user\\project"), "C:\\ should not match");
+    assert.ok(!urlSchemeRegex.test("D:\\other\\path"), "D:\\ should not match");
+    assert.ok(!urlSchemeRegex.test("c:\\lowercase\\drive"), "c:\\ should not match");
+    assert.ok(!urlSchemeRegex.test("E:/forward/slash/path"), "E:/ should not match");
+  });
+
+  it("allows bare filesystem paths", () => {
+    assert.ok(!urlSchemeRegex.test("/usr/local/lib/module.js"), "unix absolute path should not match");
+    assert.ok(!urlSchemeRegex.test("./relative/path.js"), "relative path should not match");
+    assert.ok(!urlSchemeRegex.test("../parent/path.js"), "parent relative path should not match");
   });
 });

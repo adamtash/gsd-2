@@ -20,6 +20,8 @@ import { resolve } from "node:path";
 import type { TaskRow } from "./gsd-db.ts";
 import type { PreExecutionCheckJSON } from "./verification-evidence.ts";
 
+const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
+
 // ─── Result Types ────────────────────────────────────────────────────────────
 
 export interface PreExecutionResult {
@@ -126,9 +128,10 @@ async function checkPackageOnNpm(
   timeoutMs = 5000
 ): Promise<{ exists: boolean; error?: string }> {
   return new Promise((resolve) => {
-    const child = spawn("npm", ["view", packageName, "name"], {
+    const child = spawn(NPM_COMMAND, ["view", packageName, "name"], {
       stdio: ["ignore", "pipe", "pipe"],
       timeout: timeoutMs,
+      shell: process.platform === "win32",
     });
 
     let stdout = "";
@@ -263,9 +266,9 @@ function extractPathFromAnnotation(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return trimmed;
 
-  const backtickMatch = trimmed.match(/^`([^`]+)`(?:\s+[—–-]\s+.*)?$/);
+  const backtickMatch = trimmed.match(/^(`+)([^`]+)\1(?:(?:\s+[—–-]\s+.+)|(?:\s+\([^()]+\)))?$/);
   if (backtickMatch) {
-    return backtickMatch[1].trim();
+    return backtickMatch[2].trim();
   }
 
   const annotatedMatch = trimmed.match(/^(.+?)\s+[—–-]\s+.+$/);
@@ -275,6 +278,38 @@ function extractPathFromAnnotation(raw: string): string {
 
   // Fall back to the original behavior for already-plain paths.
   return trimmed.replace(/`/g, "");
+}
+
+/**
+ * Planning units sometimes use task.inputs for prose like "Current enum shape"
+ * instead of concrete file paths. Those entries should not fail path checks.
+ * Keep validation for anything that still looks like a real file reference:
+ * explicit backticks, globs, separators, dot-paths, or single-token basenames
+ * like Dockerfile.
+ */
+function shouldValidateInputAsPath(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+
+  if (/^`+[^`]+`+/.test(trimmed)) {
+    return true;
+  }
+
+  const candidate = extractPathFromAnnotation(trimmed);
+  if (!candidate) return false;
+
+  if (!/\s/.test(candidate)) {
+    return true;
+  }
+
+  return (
+    candidate.startsWith("/") ||
+    candidate.startsWith("./") ||
+    candidate.startsWith("../") ||
+    candidate.startsWith("~/") ||
+    /[\\/]/.test(candidate) ||
+    /[*?[\]{}]/.test(candidate)
+  );
 }
 
 /**
@@ -315,6 +350,7 @@ export function checkFilePathConsistency(
     for (const file of filesToCheck) {
       // Skip empty strings
       if (!file.trim()) continue;
+      if (!shouldValidateInputAsPath(file)) continue;
 
       // Normalize path for consistent comparison
       const normalizedFile = normalizeFilePath(file);
@@ -351,7 +387,7 @@ export function checkFilePathConsistency(
  */
 export function checkTaskOrdering(
   tasks: TaskRow[],
-  _basePath: string
+  basePath: string
 ): PreExecutionCheckJSON[] {
   const results: PreExecutionCheckJSON[] = [];
 
@@ -375,9 +411,13 @@ export function checkTaskOrdering(
     const filesToCheck = [...task.inputs];
 
     for (const file of filesToCheck) {
+      if (!shouldValidateInputAsPath(file)) continue;
+
       const normalizedFile = normalizeFilePath(file);
       const creator = fileCreators.get(normalizedFile);
-      if (creator && creator.index > i) {
+      const absolutePath = resolve(basePath, normalizedFile);
+      const existsOnDisk = existsSync(absolutePath);
+      if (creator && creator.index > i && !existsOnDisk) {
         // Task reads file that is created later — impossible ordering
         results.push({
           category: "file",

@@ -22,16 +22,17 @@ describe("resource-loader import path", () => {
     );
   });
 
-  test("uses createRequire to resolve resource-loader from package root", () => {
-    // The fix uses createRequire to find gsd-pi/package.json, then imports
-    // dist/resource-loader.js from there — works in both source and deployed.
+  test("uses GSD_PKG_ROOT to resolve resource-loader from package root", () => {
+    // The fix uses GSD_PKG_ROOT (set by loader.ts) to construct an absolute
+    // file URL to dist/resource-loader.js — works in both source and deployed,
+    // and on Windows where raw paths fail with ERR_UNSUPPORTED_ESM_URL_SCHEME.
     assert.ok(
-      autoSrc.includes('createRequire(import.meta.url)'),
-      "auto.ts should use createRequire to resolve resource-loader",
+      autoSrc.includes('process.env.GSD_PKG_ROOT'),
+      "auto.ts should use GSD_PKG_ROOT to resolve resource-loader",
     );
     assert.ok(
-      autoSrc.includes('resolve("gsd-pi/package.json")'),
-      "auto.ts should resolve gsd-pi package root via package.json",
+      autoSrc.includes('pathToFileURL'),
+      "auto.ts should convert path to file URL for cross-platform import()",
     );
   });
 });

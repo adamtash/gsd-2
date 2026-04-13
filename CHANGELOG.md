@@ -6,6 +6,126 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.72.0] - 2026-04-13
+
+### Added
+- **agents**: add GSD phase guard to prevent subagent/phase conflicts
+- **agents**: add 8 specialist subagents and slim pro agents
+- **tui**: improve gsd overlays, shortcuts, and notification flows
+
+### Fixed
+- **ci**: build artifacts in integration-tests job
+- **auto**: recover from OpenRouter credit affordability errors
+- **gsd**: cast unknown gate id in test to satisfy GateId type
+- **gsd**: route quality gates through a per-turn registry
+- **mcp**: expose every registered tool and fix SDK subpath resolution
+- **mcp**: resolve rebase regressions in stream-adapter
+- **mcp**: thread abort signals, restore tool fidelity, and fix subpath imports
+- **doctor**: skip key check for CLI-authenticated providers
+- **tui**: overlay subscription + Ctrl+Shift+P shortcut conflict
+- **models**: block unconfigured models from selection surfaces
+- **ollama**: clear footer status when provider unavailable
+- **gsd**: guard model override in minimal command contexts
+- **model**: require provider readiness for saved default selection
+- **gsd**: honor /gsd model as session override across dispatch
+- **gsd**: use milestone branch for merged worktree cleanup
+- **pi-coding-agent**: show full OAuth login URLs
+- **auto**: add structured cooldown error and bounded retry budget
+- **auto**: survive transient 429 credential cooldown in auto sessions
+- **pi-coding-agent**: match renderable tools case-insensitively
+- **headless**: keep idle timeout off during interactive tools
+- **claude-code-cli**: surface result text for success errors
+- **pi-ai**: use bearer auth for MiniMax Anthropic API
+- **gsd**: scope stuck-loop forensics to auto sessions
+- **gsd**: repair DB-only milestone unpark state
+- **gsd**: detach auto start from active turns
+- **cli**: include all internal node_modules entries in pnpm merged dir
+- **gsd**: enforce anti-fabrication turn-taking in discuss prompts
+- **cli**: address review findings for pnpm merged node_modules
+- **cli**: handle pnpm global installs by merging both node_modules roots
+- **gsd**: keep project db path after worktree enter
+- **gsd**: ignore prose inputs in pre-exec checks
+- **gsd**: read existing artifacts before write
+- **mcp-server**: use explicit sdk js subpaths
+- **cli**: preserve anthropic api provider
+- **gsd**: document flat task summary layout
+- **gsd**: require verification classes in validation prompts
+- **mcp-server**: open the DB for inline workflow tools
+- **gsd**: ignore pre-existing files in task ordering
+- **gsd**: detect property-value JSON invocation errors
+- **cli**: honor custom-provider defaults before onboarding
+- **gsd**: dedupe repeated notifications
+- **gsd**: open DB before bootstrap deriveState
+- **cli**: clean up stdin after sessions command readline interface closes
+- **gsd**: skip reverse dependents in dispatch fallback
+- **gsd**: classify plain connection-error as transient
+- **cli**: resolve hoisted node_modules for global installs
+- **pi-ai**: cast test tool fixtures to any for TSchema compatibility
+- **commands**: use specific validation reason in blocked-directory warning
+- **commands**: show friendly message when /gsd runs from $HOME instead of unhandled error
+
+### Changed
+- **ci**: run integration tests in parallel with build
+- **ci**: cache Next.js build artifacts with Blacksmith cache
+- sync package-lock.json version fields to 2.68.0
+- **pi-ai**: add cache_control breakpoints to tool definitions
+
+## [2.71.0] - 2026-04-11
+
+### Added
+- **mcp-server**: add secure_env_collect tool via MCP form elicitation
+
+### Fixed
+- **tui**: clear pinned output on message_end to prevent duplicate display
+- **tui**: clear pinned latest output on turn completion
+- **tui**: restore pinned output above editor during tool execution
+- TOCTOU file locking race conditions in event log and custom workflow graph
+- **tui**: mask secure extension input values in interactive mode
+- **claude-code**: harden MCP elicitation schema handling
+- **claude-code**: accept secure_env_collect MCP elicitation forms
+- **interactive**: keep MCP tool output ordered and restore secure prompt fallback
+- **interactive**: preserve MCP tool output stream ordering
+- **gsd**: resolve workflow MCP test typing regressions
+- **mcp**: return isError flag on workflow tool execution failures
+- **discuss**: add structuredQuestionsAvailable conditional to all gates
+- **discuss**: add multi-round questioning to new-project discuss phase
+- **gsd**: harden claude-code workflow MCP bootstrap
+- **web**: drop provisional pre-tool question text
+
+### Changed
+- extract deriveStateFromDb logic into composable helpers
+- **pr**: drop web-layer changes from MCP stream-order fix
+
+## [2.70.1] - 2026-04-11
+
+### Fixed
+- **routing**: address codex review — complete interactive bypass and accurate banner
+- **routing**: skip dynamic routing for interactive dispatches, always show model changes (#3962)
+- **ci**: trim windows portability integration load
+- **ci**: narrow windows portability coverage
+- **ci**: skip validate-pack in windows portability job
+- **ci**: unblock windows portability follow-up
+- **windows**: harden portability across runtime and tooling
+- **auto**: use pathToFileURL for cross-platform import and reconcile regression test
+- **auto**: resolve resource-loader.js from GSD_PKG_ROOT on resume (#3949)
+- **mcp-server**: importLocalModule resolves src/ paths from dist/ context
+- **gsd**: surface scoped doctor health warnings
+- **gsd**: skip skipped slices in milestone prompts
+- **gsd**: handle doubled-backtick pre-exec paths
+- **update**: fetch latest version from registry
+
+## [2.70.0] - 2026-04-10
+
+### Added
+- **mcp-server**: expose ask_user_questions via elicitation
+
+### Fixed
+- **pi-ai**: remove Anthropic OAuth flow for TOS compliance
+- **mcp-server**: hydrate model credentials into env
+- **mcp-server**: hydrate stored tool credentials on startup
+- **gsd**: auto-enable cmux when detected instead of prompting
+- **mcp-server**: URL scheme regex no longer matches Windows drive letters
+
 ## [2.69.0] - 2026-04-10
 
 ### Added
@@ -2684,7 +2804,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 - License updated to MIT
 
-[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.69.0...HEAD
+[Unreleased]: https://github.com/gsd-build/gsd-2/compare/v2.72.0...HEAD
+[2.72.0]: https://github.com/gsd-build/gsd-2/compare/v2.71.0...v2.72.0
+[2.71.0]: https://github.com/gsd-build/gsd-2/compare/v2.70.1...v2.71.0
+[2.70.1]: https://github.com/gsd-build/gsd-2/compare/v2.70.0...v2.70.1
+[2.70.0]: https://github.com/gsd-build/gsd-2/compare/v2.69.0...v2.70.0
 [2.69.0]: https://github.com/gsd-build/gsd-2/compare/v2.68.1...v2.69.0
 [2.68.1]: https://github.com/gsd-build/gsd-2/compare/v2.68.0...v2.68.1
 [2.68.0]: https://github.com/gsd-build/gsd-2/compare/v2.67.0...v2.68.0

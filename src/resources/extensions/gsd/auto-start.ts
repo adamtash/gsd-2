@@ -83,8 +83,9 @@ import { join } from "node:path";
 import { sep as pathSep } from "node:path";
 
 import { resolveProjectRootDbPath } from "./bootstrap/dynamic-tools.js";
-import { resolveDefaultSessionModel } from "./preferences-models.js";
+import { resolveDefaultSessionModel, resolveDynamicRoutingConfig } from "./preferences-models.js";
 import type { WorktreeResolver } from "./worktree-resolver.js";
+import { getSessionModelOverride } from "./session-model-override.js";
 
 export interface BootstrapDeps {
   shouldUseWorktreeIsolation: () => boolean;
@@ -266,13 +267,42 @@ export async function bootstrapAutoSession(
   // Capture the user's session model before guided-flow dispatch can apply a
   // phase-specific planning model for a discuss turn (#2829).
   //
-  // GSD PREFERENCES.md takes priority over the session model from settings.json
-  // (#3517).  The session model (ctx.model) comes from findInitialModel() which
-  // reads defaultProvider/defaultModel from ~/.gsd/agent/settings.json.  When
-  // the user has explicit model preferences in PREFERENCES.md, those should win.
+  // Precedence:
+  // 1) Explicit session override via /gsd model (this session)
+  // 2) GSD model preferences from PREFERENCES.md (validated against live auth)
+  // 3) Current session model from settings/session restore (if provider ready)
+  //
+  // This preserves #3517 defaults while honoring explicit runtime model
+  // selection for subsequent /gsd runs in the same session.
+  const manualSessionOverride = getSessionModelOverride(ctx.sessionManager.getSessionId());
   const preferredModel = resolveDefaultSessionModel(ctx.model?.provider);
-  const startModelSnapshot = preferredModel
-    ?? (ctx.model
+  // Validate the preferred model against the live registry + provider auth so
+  // an unconfigured PREFERENCES.md entry (no API key / OAuth) can't become the
+  // start-model snapshot. Without this, every subsequent unit would try to
+  // fall back to an unusable model.
+  let validatedPreferredModel: { provider: string; id: string } | undefined;
+  if (preferredModel) {
+    const { resolveModelId } = await import("./auto-model-selection.js");
+    const available = ctx.modelRegistry.getAvailable();
+    const match = resolveModelId(
+      `${preferredModel.provider}/${preferredModel.id}`,
+      available,
+      ctx.model?.provider,
+    );
+    if (match) {
+      validatedPreferredModel = { provider: match.provider, id: match.id };
+    } else {
+      ctx.ui.notify(
+        `Preferred model ${preferredModel.provider}/${preferredModel.id} from PREFERENCES.md is not configured; falling back to session default.`,
+        "warning",
+      );
+    }
+  }
+  const sessionModelReady =
+    ctx.model && ctx.modelRegistry.isProviderRequestReady(ctx.model.provider);
+  const startModelSnapshot = manualSessionOverride
+    ?? validatedPreferredModel
+    ?? (sessionModelReady && ctx.model
       ? { provider: ctx.model.provider, id: ctx.model.id }
       : null);
 
@@ -335,19 +365,9 @@ export async function bootstrapAutoSession(
       }
     }
 
-    if (ctx.model?.provider === "claude-code") {
-      try {
-        const { ensureProjectWorkflowMcpConfig } = await import("./mcp-project-config.js");
-        const result = ensureProjectWorkflowMcpConfig(base);
-        if (result.status !== "unchanged") {
-          ctx.ui.notify(`Claude Code MCP prepared at ${result.configPath}`, "info");
-        }
-      } catch (err) {
-        ctx.ui.notify(
-          `Claude Code MCP prep failed: ${err instanceof Error ? err.message : String(err)}`,
-          "warning",
-        );
-      }
+    {
+      const { prepareWorkflowMcpForProject } = await import("./workflow-mcp-auto-prep.js");
+      prepareWorkflowMcpForProject(ctx, base);
     }
 
     // Initialize GitServiceImpl
@@ -604,6 +624,9 @@ export async function bootstrapAutoSession(
     s.consecutiveCompleteBootstraps = 0;
 
     // ── Initialize session state ──
+    // Notify shared phase state so subagent conflict checks can fire
+    const { activateGSD: activateGSDPhaseState } = await import("../shared/gsd-phase-state.js");
+    activateGSDPhaseState();
     s.active = true;
     s.stepMode = requestedStepMode;
     s.verbose = verboseMode;
@@ -688,7 +711,7 @@ export async function bootstrapAutoSession(
     }
 
     // ── DB lifecycle ──
-    const gsdDbPath = join(s.basePath, ".gsd", "gsd.db");
+    const gsdDbPath = resolveProjectRootDbPath(s.basePath);
     const gsdDirPath = join(s.basePath, ".gsd");
     if (existsSync(gsdDirPath) && !existsSync(gsdDbPath)) {
       const hasDecisions = existsSync(join(gsdDirPath, "DECISIONS.md"));
@@ -741,6 +764,7 @@ export async function bootstrapAutoSession(
         id: startModelSnapshot.id,
       };
     }
+    s.manualSessionModelOverride = manualSessionOverride ?? null;
 
     // Apply worker model override from parallel orchestrator (#worker-model).
     // GSD_WORKER_MODEL is injected by the coordinator when parallel.worker_model
@@ -777,6 +801,39 @@ export async function bootstrapAutoSession(
         ? `Will loop through ${pendingCount} milestones.`
         : "Will loop until milestone complete.";
     ctx.ui.notify(`${modeLabel} started. ${scopeMsg}`, "info");
+
+    // Show dynamic routing status so users know upfront if models will be
+    // downgraded for simple tasks (#3962).
+    // Use the same effective logic as selectAndApplyModel: check flat-rate
+    // provider suppression and resolve the actual ceiling model.
+    const routingConfig = resolveDynamicRoutingConfig();
+    const startModelLabel = s.autoModeStartModel
+      ? `${s.autoModeStartModel.provider}/${s.autoModeStartModel.id}`
+      : ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "default";
+
+    // Flat-rate providers (e.g. GitHub Copilot, claude-code) suppress routing
+    // at dispatch time (#3453) — reflect that in the banner.
+    const { isFlatRateProvider } = await import("./auto-model-selection.js");
+    const effectiveProvider = s.autoModeStartModel?.provider ?? ctx.model?.provider;
+    const effectivelyEnabled = routingConfig.enabled
+      && !(effectiveProvider && isFlatRateProvider(effectiveProvider));
+
+    // The actual ceiling may come from tier_models.heavy, not the start model.
+    const effectiveCeiling = (routingConfig.enabled && routingConfig.tier_models?.heavy)
+      ? routingConfig.tier_models.heavy
+      : startModelLabel;
+
+    if (effectivelyEnabled) {
+      ctx.ui.notify(
+        `Dynamic routing: enabled — simple tasks may use cheaper models (ceiling: ${effectiveCeiling})`,
+        "info",
+      );
+    } else {
+      ctx.ui.notify(
+        `Dynamic routing: disabled — all tasks will use ${startModelLabel}`,
+        "info",
+      );
+    }
 
     updateSessionLock(
       lockBase(),

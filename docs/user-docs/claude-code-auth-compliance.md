@@ -86,18 +86,15 @@ Implication for GSD2:
 
 These are directionally correct because GSD is using the user's own local Claude Code installation as the authenticated Anthropic surface.
 
-### Medium/high-risk pieces
+### Medium/high-risk pieces — RESOLVED
 
-- `packages/pi-ai/src/utils/oauth/anthropic.ts`
-  Still implements a first-party-looking Anthropic OAuth flow for GSD itself using `claude.ai/oauth/authorize` and `platform.claude.com/v1/oauth/token`.
-- `packages/pi-ai/src/utils/oauth/index.ts`
-  Still registers `anthropicOAuthProvider` as a built-in OAuth provider.
-- `src/web/onboarding-service.ts`
-  Still advertises Anthropic as `supportsOAuth: true`, which keeps the web onboarding surface inconsistent with the TUI stance.
-- `packages/daemon/src/orchestrator.ts`
-  Reads Anthropic OAuth credentials from `~/.gsd/agent/auth.json`, refreshes them, and then uses the access token for Anthropic API calls.
+All Anthropic OAuth code paths have been removed:
 
-The key risk is not just stale UI. The repo still contains code paths where GSD can behave as a third-party Anthropic OAuth client and then convert that credential into direct API access.
+- `packages/pi-ai/src/utils/oauth/anthropic.ts` — **Deleted.** No longer implements Anthropic OAuth flow.
+- `packages/pi-ai/src/utils/oauth/index.ts` — **Updated.** `anthropicOAuthProvider` removed from built-in registry.
+- `src/web/onboarding-service.ts` — **Updated.** Anthropic set to `supportsOAuth: false`.
+- `packages/daemon/src/orchestrator.ts` — **Updated.** OAuth token refresh removed; requires `ANTHROPIC_API_KEY` env var.
+- `packages/pi-ai/src/providers/anthropic.ts` — **Updated.** OAuth client branch removed; `isOAuthToken` always returns false.
 
 ## Recommended Policy For GSD2
 
@@ -149,14 +146,14 @@ This is the best long-term UX because it separates:
 - API-billed usage
 - cloud-routed usage
 
-## Concrete Repo Follow-ups
+## Concrete Repo Follow-ups — COMPLETED
 
-1. Delete or disable `packages/pi-ai/src/utils/oauth/anthropic.ts`.
-2. Remove `anthropicOAuthProvider` from `packages/pi-ai/src/utils/oauth/index.ts`.
-3. Change `src/web/onboarding-service.ts` so Anthropic does not claim OAuth support.
-4. Audit `packages/daemon/src/orchestrator.ts` and any other callers that treat Anthropic OAuth access tokens as API credentials.
-5. Update docs/UI labels to prefer `anthropic-api` for direct API usage and `claude-code` for subscription usage.
-6. Add tests that fail if Anthropic subscription OAuth is reintroduced through the onboarding/provider registry.
+1. ~~Delete or disable `packages/pi-ai/src/utils/oauth/anthropic.ts`.~~ **Done** — file deleted.
+2. ~~Remove `anthropicOAuthProvider` from `packages/pi-ai/src/utils/oauth/index.ts`.~~ **Done.**
+3. ~~Change `src/web/onboarding-service.ts` so Anthropic does not claim OAuth support.~~ **Done.**
+4. ~~Audit `packages/daemon/src/orchestrator.ts` and any other callers that treat Anthropic OAuth access tokens as API credentials.~~ **Done** — daemon now requires `ANTHROPIC_API_KEY`.
+5. ~~Update docs/UI labels to prefer `anthropic-api` for direct API usage and `claude-code` for subscription usage.~~ **Done** — providers.md and getting-started.md updated.
+6. Add tests that fail if Anthropic subscription OAuth is reintroduced through the onboarding/provider registry. — **TODO.**
 
 ## Decision Rule
 

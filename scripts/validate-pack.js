@@ -3,8 +3,8 @@
 // Usage: npm run validate-pack (or node scripts/validate-pack.js)
 // Exit 0 = safe to publish, Exit 1 = broken package.
 
-import { execSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,8 +15,38 @@ const ROOT = resolve(__dirname, '..');
 
 let tarball = null;
 let installDir = null;
+let npmCacheDir = null;
+const DEFAULT_MAX_BUFFER = 50 * 1024 * 1024;
+
+function getNpmCommand() {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
+function runNpm(args, options = {}) {
+  return execFileSync(getNpmCommand(), args, {
+    cwd: ROOT,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: DEFAULT_MAX_BUFFER,
+    env: {
+      ...process.env,
+      npm_config_cache: npmCacheDir ?? process.env.npm_config_cache,
+    },
+    ...options,
+  });
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 try {
+  npmCacheDir = mkdtempSync(join(tmpdir(), 'validate-pack-npm-cache-'));
+  mkdirSync(npmCacheDir, { recursive: true });
+
   // --- Guard: workspace packages must not have @gsd/* cross-deps ---
   console.log('==> Checking workspace packages for @gsd/* cross-deps...');
   const workspaces = ['native', 'pi-agent-core', 'pi-ai', 'pi-coding-agent', 'pi-tui'];
@@ -42,12 +72,10 @@ try {
 
   // --- Pack tarball ---
   console.log('==> Packing tarball...');
-  const packOutput = execSync('npm pack --ignore-scripts', {
-    cwd: ROOT,
-    encoding: 'utf8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  const tarballName = packOutput.trim().split('\n').pop();
+  const packOutput = runNpm(['pack', '--json', '--ignore-scripts']);
+  const packEntries = JSON.parse(packOutput);
+  const packEntry = Array.isArray(packEntries) ? packEntries[0] : null;
+  const tarballName = packEntry?.filename;
   tarball = join(ROOT, tarballName);
 
   if (!existsSync(tarball)) {
@@ -55,12 +83,16 @@ try {
     process.exit(1);
   }
 
-  const stats = execSync(`du -h "${tarball}"`, { encoding: 'utf8' }).split('\t')[0].trim();
-  console.log(`==> Tarball: ${tarballName} (${stats} compressed)`);
+  const stats = statSync(tarball);
+  console.log(`==> Tarball: ${tarballName} (${formatBytes(stats.size)} compressed)`);
 
-  // --- Check critical files using tar listing ---
+  // --- Check critical files using npm pack metadata ---
   console.log('==> Checking critical files...');
-  const tarList = execSync(`tar tzf "${tarball}"`, { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+  const packedFiles = new Set(
+    Array.isArray(packEntry?.files)
+      ? packEntry.files.map((entry) => entry?.path).filter(Boolean)
+      : [],
+  );
 
   const requiredFiles = [
     'dist/loader.js',
@@ -73,7 +105,7 @@ try {
 
   let missing = false;
   for (const required of requiredFiles) {
-    if (!tarList.includes(`package/${required}`)) {
+    if (!packedFiles.has(required)) {
       console.log(`    MISSING: ${required}`);
       missing = true;
     }
@@ -91,10 +123,16 @@ try {
   writeFileSync(join(installDir, 'package.json'), JSON.stringify({ name: 'test-install', version: '1.0.0', private: true }, null, 2));
 
   try {
-    const installOutput = execSync(`npm install "${tarball}"`, {
+    const installOutput = execFileSync(getNpmCommand(), ['install', tarball], {
       cwd: installDir,
       encoding: 'utf8',
+      shell: process.platform === 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
+      maxBuffer: DEFAULT_MAX_BUFFER,
+      env: {
+        ...process.env,
+        npm_config_cache: npmCacheDir,
+      },
     });
     console.log(installOutput);
     console.log('==> Install succeeded.');
@@ -145,11 +183,12 @@ try {
     process.exit(1);
   }
   try {
-    const versionOutput = execSync(`node "${loaderPath}" -v`, {
+    const versionOutput = execFileSync(process.execPath, [loaderPath, '-v'], {
       cwd: installDir,
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000,
+      maxBuffer: DEFAULT_MAX_BUFFER,
     }).trim();
     console.log(`    gsd -v => ${versionOutput}`);
     if (!versionOutput.match(/^\d+\.\d+\.\d+/)) {
@@ -172,5 +211,8 @@ try {
   }
   if (tarball && existsSync(tarball)) {
     rmSync(tarball, { force: true });
+  }
+  if (npmCacheDir && existsSync(npmCacheDir)) {
+    rmSync(npmCacheDir, { recursive: true, force: true });
   }
 }

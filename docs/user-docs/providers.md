@@ -30,7 +30,7 @@ Step-by-step setup instructions for every LLM provider GSD supports. If you ran 
 
 | Provider | Auth Method | Env Variable | Config File |
 |----------|-------------|-------------|-------------|
-| Anthropic | OAuth or API key | `ANTHROPIC_API_KEY` | — |
+| Anthropic | API key | `ANTHROPIC_API_KEY` | — |
 | OpenAI | API key | `OPENAI_API_KEY` | — |
 | Google Gemini | API key | `GEMINI_API_KEY` | — |
 | OpenRouter | API key | `OPENROUTER_API_KEY` | Optional `models.json` |
@@ -55,24 +55,90 @@ Built-in providers have models pre-registered in GSD. You only need to supply cr
 
 **Recommended.** Anthropic models have the deepest integration: built-in web search, extended thinking, and prompt caching.
 
-**Option A — Browser sign-in (recommended):**
-
-```bash
-gsd config
-# Choose "Sign in with your browser" → "Anthropic (Claude)"
-```
-
-Or inside a session: `/login`
-
-**Option B — API key:**
+**Option A — API key (recommended):**
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-Or paste it during `gsd config` when prompted.
+Or run `gsd config` and paste your key when prompted.
 
 **Get a key:** [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
+
+**Option B — Claude Code CLI:**
+
+If you have a Claude Pro or Max subscription, you can authenticate through Anthropic's official Claude Code CLI. Install it, sign in with `claude`, then GSD will detect and route through it automatically:
+
+```bash
+# Install Claude Code CLI (see https://docs.anthropic.com/en/docs/claude-code)
+claude
+# Sign in when prompted, then start GSD
+gsd
+```
+
+GSD detects your local Claude Code installation and uses it as the authenticated Anthropic surface. This is the TOS-compliant path for subscription users — GSD never handles your subscription credentials directly.
+
+> **Note:** GSD does not support browser-based OAuth sign-in for Anthropic. Use an API key or the Claude Code CLI instead.
+
+**Option C — Use your Claude Pro/Max plan with GSD inside Claude Code:**
+
+If you already have a Claude Pro or Max subscription and want to use GSD's planning, execution, and milestone orchestration directly from Claude Code — without switching to a separate terminal — you can connect GSD as an MCP server. This gives Claude Code access to GSD's full workflow toolset via the [Model Context Protocol](https://modelcontextprotocol.io), so you get GSD's structured project management powered by your existing Claude plan.
+
+**Automatic setup (recommended):**
+
+When GSD detects a Claude Code model during startup, it automatically writes a `.mcp.json` file in your project root with the GSD workflow MCP server configured. No manual steps needed — just start GSD once with Claude Code as the provider and the config is created for you.
+
+You can also trigger this manually from inside a GSD session:
+
+```bash
+/gsd mcp init
+```
+
+This writes (or updates) the `gsd-workflow` entry in your project's `.mcp.json`. Claude Code discovers this file automatically on its next session start.
+
+**Manual setup:**
+
+If you prefer to configure it yourself, add GSD to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "gsd": {
+      "command": "npx",
+      "args": ["gsd-mcp-server"],
+      "env": {
+        "GSD_CLI_PATH": "/path/to/gsd"
+      }
+    }
+  }
+}
+```
+
+Or if `gsd-mcp-server` is installed globally:
+
+```json
+{
+  "mcpServers": {
+    "gsd": {
+      "command": "gsd-mcp-server"
+    }
+  }
+}
+```
+
+You can also add this to `~/.claude/settings.json` under `mcpServers` to make GSD available across all projects.
+
+**What's exposed:**
+
+The MCP server provides GSD's full workflow tool surface — milestone planning, task completion, slice management, roadmap reassessment, journal queries, and more. Session management tools (`gsd_execute`, `gsd_status`, `gsd_result`, `gsd_cancel`) let Claude Code start and monitor GSD auto-mode sessions. See [Commands → MCP Server Mode](./commands.md#mcp-server-mode) for the full tool list.
+
+**Verify the connection:**
+
+From inside a GSD session, check that the MCP server is reachable:
+
+```bash
+/gsd mcp status
+```
 
 ### OpenAI
 

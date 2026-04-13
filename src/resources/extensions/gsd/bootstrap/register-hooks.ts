@@ -45,6 +45,8 @@ export function registerHooks(pi: ExtensionAPI): void {
     resetToolCallLoopGuard();
     resetAskUserQuestionsCache();
     await syncServiceTierStatus(ctx);
+    const { prepareWorkflowMcpForProject } = await import("../workflow-mcp-auto-prep.js");
+    prepareWorkflowMcpForProject(ctx, process.cwd());
 
     // Apply show_token_cost preference (#1515)
     try {
@@ -85,6 +87,8 @@ export function registerHooks(pi: ExtensionAPI): void {
     resetAskUserQuestionsCache();
     clearDiscussionFlowState();
     await syncServiceTierStatus(ctx);
+    const { prepareWorkflowMcpForProject } = await import("../workflow-mcp-auto-prep.js");
+    prepareWorkflowMcpForProject(ctx, process.cwd());
     loadToolApiKeys();
   });
 
@@ -117,6 +121,8 @@ export function registerHooks(pi: ExtensionAPI): void {
       return { cancel: true };
     }
     const basePath = process.cwd();
+    const { ensureDbOpen } = await import("./dynamic-tools.js");
+    await ensureDbOpen();
     const state = await deriveState(basePath);
     if (!state.activeMilestone || !state.activeSlice || !state.activeTask) return;
     if (state.phase !== "executing") return;
@@ -175,14 +181,10 @@ export function registerHooks(pi: ExtensionAPI): void {
     // Only gate-shaped ask_user_questions calls should block execution.
     // The gate stays pending until the user selects the approval option.
     if (event.toolName === "ask_user_questions") {
-      const milestoneId = getDiscussionMilestoneId(discussionBasePath);
-      const inDiscussion = milestoneId !== null || isQueuePhaseActive();
-      if (inDiscussion) {
-        const questions: any[] = (event.input as any)?.questions ?? [];
-        const questionId = questions.find((question) => typeof question?.id === "string" && isGateQuestionId(question.id))?.id;
-        if (typeof questionId === "string") {
-          setPendingGate(questionId);
-        }
+      const questions: any[] = (event.input as any)?.questions ?? [];
+      const questionId = questions.find((question) => typeof question?.id === "string" && isGateQuestionId(question.id))?.id;
+      if (typeof questionId === "string") {
+        setPendingGate(questionId);
       }
     }
 
@@ -280,7 +282,6 @@ export function registerHooks(pi: ExtensionAPI): void {
     if (event.toolName !== "ask_user_questions") return;
     const milestoneId = getDiscussionMilestoneId(process.cwd());
     const queueActive = isQueuePhaseActive();
-    if (!milestoneId && !queueActive) return;
 
     const details = event.details as any;
 
@@ -313,13 +314,16 @@ export function registerHooks(pi: ExtensionAPI): void {
         // Only unlock the gate if the user selected the first option (confirmation).
         // Cross-references against the question's defined options to reject free-form "Other" text.
         const answer = details.response?.answers?.[question.id];
+        const inferredMilestoneId = extractDepthVerificationMilestoneId(question.id) ?? milestoneId;
         if (isDepthConfirmationAnswer(answer?.selected, question.options)) {
-          markDepthVerified(extractDepthVerificationMilestoneId(question.id) ?? milestoneId);
+          markDepthVerified(inferredMilestoneId);
+          clearPendingGate();
         }
         break;
       }
     }
 
+    if (!milestoneId && !queueActive) return;
     if (!milestoneId) return;
 
     const basePath = process.cwd();

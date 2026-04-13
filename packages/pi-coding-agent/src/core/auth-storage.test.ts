@@ -893,21 +893,111 @@ describe("AuthStorage — removeCredential edge cases", () => {
 	});
 });
 
-// ─── getEarliestCredentialRecovery ────────────────────────────────────────────
+// ─── getEarliestBackoffExpiry ─────────────────────────────────────────────────
 
-describe("AuthStorage — getEarliestCredentialRecovery", () => {
-	it("returns undefined when no rate limit info is cached", async () => {
+describe("AuthStorage — getEarliestBackoffExpiry", () => {
+	it("returns undefined when no credentials are configured for the provider", () => {
+		const storage = inMemory({});
+		assert.equal(storage.getEarliestBackoffExpiry("anthropic"), undefined);
+	});
+
+	it("returns undefined when credentials exist but none are backed off", () => {
+		const storage = inMemory({ anthropic: makeKey("sk-only") });
+		// No markUsageLimitReached call — credentialBackoff map is empty
+		assert.equal(storage.getEarliestBackoffExpiry("anthropic"), undefined);
+	});
+
+	it("returns a future timestamp when a single credential is backed off", async () => {
+		const storage = inMemory({ anthropic: makeKey("sk-only") });
+		await storage.getApiKey("anthropic");
+		storage.markUsageLimitReached("anthropic");
+
+		const expiry = storage.getEarliestBackoffExpiry("anthropic");
+		assert.ok(expiry !== undefined, "should return a timestamp");
+		assert.ok(expiry > Date.now(), "expiry should be in the future");
+	});
+
+	it("returns the earliest expiry when multiple credentials are backed off", async () => {
 		const storage = inMemory({
 			anthropic: [makeKey("sk-1"), makeKey("sk-2")],
 		});
-		const recovery = storage.getEarliestCredentialRecovery("anthropic");
-		assert.equal(recovery, undefined);
+
+		// Back off both credentials with the default rate_limit backoff (30 s)
+		await storage.getApiKey("anthropic"); // uses index 0
+		storage.markUsageLimitReached("anthropic"); // backs off index 0
+		await storage.getApiKey("anthropic"); // uses index 1
+		storage.markUsageLimitReached("anthropic"); // backs off index 1
+
+		const expiry = storage.getEarliestBackoffExpiry("anthropic");
+		assert.ok(expiry !== undefined, "should return a timestamp");
+		assert.ok(expiry > Date.now(), "expiry should be in the future");
 	});
 
-	it("returns undefined for unknown providers", () => {
-		const storage = inMemory({});
-		const recovery = storage.getEarliestCredentialRecovery("unknown");
-		assert.equal(recovery, undefined);
+	it("returns undefined after backed-off credentials expire (cleans up entries)", () => {
+		// Manually inject an already-expired backoff entry so we can test
+		// the cleanup path without actually waiting 30 seconds.
+		const storage = inMemory({ anthropic: makeKey("sk-only") });
+
+		// Access private credentialBackoff map via type assertion to inject expired entry
+		const credentialBackoff: Map<string, Map<number, number>> =
+			(storage as any).credentialBackoff;
+		const providerMap = new Map<number, number>();
+		// expiresAt in the past
+		providerMap.set(0, Date.now() - 1_000);
+		credentialBackoff.set("anthropic", providerMap);
+
+		// getEarliestBackoffExpiry should clean up the expired entry and return undefined
+		const expiry = storage.getEarliestBackoffExpiry("anthropic");
+		assert.equal(expiry, undefined);
+
+		// Confirm the expired entry was removed from the map
+		assert.equal(providerMap.size, 0, "expired entry should have been deleted");
+	});
+
+	it("returns undefined when provider is not in credentialBackoff map at all", () => {
+		const storage = inMemory({ openai: makeKey("sk-openai") });
+		// anthropic has no backoff map entry at all
+		assert.equal(storage.getEarliestBackoffExpiry("anthropic"), undefined);
+	});
+
+	it("only returns expiry for the requested provider, not other providers", async () => {
+		const storage = inMemory({
+			anthropic: makeKey("sk-ant"),
+			openai: makeKey("sk-oai"),
+		});
+
+		// Back off anthropic
+		await storage.getApiKey("anthropic");
+		storage.markUsageLimitReached("anthropic");
+
+		// openai is not backed off
+		assert.equal(storage.getEarliestBackoffExpiry("openai"), undefined);
+
+		// anthropic is backed off
+		const expiry = storage.getEarliestBackoffExpiry("anthropic");
+		assert.ok(expiry !== undefined);
+		assert.ok(expiry > Date.now());
+	});
+
+	it("returns the minimum expiry when one credential expires sooner than another", () => {
+		const storage = inMemory({
+			anthropic: [makeKey("sk-1"), makeKey("sk-2")],
+		});
+
+		const now = Date.now();
+		const nearExpiry = now + 5_000;   // expires in 5 s
+		const farExpiry  = now + 30_000;  // expires in 30 s
+
+		// Inject two different backoff expiries manually
+		const credentialBackoff: Map<string, Map<number, number>> =
+			(storage as any).credentialBackoff;
+		const providerMap = new Map<number, number>();
+		providerMap.set(0, nearExpiry);
+		providerMap.set(1, farExpiry);
+		credentialBackoff.set("anthropic", providerMap);
+
+		const expiry = storage.getEarliestBackoffExpiry("anthropic");
+		assert.equal(expiry, nearExpiry, "should return the nearest (smallest) expiry");
 	});
 });
 

@@ -42,9 +42,19 @@ test("system prompt references CODEBASE.md and /gsd codebase", () => {
   assert.match(prompt, /auto-refreshes it when tracked files change/i);
 });
 
+test("system prompt hard rules forbid fabricating user responses", () => {
+  const prompt = readPrompt("system");
+  assert.match(prompt, /never fabricate, simulate, or role-play user responses/i);
+  assert.match(prompt, /never generate markers like `?\[User\]`?, `?\[Human\]`?, `?User:`?/i);
+  assert.match(prompt, /ask one question round \(1-3 questions\), then stop and wait for the user's actual response/i);
+  assert.match(prompt, /ask_user_questions.*only valid structured user input/i);
+});
+
 test("discuss prompt allows implementation questions when they materially matter", () => {
   const prompt = readPrompt("discuss");
   assert.match(prompt, /Lead with experience, but ask implementation when it materially matters/i);
+  assert.match(prompt, /Never fabricate, simulate, or role-play user responses/i);
+  assert.match(prompt, /Ask one question round \(1-3 questions\) per turn, then stop and wait for the user's actual response/i);
   assert.match(prompt, /one gate, not two/i);
   assert.doesNotMatch(prompt, /Questions must be about the experience, not the implementation/i);
 });
@@ -56,12 +66,21 @@ test("guided discussion prompts avoid wrap-up prompts after every round", () => 
   assert.match(slicePrompt, /Do \*\*not\*\* ask a meta "ready to wrap up\?" question after every round/i);
   assert.doesNotMatch(milestonePrompt, /I think I have a solid picture of this milestone\. Ready to wrap up/i);
   assert.doesNotMatch(slicePrompt, /I think I have a solid picture of this slice\. Ready to wrap up/i);
+  assert.match(milestonePrompt, /Never fabricate or simulate user input/i);
+  assert.match(slicePrompt, /Never fabricate or simulate user input/i);
 });
 
 test("guided milestone discussion scopes depth verification to the milestone id", () => {
   const prompt = readPrompt("guided-discuss-milestone");
   assert.match(prompt, /depth_verification_\{\{milestoneId\}\}/, "depth verification id should include the milestone id");
   assert.doesNotMatch(prompt, /depth_verification_confirm" — this enables the write-gate downstream/i, "legacy global depth gate wording should be gone");
+});
+
+test("queue prompt requires waiting for user response between rounds", () => {
+  const prompt = readPrompt("queue");
+  assert.match(prompt, /Never fabricate or simulate user input during this discussion/i);
+  assert.match(prompt, /Ask 1-3 questions per round, then wait for the user's response before asking the next round\./i);
+  assert.doesNotMatch(prompt, /treat that as permission to continue/i);
 });
 
 test("guided-resume-task prompt preserves recovery state until work is superseded", () => {

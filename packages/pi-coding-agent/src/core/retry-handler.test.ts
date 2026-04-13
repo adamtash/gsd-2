@@ -208,7 +208,6 @@ describe("RetryHandler", () => {
 				},
 			},
 		});
-
 		const handler = new RetryHandler(deps);
 		const retried = await handler.handleRetryableError(errorMessage("429 Too Many Requests"));
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -223,6 +222,25 @@ describe("RetryHandler", () => {
 		const switchEvent = emittedEvents.find((event) => event.type === "fallback_provider_switch");
 		assert.ok(switchEvent);
 		assert.equal(switchEvent?.to, "openai/gpt-4.1");
+	});
+
+	it("classifies OpenRouter credit affordability errors as quota_exhausted", async () => {
+		const { deps, emittedEvents } = createMockDeps({
+			model: createMockModel("openrouter", "openai/gpt-5-pro"),
+			markUsageLimitReachedResult: false,
+			fallbackResult: null,
+		});
+
+		const handler = new RetryHandler(deps);
+		const msg = errorMessage(
+			"402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 329.",
+		);
+
+		const result = await handler.handleRetryableError(msg);
+
+		assert.equal(result, true, "affordability error should trigger credit-aware retry");
+		const retryStart = emittedEvents.find((e) => e.type === "auto_retry_start");
+		assert.ok(retryStart, "Expected immediate retry after reducing max tokens");
 	});
 
 	it("skips markUsageLimitReached when all credentials are already locally backed off", async () => {
@@ -369,6 +387,61 @@ describe("RetryHandler", () => {
 		});
 	});
 
+	describe("credit-aware maxTokens retry", () => {
+		it("reduces maxTokens on same model when provider reports affordable cap", async () => {
+			const expensiveModel = createMockModel("openrouter", "openai/gpt-5-pro");
+			expensiveModel.maxTokens = 128000;
+
+			const { deps, emittedEvents, onModelChangeFn } = createMockDeps({
+				model: expensiveModel,
+				markUsageLimitReachedResult: false,
+				fallbackResult: null,
+			});
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage(
+				"402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 329.",
+			);
+
+			const result = await handler.handleRetryableError(msg);
+			assert.equal(result, true, "should retry after reducing maxTokens");
+
+			const setModelCalls = (deps.agent.setModel as any).mock.calls;
+			assert.equal(setModelCalls.length, 1, "should apply one model downgrade");
+			const downgraded = setModelCalls[0].arguments[0] as Model<Api>;
+			assert.equal(downgraded.provider, "openrouter");
+			assert.equal(downgraded.id, "openai/gpt-5-pro");
+			assert.equal(downgraded.maxTokens, 297, "expected affordability cap with safety buffer");
+
+			assert.equal(onModelChangeFn.mock.calls.length, 1, "should notify about model update");
+			const switchEvent = emittedEvents.find((e) => e.type === "fallback_provider_switch");
+			assert.ok(switchEvent, "should emit model-adjustment event");
+			assert.ok(
+				String(switchEvent?.reason || "").includes("credit-aware retry"),
+				"switch reason should mention credit-aware retry",
+			);
+		});
+
+		it("does not mark credentials in cooldown for affordability quota errors", async () => {
+			const expensiveModel = createMockModel("openrouter", "openai/gpt-5-pro");
+			expensiveModel.maxTokens = 128000;
+
+			const { deps, markUsageLimitReached } = createMockDeps({
+				model: expensiveModel,
+				markUsageLimitReachedResult: false,
+				fallbackResult: null,
+			});
+
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage(
+				"402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 329.",
+			);
+
+			await handler.handleRetryableError(msg);
+			assert.equal(markUsageLimitReached.mock.calls.length, 0, "quota error should skip credential cooldown");
+		});
+	});
+
 	describe("isRetryableError", () => {
 		it("considers long-context entitlement error as retryable", () => {
 			const { deps } = createMockDeps();
@@ -388,6 +461,15 @@ describe("RetryHandler", () => {
 				'Please wait a moment and try again, or switch to a different provider.',
 			);
 			assert.equal(handler.isRetryableError(msg), false);
+		});
+
+		it("considers OpenRouter affordability credit errors as retryable", () => {
+			const { deps } = createMockDeps();
+			const handler = new RetryHandler(deps);
+			const msg = errorMessage(
+				"402 This request requires more credits, or fewer max_tokens. You requested up to 32000 tokens, but can only afford 329.",
+			);
+			assert.equal(handler.isRetryableError(msg), true);
 		});
 	});
 

@@ -18,10 +18,17 @@ test("update-cmd prints latest version before comparison (#3445)", () => {
   assert.ok(latestPrintIdx < comparisonIdx, "Must print latest BEFORE comparison");
 });
 
-test("update-cmd bypasses npm cache (#3445)", () => {
+test("update commands use the registry fetch helper instead of npm view (#3806)", () => {
   const src = readFileSync(join(__dirname, "..", "update-cmd.ts"), "utf-8");
+  const handlerSrc = readFileSync(join(__dirname, "..", "resources", "extensions", "gsd", "commands-handlers.ts"), "utf-8");
   assert.ok(
-    src.includes("npm_config_cache"),
-    "Must clear npm cache env to bypass stale registry data",
+    src.includes("fetchLatestVersionFromRegistry"),
+    "update-cmd should use the shared registry fetch helper",
   );
+  assert.ok(!src.includes("npm view "), "update-cmd should no longer shell out to npm view");
+  assert.ok(
+    handlerSrc.includes("fetchLatestVersionForCommand"),
+    "/gsd update should fetch the latest version through a registry helper too",
+  );
+  assert.ok(!handlerSrc.includes("npm view "), "/gsd update should no longer shell out to npm view");
 });

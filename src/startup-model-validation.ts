@@ -17,7 +17,6 @@ interface MinimalModel {
 }
 
 interface MinimalModelRegistry {
-  getAll(): MinimalModel[]
   getAvailable(): MinimalModel[]
 }
 
@@ -48,10 +47,14 @@ export function validateConfiguredModel(
 ): void {
   const configuredProvider = settingsManager.getDefaultProvider()
   const configuredModel = settingsManager.getDefaultModel()
-  const allModels = modelRegistry.getAll()
   const availableModels = modelRegistry.getAvailable()
+  // Check against availableModels (configured + auth'd) rather than getAll()
+  // so a stale default pointing at an unconfigured provider triggers the
+  // fallback. Previously a model present in the registry but missing API
+  // key / OAuth would satisfy configuredExists and survive startup, ending
+  // up as ctx.model even though it couldn't actually be used.
   const configuredExists = configuredProvider && configuredModel &&
-    allModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
+    availableModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
 
   if (!configuredModel || !configuredExists) {
     // Model not configured at all, or removed from registry — pick a fallback.

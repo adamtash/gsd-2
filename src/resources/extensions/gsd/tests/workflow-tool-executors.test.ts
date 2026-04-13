@@ -256,6 +256,28 @@ test("executePlanSlice writes task planning state and rendered plan artifacts", 
   }
 });
 
+test("executePlanSlice marks validation failures with isError", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+
+    const result = await inProjectDir(base, () => executePlanSlice({
+      milestoneId: "M001",
+      sliceId: "S01",
+      goal: "Trigger validation failure for empty tasks.",
+      tasks: [],
+    }, base));
+
+    assert.equal(result.isError, true);
+    assert.equal(result.details.operation, "plan_slice");
+    assert.match(String(result.details.error), /validation failed: tasks must be a non-empty array/);
+    assert.match(result.content[0].text, /Error planning slice:/);
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
 test("executeSliceComplete coerces string enrichment entries and writes summary/UAT artifacts", async () => {
   const base = makeTmpBase();
   try {

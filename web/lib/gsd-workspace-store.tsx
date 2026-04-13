@@ -5134,25 +5134,18 @@ export class GSDWorkspaceStore {
   }
 
   private handleToolExecutionStart(event: ToolExecutionStartEvent): void {
-    // Finalize any in-flight streaming content into segments before the tool runs
-    const pendingSegments: TurnSegment[] = []
-    if (this.state.streamingThinkingText.length > 0) {
-      pendingSegments.push({ kind: "thinking", content: this.state.streamingThinkingText })
-    }
-    if (this.state.streamingAssistantText.length > 0) {
-      pendingSegments.push({ kind: "text", content: this.state.streamingAssistantText })
-    }
     this.patchState({
       activeToolExecution: {
         id: event.toolCallId,
         name: event.toolName,
         args: (event as Record<string, unknown>).args as Record<string, unknown> | undefined,
       },
-      ...(pendingSegments.length > 0 ? {
-        currentTurnSegments: [...this.state.currentTurnSegments, ...pendingSegments],
-        streamingAssistantText: "",
-        streamingThinkingText: "",
-      } : {}),
+      // Treat pre-tool streaming text as ephemeral. Claude Code can emit
+      // provisional assistant text before a tool call, then replace it with
+      // the real final text after the tool completes. If we finalize that
+      // interim text here, the chat timeline shows stale text above the tool.
+      streamingAssistantText: "",
+      streamingThinkingText: "",
     })
   }
 

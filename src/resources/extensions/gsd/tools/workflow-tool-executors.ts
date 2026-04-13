@@ -8,6 +8,7 @@ import {
   _getAdapter,
   saveGateResult,
 } from "../gsd-db.js";
+import { GATE_REGISTRY } from "../gate-registry.js";
 import { saveArtifactToDb } from "../db-writer.js";
 import type { CompleteMilestoneParams } from "./complete-milestone.js";
 import { handleCompleteMilestone } from "./complete-milestone.js";
@@ -38,6 +39,7 @@ export function isSupportedSummaryArtifactType(
 export interface ToolExecutionResult {
   content: Array<{ type: "text"; text: string }>;
   details: Record<string, unknown>;
+  isError?: boolean;
 }
 
 export interface SummarySaveParams {
@@ -57,13 +59,15 @@ export async function executeSummarySave(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot save artifact." }],
       details: { operation: "save_summary", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   if (!isSupportedSummaryArtifactType(params.artifact_type)) {
     return {
       content: [{ type: "text", text: `Error: Invalid artifact_type "${params.artifact_type}". Must be one of: ${SUPPORTED_SUMMARY_ARTIFACT_TYPES.join(", ")}` }],
       details: { operation: "save_summary", error: "invalid_artifact_type" },
-    };
+    isError: true,
+      };
   }
   const contextGuard = shouldBlockContextArtifactSaveInSnapshot(
     loadWriteGateSnapshot(basePath),
@@ -75,7 +79,8 @@ export async function executeSummarySave(
     return {
       content: [{ type: "text", text: `Error saving artifact: ${contextGuard.reason ?? "context write blocked"}` }],
       details: { operation: "save_summary", error: "context_write_blocked" },
-    };
+    isError: true,
+      };
   }
   try {
     let relativePath: string;
@@ -108,7 +113,8 @@ export async function executeSummarySave(
     return {
       content: [{ type: "text", text: `Error saving artifact: ${msg}` }],
       details: { operation: "save_summary", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -163,7 +169,8 @@ export async function executeTaskComplete(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot complete task." }],
       details: { operation: "complete_task", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const coerced = { ...params };
@@ -176,6 +183,7 @@ export async function executeTaskComplete(
       return {
         content: [{ type: "text", text: `Error completing task: ${result.error}` }],
         details: { operation: "complete_task", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -194,7 +202,8 @@ export async function executeTaskComplete(
     return {
       content: [{ type: "text", text: `Error completing task: ${msg}` }],
       details: { operation: "complete_task", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -207,7 +216,8 @@ export async function executeSliceComplete(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot complete slice." }],
       details: { operation: "complete_slice", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const splitPair = (s: string): [string, string] => {
@@ -257,6 +267,7 @@ export async function executeSliceComplete(
       return {
         content: [{ type: "text", text: `Error completing slice: ${result.error}` }],
         details: { operation: "complete_slice", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -275,7 +286,8 @@ export async function executeSliceComplete(
     return {
       content: [{ type: "text", text: `Error completing slice: ${msg}` }],
       details: { operation: "complete_slice", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -288,7 +300,8 @@ export async function executeCompleteMilestone(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot complete milestone." }],
       details: { operation: "complete_milestone", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const sanitized = sanitizeCompleteMilestoneParams(params);
@@ -297,6 +310,7 @@ export async function executeCompleteMilestone(
       return {
         content: [{ type: "text", text: `Error completing milestone: ${result.error}` }],
         details: { operation: "complete_milestone", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -313,7 +327,8 @@ export async function executeCompleteMilestone(
     return {
       content: [{ type: "text", text: `Error completing milestone: ${msg}` }],
       details: { operation: "complete_milestone", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -326,7 +341,8 @@ export async function executeValidateMilestone(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot validate milestone." }],
       details: { operation: "validate_milestone", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const result = await handleValidateMilestone(params, basePath);
@@ -334,6 +350,7 @@ export async function executeValidateMilestone(
       return {
         content: [{ type: "text", text: `Error validating milestone: ${result.error}` }],
         details: { operation: "validate_milestone", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -351,7 +368,8 @@ export async function executeValidateMilestone(
     return {
       content: [{ type: "text", text: `Error validating milestone: ${msg}` }],
       details: { operation: "validate_milestone", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -364,7 +382,8 @@ export async function executeReassessRoadmap(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot reassess roadmap." }],
       details: { operation: "reassess_roadmap", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const result = await handleReassessRoadmap(params, basePath);
@@ -372,6 +391,7 @@ export async function executeReassessRoadmap(
       return {
         content: [{ type: "text", text: `Error reassessing roadmap: ${result.error}` }],
         details: { operation: "reassess_roadmap", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -390,7 +410,8 @@ export async function executeReassessRoadmap(
     return {
       content: [{ type: "text", text: `Error reassessing roadmap: ${msg}` }],
       details: { operation: "reassess_roadmap", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -403,15 +424,19 @@ export async function executeSaveGateResult(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available." }],
       details: { operation: "save_gate_result", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
 
-  const validGates = ["Q3", "Q4", "Q5", "Q6", "Q7", "Q8"];
+  // Source of truth: gate-registry.ts. Every declared GateId is accepted,
+  // so adding a new gate in one place automatically flows through here.
+  const validGates = Object.keys(GATE_REGISTRY);
   if (!validGates.includes(params.gateId)) {
     return {
       content: [{ type: "text", text: `Error: Invalid gateId "${params.gateId}". Must be one of: ${validGates.join(", ")}` }],
       details: { operation: "save_gate_result", error: "invalid_gate_id" },
-    };
+    isError: true,
+      };
   }
 
   const validVerdicts = ["pass", "flag", "omitted"];
@@ -419,7 +444,8 @@ export async function executeSaveGateResult(
     return {
       content: [{ type: "text", text: `Error: Invalid verdict "${params.verdict}". Must be one of: ${validVerdicts.join(", ")}` }],
       details: { operation: "save_gate_result", error: "invalid_verdict" },
-    };
+    isError: true,
+      };
   }
 
   try {
@@ -443,7 +469,8 @@ export async function executeSaveGateResult(
     return {
       content: [{ type: "text", text: `Error saving gate result: ${msg}` }],
       details: { operation: "save_gate_result", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -456,7 +483,8 @@ export async function executePlanMilestone(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot plan milestone." }],
       details: { operation: "plan_milestone", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const result = await handlePlanMilestone(params, basePath);
@@ -464,6 +492,7 @@ export async function executePlanMilestone(
       return {
         content: [{ type: "text", text: `Error planning milestone: ${result.error}` }],
         details: { operation: "plan_milestone", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -480,7 +509,8 @@ export async function executePlanMilestone(
     return {
       content: [{ type: "text", text: `Error planning milestone: ${msg}` }],
       details: { operation: "plan_milestone", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -493,7 +523,8 @@ export async function executePlanSlice(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot plan slice." }],
       details: { operation: "plan_slice", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const result = await handlePlanSlice(params, basePath);
@@ -501,6 +532,7 @@ export async function executePlanSlice(
       return {
         content: [{ type: "text", text: `Error planning slice: ${result.error}` }],
         details: { operation: "plan_slice", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -519,7 +551,8 @@ export async function executePlanSlice(
     return {
       content: [{ type: "text", text: `Error planning slice: ${msg}` }],
       details: { operation: "plan_slice", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -532,7 +565,8 @@ export async function executeReplanSlice(
     return {
       content: [{ type: "text", text: "Error: GSD database is not available. Cannot replan slice." }],
       details: { operation: "replan_slice", error: "db_unavailable" },
-    };
+    isError: true,
+      };
   }
   try {
     const result = await handleReplanSlice(params, basePath);
@@ -540,6 +574,7 @@ export async function executeReplanSlice(
       return {
         content: [{ type: "text", text: `Error replanning slice: ${result.error}` }],
         details: { operation: "replan_slice", error: result.error },
+      isError: true,
       };
     }
     return {
@@ -558,7 +593,8 @@ export async function executeReplanSlice(
     return {
       content: [{ type: "text", text: `Error replanning slice: ${msg}` }],
       details: { operation: "replan_slice", error: msg },
-    };
+    isError: true,
+      };
   }
 }
 
@@ -576,6 +612,7 @@ export async function executeMilestoneStatus(
       return {
         content: [{ type: "text", text: "Error: GSD database is not available." }],
         details: { operation: "milestone_status", error: "db_unavailable" },
+      isError: true,
       };
     }
 
@@ -624,6 +661,7 @@ export async function executeMilestoneStatus(
     return {
       content: [{ type: "text", text: `Error querying milestone status: ${msg}` }],
       details: { operation: "milestone_status", error: msg },
-    };
+    isError: true,
+      };
   }
 }

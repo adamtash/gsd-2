@@ -142,7 +142,7 @@ type ProviderFlowRuntime = {
 };
 
 const REQUIRED_PROVIDER_CATALOG: RequiredProviderCatalogEntry[] = [
-  { id: "anthropic", label: "Anthropic (Claude)", supportsApiKey: true, supportsOAuth: true, recommended: true },
+  { id: "anthropic", label: "Anthropic (Claude)", supportsApiKey: true, supportsOAuth: false, recommended: true },
   { id: "openai", label: "OpenAI", supportsApiKey: true, supportsOAuth: false },
   { id: "github-copilot", label: "GitHub Copilot", supportsApiKey: false, supportsOAuth: true },
   { id: "openai-codex", label: "ChatGPT Plus/Pro (Codex Subscription)", supportsApiKey: false, supportsOAuth: true },

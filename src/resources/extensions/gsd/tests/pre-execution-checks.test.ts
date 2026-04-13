@@ -1107,6 +1107,38 @@ describe("checkTaskOrdering false positive regression (#3677)", () => {
     assert.equal(results[0].target, "`later.ts` — needed first");
     assert.ok(results[0].message.includes("sequence violation"));
   });
+
+  test("existing on-disk files do not trigger ordering violations just because a later task modifies them", () => {
+    const tempDir = join(tmpdir(), `pre-exec-ordering-existing-file-${Date.now()}`);
+    const existingFile = "frontend/src/__tests__/ProcurementPage29.test.tsx";
+
+    mkdirSync(join(tempDir, "frontend", "src", "__tests__"), { recursive: true });
+    writeFileSync(join(tempDir, existingFile), "// existing file");
+
+    try {
+      const tasks = [
+        createTask({
+          id: "T01",
+          sequence: 0,
+          files: [],
+          inputs: ["`frontend/src/__tests__/ProcurementPage29.test.tsx` — contains matchMedia stub to remove"],
+          expected_output: [],
+        }),
+        createTask({
+          id: "T03",
+          sequence: 2,
+          files: [],
+          inputs: [],
+          expected_output: ["frontend/src/__tests__/ProcurementPage29.test.tsx"],
+        }),
+      ];
+
+      const results = checkTaskOrdering(tasks, tempDir);
+      assert.equal(results.length, 0, "Pre-existing files should not be treated as created by later tasks");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ─── checkFilePathConsistency additional edge cases ──────────────────────────
@@ -1173,6 +1205,23 @@ describe("checkFilePathConsistency additional edge cases", () => {
     });
     assert.equal(results!.length, 1, "Glob-pattern input that doesn't exist should produce a blocking result");
     assert.equal(results![0].blocking, true);
+  });
+
+  test("multi-word prose inputs are ignored by path consistency checks", () => {
+    const tasks = [
+      createTask({
+        id: "T01",
+        files: [],
+        inputs: [
+          "Current WIZARD_PRODUCTS enum",
+          "Existing test patterns in wizard.test.ts",
+        ],
+        expected_output: [],
+      }),
+    ];
+
+    const results = checkFilePathConsistency(tasks, "/tmp");
+    assert.equal(results.length, 0, "Prose planning hints should not be treated as missing file paths");
   });
 
   test("empty inputs array produces no results", () => {

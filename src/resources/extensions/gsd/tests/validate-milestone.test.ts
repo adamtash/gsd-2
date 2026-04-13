@@ -9,10 +9,11 @@ import { deriveState, isValidationTerminal } from "../state.ts";
 import { resolveExpectedArtifactPath, diagnoseExpectedArtifact } from "../auto-artifact-paths.ts";
 import { verifyExpectedArtifact, buildLoopRemediationSteps } from "../auto-recovery.ts";
 import { resolveDispatch, type DispatchContext } from "../auto-dispatch.ts";
-import { buildValidateMilestonePrompt } from "../auto-prompts.ts";
+import { buildCompleteMilestonePrompt, buildValidateMilestonePrompt } from "../auto-prompts.ts";
 import type { GSDState } from "../types.ts";
 import { clearPathCache } from "../paths.ts";
 import { clearParseCache } from "../files.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -25,7 +26,13 @@ function makeTmpBase(): string {
 function cleanup(base: string): void {
   clearPathCache();
   clearParseCache();
+  closeDatabase();
   try { rmSync(base, { recursive: true, force: true }); } catch { /* */ }
+}
+
+function openTestDb(base: string): void {
+  const dbPath = join(base, ".gsd", "gsd.db");
+  assert.equal(openDatabase(dbPath), true, "test DB should open");
 }
 
 function writeRoadmap(base: string, mid: string, content: string): void {
@@ -213,6 +220,85 @@ test("buildValidateMilestonePrompt inlines ASSESSMENT evidence instead of UAT sp
     assert.match(prompt, /S01 Assessment/i, "prompt should inline assessment evidence");
     assert.match(prompt, /verdict: PASS/i, "prompt should include the assessment verdict");
     assert.doesNotMatch(prompt, /UAT Spec/i, "prompt should not inline the raw UAT spec as evidence");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("buildCompleteMilestonePrompt skips skipped slices from DB-backed summary inlining", async () => {
+  const base = makeTmpBase();
+  try {
+    writeRoadmap(base, "M001", `# M001: Test Milestone
+
+## Vision
+Test
+
+## Success Criteria
+- It works
+
+## Slices
+
+- [x] **S01: First slice** \`risk:low\` \`depends:[]\`
+  > Done
+- [ ] **S02: Skipped slice** \`risk:low\` \`depends:[]\`
+  > Intentionally skipped
+
+## Boundary Map
+
+| From | To | Produces | Consumes |
+|------|-----|----------|----------|
+| S01  | terminal | output | nothing |
+`);
+    openTestDb(base);
+    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First slice", status: "complete", depends: [], sequence: 1 });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Skipped slice", status: "skipped", depends: [], sequence: 2 });
+    writeSliceSummary(base, "M001", "S01", "# S01 Summary\nDelivered.");
+
+    const prompt = await buildCompleteMilestonePrompt("M001", "Test Milestone", base);
+    assert.match(prompt, /S01 Summary/i, "prompt should inline non-skipped slice summaries");
+    assert.doesNotMatch(prompt, /### S02 Summary/i, "prompt should not inline skipped slice summaries");
+    assert.doesNotMatch(prompt, /not found — file does not exist yet/i, "prompt should not emit skipped-slice missing-file placeholders");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("buildValidateMilestonePrompt skips skipped slices from DB-backed summary inlining", async () => {
+  const base = makeTmpBase();
+  try {
+    writeRoadmap(base, "M001", `# M001: Test Milestone
+
+## Vision
+Test
+
+## Success Criteria
+- It works
+
+## Slices
+
+- [x] **S01: First slice** \`risk:low\` \`depends:[]\`
+  > Done
+- [ ] **S02: Skipped slice** \`risk:low\` \`depends:[]\`
+  > Intentionally skipped
+
+## Boundary Map
+
+| From | To | Produces | Consumes |
+|------|-----|----------|----------|
+| S01  | terminal | output | nothing |
+`);
+    openTestDb(base);
+    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First slice", status: "complete", depends: [], sequence: 1 });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Skipped slice", status: "skipped", depends: [], sequence: 2 });
+    writeSliceSummary(base, "M001", "S01", "# S01 Summary\nDelivered.");
+    writeSliceAssessment(base, "M001", "S01", "---\nverdict: PASS\n---\n# Assessment\nEvidence captured.");
+
+    const prompt = await buildValidateMilestonePrompt("M001", "Test Milestone", base);
+    assert.match(prompt, /S01 Summary/i, "prompt should inline non-skipped slice summaries");
+    assert.doesNotMatch(prompt, /### S02 Summary/i, "prompt should not inline skipped slice summaries");
+    assert.doesNotMatch(prompt, /not found — file does not exist yet/i, "prompt should not emit skipped-slice missing-file placeholders");
   } finally {
     cleanup(base);
   }

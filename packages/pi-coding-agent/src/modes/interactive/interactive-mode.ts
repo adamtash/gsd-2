@@ -171,6 +171,7 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private pinnedMessageContainer: Container;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private autocompleteProvider: CombinedAutocompleteProvider | undefined;
@@ -288,6 +289,7 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.pinnedMessageContainer = new Container();
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
@@ -493,6 +495,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
+		this.ui.addChild(this.pinnedMessageContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
@@ -1399,7 +1402,19 @@ export class InteractiveMode {
 	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+
+		// widgetContainerAbove: spacer collapses when pinned content is visible
+		// so there's no extra blank line between pinned output and the editor border.
+		this.widgetContainerAbove.clear();
+		const pinned = this.pinnedMessageContainer;
+		this.widgetContainerAbove.addChild({
+			render: () => pinned.children.length > 0 ? [] : [""],
+			invalidate: () => {},
+		});
+		for (const component of this.extensionWidgetsAbove.values()) {
+			this.widgetContainerAbove.addChild(component);
+		}
+
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
 	}
@@ -1634,7 +1649,7 @@ export class InteractiveMode {
 					this.hideExtensionInput();
 					resolve(undefined);
 				},
-				{ tui: this.ui, timeout: opts?.timeout },
+				{ tui: this.ui, timeout: opts?.timeout, secure: opts?.secure },
 			);
 
 			this.editorContainer.clear();
@@ -1773,7 +1788,7 @@ export class InteractiveMode {
 		} else if (type === "warning") {
 			this.showWarning(message);
 		} else {
-			this.showStatus(message);
+			this.showStatus(message, { append: true });
 		}
 	}
 
@@ -2040,12 +2055,13 @@ export class InteractiveMode {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
-	private showStatus(message: string): void {
+	private showStatus(message: string, options?: { append?: boolean }): void {
+		const append = options?.append ?? false;
 		const children = this.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
-		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
+		if (!append && last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
 			this.lastStatusText.setText(theme.fg("dim", message));
 			this.ui.requestRender();
 			return;
@@ -2267,6 +2283,7 @@ export class InteractiveMode {
 			updateFooter: true,
 			populateHistory: true,
 		});
+		this.populatePinnedFromMessages(context.messages);
 
 		// Show compaction info if session was compacted
 		const allEntries = this.sessionManager.getEntries();
@@ -2290,6 +2307,54 @@ export class InteractiveMode {
 		this.chatContainer.clear();
 		const context = this.sessionManager.buildSessionContext();
 		this.renderSessionContext(context);
+		this.populatePinnedFromMessages(context.messages);
+	}
+
+	/**
+	 * After rebuilding chat from messages, pin the last assistant text above the
+	 * editor if tool results would otherwise push it out of the viewport.
+	 */
+	private populatePinnedFromMessages(messages: AgentMessage[]): void {
+		this.pinnedMessageContainer.clear();
+
+		// Walk backwards to find the last assistant message
+		let lastAssistant: AssistantMessage | undefined;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg && "role" in msg && msg.role === "assistant") {
+				lastAssistant = msg as AssistantMessage;
+				break;
+			}
+		}
+		if (!lastAssistant) return;
+
+		// Check if any tool calls follow the last text block
+		const content = lastAssistant.content;
+		let lastTextIndex = -1;
+		let hasToolAfterText = false;
+		for (let i = 0; i < content.length; i++) {
+			if (content[i].type === "text") lastTextIndex = i;
+		}
+		if (lastTextIndex >= 0) {
+			for (let i = lastTextIndex + 1; i < content.length; i++) {
+				if (content[i].type === "toolCall" || content[i].type === "serverToolUse") {
+					hasToolAfterText = true;
+					break;
+				}
+			}
+		}
+		if (!hasToolAfterText || lastTextIndex < 0) return;
+
+		const textBlock = content[lastTextIndex] as { type: "text"; text: string };
+		const text = textBlock.text?.trim();
+		if (!text) return;
+
+		this.pinnedMessageContainer.addChild(
+			new DynamicBorder((str: string) => theme.fg("dim", str), "Latest Output"),
+		);
+		this.pinnedMessageContainer.addChild(
+			new Markdown(text, 1, 0, this.getMarkdownThemeWithSettings()),
+		);
 	}
 
 	// =========================================================================
