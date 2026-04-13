@@ -97,7 +97,13 @@ const REFRESH_INTERVAL_MS = 60_000;
 export function initHealthWidget(ctx: ExtensionContext): void {
   if (!ctx.hasUI) return;
 
-  const basePath = projectRoot();
+  let basePath: string;
+  try {
+    basePath = projectRoot();
+  } catch {
+    // Not in a valid project directory (e.g. launched from $HOME) — skip the widget.
+    return;
+  }
 
   // String-array fallback — used in RPC mode (factory is a no-op there)
   const initialData = loadHealthWidgetData(basePath);

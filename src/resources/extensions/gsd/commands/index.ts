@@ -12,6 +12,11 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
       const previousStderrSetting = setStderrLoggingEnabled(false);
       try {
         await handleGSDCommand(args, ctx, pi);
+      } catch (err) {
+        // Directory validation errors (e.g. running from $HOME) should surface as
+        // a user-visible notification rather than an unhandled extension crash.
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(msg, "error");
       } finally {
         setStderrLoggingEnabled(previousStderrSetting);
       }

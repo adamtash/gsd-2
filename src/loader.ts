@@ -131,6 +131,10 @@ const { Module } = await import('module');
 // GSD_VERSION — expose package version so extensions can display it
 process.env.GSD_VERSION = gsdVersion
 
+// GSD_PACKAGE_ROOT — absolute path to the gsd-pi package root, used by extensions to locate
+// bundled resources (e.g. dist/resource-loader.js) without depending on createRequire resolution.
+process.env.GSD_PACKAGE_ROOT = gsdRoot
+
 // GSD_BIN_PATH — absolute path to this loader (dist/loader.js), used by patched subagent
 // to spawn gsd instead of pi when dispatching workflow tasks
 process.env.GSD_BIN_PATH = process.argv[1]

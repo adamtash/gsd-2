@@ -1335,11 +1335,11 @@ export async function startAuto(
     // Re-sync managed resources on resume so long-lived auto sessions pick up
     // bundled extension updates before resume-time verification/state logic runs.
     const agentDir = process.env.GSD_CODING_AGENT_DIR || join(process.env.GSD_HOME || homedir(), ".gsd", "agent");
-    // Resolve resource-loader from the gsd-pi package root — the relative
-    // "../../../resource-loader.js" path only works from the source tree but
-    // breaks when extensions are deployed to ~/.gsd/agent/extensions/gsd/.
-    const _req = createRequire(import.meta.url);
-    const pkgRoot = dirname(_req.resolve("gsd-pi/package.json"));
+    // Resolve resource-loader from the gsd-pi package root. Use GSD_PACKAGE_ROOT (set by
+    // loader.ts from the correct gsdRoot) so this works when extensions are deployed to
+    // ~/.gsd/agent/extensions/gsd/ where createRequire cannot find gsd-pi in node_modules.
+    const pkgRoot = process.env.GSD_PACKAGE_ROOT
+      ?? dirname(createRequire(import.meta.url).resolve("gsd-pi/package.json"));
     const { initResources } = await import(join(pkgRoot, "dist", "resource-loader.js"));
     initResources(agentDir);
     // Open the project DB before rebuild/derive so resume uses DB-backed
